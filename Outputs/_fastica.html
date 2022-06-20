@@ -1,0 +1,630 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+Python implementation of the fast ICA algorithms.
+
+Reference: Tables 8.3 and 8.4 page 196 in the book:
+Independent Component Analysis, by  Hyvarinen et al.
+"""</span>
+
+<span class="comment"># Authors: Pierre Lafaye de Micheaux, Stefan van der Walt, Gael Varoquaux,</span>
+<span class="comment">#          Bertrand Thirion, Alexandre Gramfort, Denis A. Engemann</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="punctuation">,</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">FLOAT_DTYPES</span>
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'fastica', 'FastICA'</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_gs_decorrelation</span><span class="grouping">(</span><span class="identifier">w</span><span class="punctuation">,</span> <span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Orthonormalize w wrt the first j rows of W.
+
+    Parameters
+    ----------
+    w : ndarray of shape (n,)
+        Array to be orthogonalized
+
+    W : ndarray of shape (p, n)
+        Null space definition
+
+    j : int &lt; p
+        The no of (from the first) rows of Null space W wrt which w is
+        orthogonalized.
+
+    Notes
+    -----
+    Assumes that W is orthogonal
+    w changed in place
+    """</span>
+    <span class="identifier">w</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">multi_dot</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">w</span><span class="punctuation">,</span> <span class="identifier">W</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">j</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">W</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">j</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">w</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_sym_decorrelation</span><span class="grouping">(</span><span class="identifier">W</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Symmetric decorrelation
+    i.e. W &lt;- (W * W.T) ^{-1/2} * W
+    """</span>
+    <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">u</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">eigh</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">W</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="comment"># u (resp. s) contains the eigenvectors (resp. square roots of</span>
+    <span class="comment"># the eigenvalues) of W * W.T</span>
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">multi_dot</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">u</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">u</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">W</span><span class="grouping">]</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_ica_def</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">g</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">w_init</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Deflationary FastICA using fun approx to neg-entropy function
+
+    Used internally by FastICA.
+    """</span>
+
+    <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w_init</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="identifier">W</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">n_iter</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+    <span class="comment"># j is the index of the extracted component</span>
+    <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">w</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w_init</span><span class="grouping">[</span><span class="identifier">j</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">w</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">w</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">gwtx</span><span class="punctuation">,</span> <span class="identifier">g_wtx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">g</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">w</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="grouping">)</span>
+
+            <span class="identifier">w1</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">X</span> <span class="arithmetic-operator">*</span> <span class="identifier">gwtx</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">g_wtx</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">w</span>
+
+            <span class="identifier">_gs_decorrelation</span><span class="grouping">(</span><span class="identifier">w1</span><span class="punctuation">,</span> <span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">)</span>
+
+            <span class="identifier">w1</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">w1</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">lim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">w1</span> <span class="arithmetic-operator">*</span> <span class="identifier">w</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">w</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w1</span>
+            <span class="keyword">if</span> <span class="identifier">lim</span> <span class="relational-operator">&lt;</span> <span class="identifier">tol</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+
+        <span class="identifier">n_iter</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">W</span><span class="grouping">[</span><span class="identifier">j</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w</span>
+
+    <span class="keyword">return</span> <span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">n_iter</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_ica_par</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">g</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">w_init</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Parallel FastICA.
+
+    Used internally by FastICA --main loop
+
+    """</span>
+    <span class="identifier">W</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_sym_decorrelation</span><span class="grouping">(</span><span class="identifier">w_init</span><span class="grouping">)</span>
+    <span class="keyword">del</span> <span class="identifier">w_init</span>
+    <span class="identifier">p_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">ii</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">gwtx</span><span class="punctuation">,</span> <span class="identifier">g_wtx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">g</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="grouping">)</span>
+        <span class="identifier">W1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_sym_decorrelation</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">gwtx</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">p_</span>
+                                <span class="arithmetic-operator">-</span> <span class="identifier">g_wtx</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">W</span><span class="grouping">)</span>
+        <span class="keyword">del</span> <span class="identifier">gwtx</span><span class="punctuation">,</span> <span class="identifier">g_wtx</span>
+        <span class="comment"># builtin max, abs are faster than numpy counter parts.</span>
+        <span class="identifier">lim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">W1</span><span class="punctuation">,</span> <span class="identifier">W</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">W</span> <span class="arithmetic-assignment">=</span> <span class="identifier">W1</span>
+        <span class="keyword">if</span> <span class="identifier">lim</span> <span class="relational-operator">&lt;</span> <span class="identifier">tol</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'FastICA did not converge. Consider increasing '</span>
+                      <span class="string-literal">'tolerance or the maximum number of iterations.'</span><span class="punctuation">,</span>
+                      <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">ii</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+
+
+<span class="comment"># Some standard non-linear functions.</span>
+<span class="comment"># XXX: these should be optimized, as they can be a bottleneck.</span>
+<span class="keyword">def</span> <span class="identifier">_logcosh</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fun_args</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">'alpha'</span><span class="punctuation">,</span> <span class="float-literal">1.0</span><span class="grouping">)</span>  <span class="comment"># comment it out?</span>
+
+    <span class="identifier">x</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">alpha</span>
+    <span class="identifier">gx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">tanh</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">x</span><span class="grouping">)</span>  <span class="comment"># apply the tanh inplace</span>
+    <span class="identifier">g_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="comment"># XXX compute in chunks to avoid extra allocation</span>
+    <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">gx_i</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">gx</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># please don't vectorize.</span>
+        <span class="identifier">g_x</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">alpha</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">gx_i</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">gx</span><span class="punctuation">,</span> <span class="identifier">g_x</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_exp</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">exp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="grouping">(</span><span class="identifier">x</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="grouping">)</span>
+    <span class="identifier">gx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x</span> <span class="arithmetic-operator">*</span> <span class="identifier">exp</span>
+    <span class="identifier">g_x</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">x</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">exp</span>
+    <span class="keyword">return</span> <span class="identifier">gx</span><span class="punctuation">,</span> <span class="identifier">g_x</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_cube</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">return</span> <span class="identifier">x</span> <span class="arithmetic-operator">**</span> <span class="int-literal">3</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="int-literal">3</span> <span class="arithmetic-operator">*</span> <span class="identifier">x</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">fastica</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="string-literal">"parallel"</span><span class="punctuation">,</span> <span class="identifier">whiten</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">fun</span><span class="arithmetic-assignment">=</span><span class="string-literal">"logcosh"</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">200</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-04</span><span class="punctuation">,</span> <span class="identifier">w_init</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">n</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">compute_sources</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Perform Fast Independent Component Analysis.
+
+    Read more in the :ref:`User Guide &lt;ICA&gt;`.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Training vector, where n_samples is the number of samples and
+        n_features is the number of features.
+
+    n_components : int, default=None
+        Number of components to extract. If None no dimension reduction
+        is performed.
+
+    algorithm : {'parallel', 'deflation'}, default='parallel'
+        Apply a parallel or deflational FASTICA algorithm.
+
+    whiten : bool, default=True
+        If True perform an initial whitening of the data.
+        If False, the data is assumed to have already been
+        preprocessed: it should be centered, normed and white.
+        Otherwise you will get incorrect results.
+        In this case the parameter n_components will be ignored.
+
+    fun : {'logcosh', 'exp', 'cube'} or callable, default='logcosh'
+        The functional form of the G function used in the
+        approximation to neg-entropy. Could be either 'logcosh', 'exp',
+        or 'cube'.
+        You can also provide your own function. It should return a tuple
+        containing the value of the function, and of its derivative, in the
+        point. The derivative should be averaged along its last dimension.
+        Example:
+
+        def my_g(x):
+            return x ** 3, np.mean(3 * x ** 2, axis=-1)
+
+    fun_args : dict, default=None
+        Arguments to send to the functional form.
+        If empty or None and if fun='logcosh', fun_args will take value
+        {'alpha' : 1.0}
+
+    max_iter : int, default=200
+        Maximum number of iterations to perform.
+
+    tol : float, default=1e-04
+        A positive scalar giving the tolerance at which the
+        un-mixing matrix is considered to have converged.
+
+    w_init : ndarray of shape (n_components, n_components), default=None
+        Initial un-mixing array of dimension (n.comp,n.comp).
+        If None (default) then an array of normal r.v.'s is used.
+
+    random_state : int, RandomState instance or None, default=None
+        Used to initialize ``w_init`` when not specified, with a
+        normal distribution. Pass an int, for reproducible results
+        across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    return_X_mean : bool, default=False
+        If True, X_mean is returned too.
+
+    compute_sources : bool, default=True
+        If False, sources are not computed, but only the rotation matrix.
+        This can save memory when working with big data. Defaults to True.
+
+    return_n_iter : bool, default=False
+        Whether or not to return the number of iterations.
+
+    Returns
+    -------
+    K : ndarray of shape (n_components, n_features) or None
+        If whiten is 'True', K is the pre-whitening matrix that projects data
+        onto the first n_components principal components. If whiten is 'False',
+        K is 'None'.
+
+    W : ndarray of shape (n_components, n_components)
+        The square matrix that unmixes the data after whitening.
+        The mixing matrix is the pseudo-inverse of matrix ``W K``
+        if K is not None, else it is the inverse of W.
+
+    S : ndarray of shape (n_samples, n_components) or None
+        Estimated source matrix
+
+    X_mean : ndarray of shape (n_features,)
+        The mean over features. Returned only if return_X_mean is True.
+
+    n_iter : int
+        If the algorithm is "deflation", n_iter is the
+        maximum number of iterations run across all components. Else
+        they are just the number of iterations taken to converge. This is
+        returned only when return_n_iter is set to `True`.
+
+    Notes
+    -----
+
+    The data matrix X is considered to be a linear combination of
+    non-Gaussian (independent) components i.e. X = AS where columns of S
+    contain the independent components and A is a linear mixing
+    matrix. In short ICA attempts to `un-mix' the data by estimating an
+    un-mixing matrix W where ``S = W K X.``
+    While FastICA was proposed to estimate as many sources
+    as features, it is possible to estimate less by setting
+    n_components &lt; n_features. It this case K is not a square matrix
+    and the estimated A is the pseudo-inverse of ``W K``.
+
+    This implementation was originally made for data of shape
+    [n_features, n_samples]. Now the input is transposed
+    before the algorithm is applied. This makes it slightly
+    faster for Fortran-ordered input.
+
+    Implemented using FastICA:
+    *A. Hyvarinen and E. Oja, Independent Component Analysis:
+    Algorithms and Applications, Neural Networks, 13(4-5), 2000,
+    pp. 411-430*
+
+    """</span>
+
+    <span class="identifier">est</span> <span class="arithmetic-assignment">=</span> <span class="identifier">FastICA</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="identifier">algorithm</span><span class="punctuation">,</span>
+                  <span class="identifier">whiten</span><span class="arithmetic-assignment">=</span><span class="identifier">whiten</span><span class="punctuation">,</span> <span class="identifier">fun</span><span class="arithmetic-assignment">=</span><span class="identifier">fun</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="arithmetic-assignment">=</span><span class="identifier">fun_args</span><span class="punctuation">,</span>
+                  <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">w_init</span><span class="arithmetic-assignment">=</span><span class="identifier">w_init</span><span class="punctuation">,</span>
+                  <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+    <span class="identifier">sources</span> <span class="arithmetic-assignment">=</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">compute_sources</span><span class="arithmetic-assignment">=</span><span class="identifier">compute_sources</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">whiten</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">n</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">whitening_</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">mean_</span><span class="punctuation">,</span>
+                        <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">n_iter_</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">whitening_</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">whitening_</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">n_iter_</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">whitening_</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span>
+
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">n</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">n_iter_</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span><span class="punctuation">,</span> <span class="none-literal">None</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">n_iter_</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_unmixing</span><span class="punctuation">,</span> <span class="identifier">sources</span>
+
+
+<span class="keyword">class</span> <span class="identifier">FastICA</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""FastICA: a fast algorithm for Independent Component Analysis.
+
+    Read more in the :ref:`User Guide &lt;ICA&gt;`.
+
+    Parameters
+    ----------
+    n_components : int, default=None
+        Number of components to use. If None is passed, all are used.
+
+    algorithm : {'parallel', 'deflation'}, default='parallel'
+        Apply parallel or deflational algorithm for FastICA.
+
+    whiten : bool, default=True
+        If whiten is false, the data is already considered to be
+        whitened, and no whitening is performed.
+
+    fun : {'logcosh', 'exp', 'cube'} or callable, default='logcosh'
+        The functional form of the G function used in the
+        approximation to neg-entropy. Could be either 'logcosh', 'exp',
+        or 'cube'.
+        You can also provide your own function. It should return a tuple
+        containing the value of the function, and of its derivative, in the
+        point. Example::
+
+            def my_g(x):
+                return x ** 3, (3 * x ** 2).mean(axis=-1)
+
+    fun_args : dict, default=None
+        Arguments to send to the functional form.
+        If empty and if fun='logcosh', fun_args will take value
+        {'alpha' : 1.0}.
+
+    max_iter : int, default=200
+        Maximum number of iterations during fit.
+
+    tol : float, default=1e-4
+        Tolerance on update at each iteration.
+
+    w_init : ndarray of shape (n_components, n_components), default=None
+        The mixing matrix to be used to initialize the algorithm.
+
+    random_state : int, RandomState instance or None, default=None
+        Used to initialize ``w_init`` when not specified, with a
+        normal distribution. Pass an int, for reproducible results
+        across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        The linear operator to apply to the data to get the independent
+        sources. This is equal to the unmixing matrix when ``whiten`` is
+        False, and equal to ``np.dot(unmixing_matrix, self.whitening_)`` when
+        ``whiten`` is True.
+
+    mixing_ : ndarray of shape (n_features, n_components)
+        The pseudo-inverse of ``components_``. It is the linear operator
+        that maps independent sources to the data.
+
+    mean_ : ndarray of shape(n_features,)
+        The mean over features. Only set if `self.whiten` is True.
+
+    n_iter_ : int
+        If the algorithm is "deflation", n_iter is the
+        maximum number of iterations run across all components. Else
+        they are just the number of iterations taken to converge.
+
+    whitening_ : ndarray of shape (n_components, n_features)
+        Only set if whiten is 'True'. This is the pre-whitening matrix
+        that projects data onto the first `n_components` principal components.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.datasets import load_digits
+    &gt;&gt;&gt; from sklearn.decomposition import FastICA
+    &gt;&gt;&gt; X, _ = load_digits(return_X_y=True)
+    &gt;&gt;&gt; transformer = FastICA(n_components=7,
+    ...         random_state=0)
+    &gt;&gt;&gt; X_transformed = transformer.fit_transform(X)
+    &gt;&gt;&gt; X_transformed.shape
+    (1797, 7)
+
+    Notes
+    -----
+    Implementation based on
+    *A. Hyvarinen and E. Oja, Independent Component Analysis:
+    Algorithms and Applications, Neural Networks, 13(4-5), 2000,
+    pp. 411-430*
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="string-literal">'parallel'</span><span class="punctuation">,</span> <span class="identifier">whiten</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">fun</span><span class="arithmetic-assignment">=</span><span class="string-literal">'logcosh'</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">200</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-4</span><span class="punctuation">,</span>
+                 <span class="identifier">w_init</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">max_iter</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"max_iter should be greater than 1, got "</span>
+                             <span class="string-literal">"(max_iter={})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">algorithm</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span> <span class="arithmetic-assignment">=</span> <span class="identifier">whiten</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fun</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun_args</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fun_args</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w_init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">compute_sources</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples
+            and n_features is the number of features.
+
+        compute_sources : bool, default=False
+            If False, sources are not computes but only the rotation matrix.
+            This can save memory when working with big data. Defaults to False.
+
+        Returns
+        -------
+            X_new : ndarray of shape (n_samples, n_components)
+        """</span>
+        <span class="identifier">XT</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">FLOAT_DTYPES</span><span class="punctuation">,</span>
+                                 <span class="identifier">ensure_min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="identifier">fun_args</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun_args</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun_args</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fun_args</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">'alpha'</span><span class="punctuation">,</span> <span class="float-literal">1.0</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="int-literal">1</span> <span class="relational-operator">&lt;=</span> <span class="identifier">alpha</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'alpha must be in [1,2]'</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span> <span class="relational-operator">==</span> <span class="string-literal">'logcosh'</span><span class="punctuation">:</span>
+            <span class="identifier">g</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_logcosh</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span> <span class="relational-operator">==</span> <span class="string-literal">'exp'</span><span class="punctuation">:</span>
+            <span class="identifier">g</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_exp</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span> <span class="relational-operator">==</span> <span class="string-literal">'cube'</span><span class="punctuation">:</span>
+            <span class="identifier">g</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_cube</span>
+        <span class="keyword">elif</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">def</span> <span class="identifier">g</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">fun_args</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">fun_args</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">exc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ValueError</span> <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">TypeError</span>
+            <span class="keyword">raise</span> <span class="identifier">exc</span><span class="grouping">(</span>
+                <span class="string-literal">"Unknown function %r;"</span>
+                <span class="string-literal">" should be one of 'logcosh', 'exp', 'cube' or callable"</span>
+                <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fun</span>
+            <span class="grouping">)</span>
+
+        <span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">XT</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+        <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span> <span class="logical-operator">and</span> <span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'Ignoring n_components with whiten=False.'</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">n_components</span> <span class="relational-operator">&gt;</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span>
+                <span class="string-literal">'n_components is too large: it will be set to %s'</span>
+                <span class="arithmetic-operator">%</span> <span class="identifier">n_components</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="punctuation">:</span>
+            <span class="comment"># Centering the features of X</span>
+            <span class="identifier">X_mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">XT</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">XT</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">X_mean</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+
+            <span class="comment"># Whitening and preprocessing by PCA</span>
+            <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">XT</span><span class="punctuation">,</span> <span class="identifier">full_matrices</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">check_finite</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+            <span class="keyword">del</span> <span class="identifier">_</span>
+            <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">u</span> <span class="arithmetic-operator">/</span> <span class="identifier">d</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span>  <span class="comment"># see (6.33) p.140</span>
+            <span class="keyword">del</span> <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">d</span>
+            <span class="identifier">X1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">XT</span><span class="grouping">)</span>
+            <span class="comment"># see (13.6) p.267 Here X1 is white and data</span>
+            <span class="comment"># in X has been projected onto a subspace by PCA</span>
+            <span class="identifier">X1</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># X must be casted to floats to avoid typing issues with numpy</span>
+            <span class="comment"># 2.0 and the line below</span>
+            <span class="identifier">X1</span> <span class="arithmetic-assignment">=</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">XT</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>  <span class="comment"># copy has been taken care of</span>
+
+        <span class="identifier">w_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w_init</span>
+        <span class="keyword">if</span> <span class="identifier">w_init</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">w_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">normal</span><span class="grouping">(</span>
+                <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X1</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">w_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">w_init</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">w_init</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="relational-operator">!=</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">'w_init has invalid shape -- should be %(shape)s'</span>
+                    <span class="arithmetic-operator">%</span> <span class="grouping">{</span><span class="string-literal">'shape'</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+
+        <span class="identifier">kwargs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">'tol'</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">,</span>
+                  <span class="string-literal">'g'</span><span class="punctuation">:</span> <span class="identifier">g</span><span class="punctuation">,</span>
+                  <span class="string-literal">'fun_args'</span><span class="punctuation">:</span> <span class="identifier">fun_args</span><span class="punctuation">,</span>
+                  <span class="string-literal">'max_iter'</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                  <span class="string-literal">'w_init'</span><span class="punctuation">:</span> <span class="identifier">w_init</span><span class="grouping">}</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="relational-operator">==</span> <span class="string-literal">'parallel'</span><span class="punctuation">:</span>
+            <span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">n_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ica_par</span><span class="grouping">(</span><span class="identifier">X1</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="relational-operator">==</span> <span class="string-literal">'deflation'</span><span class="punctuation">:</span>
+            <span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">n_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ica_def</span><span class="grouping">(</span><span class="identifier">X1</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Invalid algorithm: must be either `parallel` or'</span>
+                             <span class="string-literal">' `deflation`.'</span><span class="grouping">)</span>
+        <span class="keyword">del</span> <span class="identifier">X1</span>
+
+        <span class="keyword">if</span> <span class="identifier">compute_sources</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="punctuation">:</span>
+                <span class="identifier">S</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">multi_dot</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">XT</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">S</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">XT</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">S</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_iter</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">W</span><span class="punctuation">,</span> <span class="identifier">K</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_mean</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whitening_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">W</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mixing_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">pinv</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">,</span> <span class="identifier">check_finite</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_unmixing</span> <span class="arithmetic-assignment">=</span> <span class="identifier">W</span>
+
+        <span class="keyword">return</span> <span class="identifier">S</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model and recover the sources from X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples
+            and n_features is the number of features.
+
+        y : Ignored
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">compute_sources</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model to X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples
+            and n_features is the number of features.
+
+        y : Ignored
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">compute_sources</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Recover the sources from X (apply the unmixing matrix).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Data to transform, where n_samples is the number of samples
+            and n_features is the number of features.
+
+        copy : bool, default=True
+            If False, data passed to fit can be overwritten. Defaults to True.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">copy</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">FLOAT_DTYPES</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">inverse_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Transform the sources back to the mixed data (apply mixing matrix).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_components)
+            Sources, where n_samples is the number of samples
+            and n_components is the number of components.
+        copy : bool, default=True
+            If False, data passed to fit are overwritten. Defaults to True.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_features)
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">copy</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">FLOAT_DTYPES</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mixing_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="keyword">return</span> <span class="identifier">X</span>
+
+    </pre>
+  </body>
+</html>

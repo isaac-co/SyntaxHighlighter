@@ -1,0 +1,606 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+======================================
+Tweedie regression on insurance claims
+======================================
+
+This example illustrates the use of Poisson, Gamma and Tweedie regression on
+the `French Motor Third-Party Liability Claims dataset
+&lt;https://www.openml.org/d/41214&gt;`_, and is inspired by an R tutorial [1]_.
+
+In this dataset, each sample corresponds to an insurance policy, i.e. a
+contract within an insurance company and an individual (policyholder).
+Available features include driver age, vehicle age, vehicle power, etc.
+
+A few definitions: a *claim* is the request made by a policyholder to the
+insurer to compensate for a loss covered by the insurance. The *claim amount*
+is the amount of money that the insurer must pay. The *exposure* is the
+duration of the insurance coverage of a given policy, in years.
+
+Here our goal is to predict the expected
+value, i.e. the mean, of the total claim amount per exposure unit also
+referred to as the pure premium.
+
+There are several possibilities to do that, two of which are:
+
+1. Model the number of claims with a Poisson distribution, and the average
+   claim amount per claim, also known as severity, as a Gamma distribution
+   and multiply the predictions of both in order to get the total claim
+   amount.
+2. Model the total claim amount per exposure directly, typically with a Tweedie
+   distribution of Tweedie power :math:`p \\in (1, 2)`.
+
+In this example we will illustrate both approaches. We start by defining a few
+helper functions for loading the data and visualizing results.
+
+.. [1]  A. Noll, R. Salzmann and M.V. Wuthrich, Case Study: French Motor
+    Third-Party Liability Claims (November 8, 2018). `doi:10.2139/ssrn.3164764
+    &lt;http://dx.doi.org/10.2139/ssrn.3164764&gt;`_
+
+"""</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">__doc__</span><span class="grouping">)</span>
+
+<span class="comment"># Authors: Christian Lorentzen &lt;lorentzen.ch@gmail.com&gt;</span>
+<span class="comment">#          Roman Yurchak &lt;rth.yurchak@gmail.com&gt;</span>
+<span class="comment">#          Olivier Grisel &lt;olivier.grisel@ensta.org&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+<span class="keyword">from</span> <span class="identifier">functools</span> <span class="keyword">import</span> <span class="identifier">partial</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>
+<span class="keyword">import</span> <span class="identifier">pandas</span> <span class="keyword">as</span> <span class="identifier">pd</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">datasets</span> <span class="keyword">import</span> <span class="identifier">fetch_openml</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">compose</span> <span class="keyword">import</span> <span class="identifier">ColumnTransformer</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">PoissonRegressor</span><span class="punctuation">,</span> <span class="identifier">GammaRegressor</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">TweedieRegressor</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">mean_tweedie_deviance</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">model_selection</span> <span class="keyword">import</span> <span class="identifier">train_test_split</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">pipeline</span> <span class="keyword">import</span> <span class="identifier">make_pipeline</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">FunctionTransformer</span><span class="punctuation">,</span> <span class="identifier">OneHotEncoder</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">StandardScaler</span><span class="punctuation">,</span> <span class="identifier">KBinsDiscretizer</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">mean_absolute_error</span><span class="punctuation">,</span> <span class="identifier">mean_squared_error</span><span class="punctuation">,</span> <span class="identifier">auc</span>
+
+
+<span class="keyword">def</span> <span class="identifier">load_mtpl2</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">100000</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Fetch the French Motor Third-Party Liability Claims dataset.
+
+    Parameters
+    ----------
+    n_samples: int, default=100000
+      number of samples to select (for faster run time). Full dataset has
+      678013 samples.
+    """</span>
+    <span class="comment"># freMTPL2freq dataset from https://www.openml.org/d/41214</span>
+    <span class="identifier">df_freq</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fetch_openml</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="arithmetic-assignment">=</span><span class="int-literal">41214</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="grouping">[</span><span class="string-literal">'data'</span><span class="grouping">]</span>
+    <span class="identifier">df_freq</span><span class="grouping">[</span><span class="string-literal">'IDpol'] = df_freq['IDpol'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">int</span><span class="grouping">)</span>
+    <span class="identifier">df_freq</span><span class="punctuation">.</span><span class="identifier">set_index</span><span class="grouping">(</span><span class="string-literal">'IDpol'</span><span class="punctuation">,</span> <span class="identifier">inplace</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="comment"># freMTPL2sev dataset from https://www.openml.org/d/41215</span>
+    <span class="identifier">df_sev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fetch_openml</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="arithmetic-assignment">=</span><span class="int-literal">41215</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="grouping">[</span><span class="string-literal">'data'</span><span class="grouping">]</span>
+
+    <span class="comment"># sum ClaimAmount over identical IDs</span>
+    <span class="identifier">df_sev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df_sev</span><span class="punctuation">.</span><span class="identifier">groupby</span><span class="grouping">(</span><span class="string-literal">'IDpol'</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="identifier">df</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df_freq</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">df_sev</span><span class="punctuation">,</span> <span class="identifier">how</span><span class="arithmetic-assignment">=</span><span class="string-literal">"left"</span><span class="grouping">)</span>
+    <span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"ClaimAmount"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">fillna</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">inplace</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="comment"># unquote string fields</span>
+    <span class="keyword">for</span> <span class="identifier">column_name</span> <span class="relational-operator">in</span> <span class="identifier">df</span><span class="punctuation">.</span><span class="identifier">columns</span><span class="grouping">[</span><span class="identifier">df</span><span class="punctuation">.</span><span class="identifier">dtypes</span><span class="punctuation">.</span><span class="identifier">values</span> <span class="relational-operator">==</span> <span class="identifier">object</span><span class="grouping">]</span><span class="punctuation">:</span>
+        <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">column_name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">column_name</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">str</span><span class="punctuation">.</span><span class="identifier">strip</span><span class="grouping">(</span><span class="string-literal">"'"</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">df</span><span class="punctuation">.</span><span class="identifier">iloc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_samples</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">plot_obs_pred</span><span class="grouping">(</span><span class="identifier">df</span><span class="punctuation">,</span> <span class="identifier">feature</span><span class="punctuation">,</span> <span class="identifier">weight</span><span class="punctuation">,</span> <span class="identifier">observed</span><span class="punctuation">,</span> <span class="identifier">predicted</span><span class="punctuation">,</span> <span class="identifier">y_label</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                  <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">fill_legend</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Plot observed and predicted - aggregated per feature level.
+
+    Parameters
+    ----------
+    df : DataFrame
+        input data
+    feature: str
+        a column name of df for the feature to be plotted
+    weight : str
+        column name of df with the values of weights or exposure
+    observed : str
+        a column name of df with the observed target
+    predicted : DataFrame
+        a dataframe, with the same index as df, with the predicted target
+    fill_legend : bool, default=False
+        whether to show fill_between legend
+    """</span>
+    <span class="comment"># aggregate observed and predicted variables by feature level</span>
+    <span class="identifier">df_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="identifier">feature</span><span class="punctuation">,</span> <span class="identifier">weight</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">df_</span><span class="grouping">[</span><span class="string-literal">"observed"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">observed</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">weight</span><span class="grouping">]</span>
+    <span class="identifier">df_</span><span class="grouping">[</span><span class="string-literal">"predicted"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predicted</span> <span class="arithmetic-operator">*</span> <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">weight</span><span class="grouping">]</span>
+    <span class="identifier">df_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+        <span class="identifier">df_</span><span class="punctuation">.</span><span class="identifier">groupby</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">feature</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">weight</span><span class="punctuation">,</span> <span class="string-literal">"observed", "predicted"</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="grouping">(</span><span class="identifier">observed</span><span class="arithmetic-assignment">=</span><span class="keyword">lambda</span> <span class="identifier">x</span><span class="punctuation">:</span> <span class="identifier">x</span><span class="grouping">[</span><span class="string-literal">"observed"</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">x</span><span class="grouping">[</span><span class="identifier">weight</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="grouping">(</span><span class="identifier">predicted</span><span class="arithmetic-assignment">=</span><span class="keyword">lambda</span> <span class="identifier">x</span><span class="punctuation">:</span> <span class="identifier">x</span><span class="grouping">[</span><span class="string-literal">"predicted"</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">x</span><span class="grouping">[</span><span class="identifier">weight</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="grouping">)</span>
+
+    <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df_</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="string-literal">"observed", "predicted"]].plot(style="."</span><span class="punctuation">,</span> <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="grouping">)</span>
+    <span class="identifier">y_max</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df_</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="string-literal">"observed", "predicted"</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">values</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="float-literal">0.8</span>
+    <span class="identifier">p2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">fill_between</span><span class="grouping">(</span>
+        <span class="identifier">df_</span><span class="punctuation">.</span><span class="identifier">index</span><span class="punctuation">,</span>
+        <span class="int-literal">0</span><span class="punctuation">,</span>
+        <span class="identifier">y_max</span> <span class="arithmetic-operator">*</span> <span class="identifier">df_</span><span class="grouping">[</span><span class="identifier">weight</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">df_</span><span class="grouping">[</span><span class="identifier">weight</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">values</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">"g"</span><span class="punctuation">,</span>
+        <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.1</span><span class="punctuation">,</span>
+    <span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">fill_legend</span><span class="punctuation">:</span>
+        <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">legend</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">p2</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="string-literal">"{} distribution"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">feature</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span>
+        <span class="identifier">ylabel</span><span class="arithmetic-assignment">=</span><span class="identifier">y_label</span> <span class="keyword">if</span> <span class="identifier">y_label</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="none-literal">None</span><span class="punctuation">,</span>
+        <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="identifier">title</span> <span class="keyword">if</span> <span class="identifier">title</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="string-literal">"Train: Observed vs Predicted"</span><span class="punctuation">,</span>
+    <span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">score_estimator</span><span class="grouping">(</span>
+    <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">df_train</span><span class="punctuation">,</span> <span class="identifier">df_test</span><span class="punctuation">,</span> <span class="identifier">target</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="punctuation">,</span>
+    <span class="identifier">tweedie_powers</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+<span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Evaluate an estimator on train and test sets with different metrics"""</span>
+
+    <span class="identifier">metrics</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+        <span class="grouping">(</span><span class="string-literal">"D² explained"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span>   <span class="comment"># Use default scorer if it exists</span>
+        <span class="grouping">(</span><span class="string-literal">"mean abs. error"</span><span class="punctuation">,</span> <span class="identifier">mean_absolute_error</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="grouping">(</span><span class="string-literal">"mean squared error"</span><span class="punctuation">,</span> <span class="identifier">mean_squared_error</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="identifier">tweedie_powers</span><span class="punctuation">:</span>
+        <span class="identifier">metrics</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">[</span><span class="grouping">(</span>
+            <span class="string-literal">"mean Tweedie dev p={:.4f}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">power</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">mean_tweedie_deviance</span><span class="punctuation">,</span> <span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="identifier">power</span><span class="grouping">)</span>
+        <span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">power</span> <span class="relational-operator">in</span> <span class="identifier">tweedie_powers</span><span class="grouping">]</span>
+
+    <span class="identifier">res</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">subset_label</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">df</span> <span class="relational-operator">in</span> <span class="grouping">[</span>
+        <span class="grouping">(</span><span class="string-literal">"train"</span><span class="punctuation">,</span> <span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">df_train</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="grouping">(</span><span class="string-literal">"test"</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">df_test</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="grouping">]</span><span class="punctuation">:</span>
+        <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">_weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">target</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">weights</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">score_label</span><span class="punctuation">,</span> <span class="identifier">metric</span> <span class="relational-operator">in</span> <span class="identifier">metrics</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">tuple</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+                <span class="comment"># Score the model consisting of the product of frequency and</span>
+                <span class="comment"># severity models.</span>
+                <span class="identifier">est_freq</span><span class="punctuation">,</span> <span class="identifier">est_sev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span>
+                <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">est_freq</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">est_sev</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">metric</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">"score"</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+                <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">_weights</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metric</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">_weights</span><span class="grouping">)</span>
+
+            <span class="identifier">res</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span>
+                <span class="grouping">{</span><span class="string-literal">"subset": subset_label, "metric": score_label, "score"</span><span class="punctuation">:</span> <span class="identifier">score</span><span class="grouping">}</span>
+            <span class="grouping">)</span>
+
+    <span class="identifier">res</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+        <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span><span class="identifier">res</span><span class="grouping">)</span>
+        <span class="punctuation">.</span><span class="identifier">set_index</span><span class="grouping">(</span><span class="grouping">[</span><span class="string-literal">"metric", "subset"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="punctuation">.</span><span class="identifier">score</span><span class="punctuation">.</span><span class="identifier">unstack</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="punctuation">.</span><span class="identifier">round</span><span class="grouping">(</span><span class="int-literal">4</span><span class="grouping">)</span>
+        <span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="string-literal">'train', 'test'</span><span class="grouping">]</span><span class="grouping">]</span>
+    <span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">res</span>
+
+
+<span class="comment"># %%</span>
+<span class="comment"># Loading datasets, basic feature extraction and target definitions</span>
+<span class="comment"># -----------------------------------------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># We construct the freMTPL2 dataset by joining the freMTPL2freq table,</span>
+<span class="comment"># containing the number of claims (``ClaimNb``), with the freMTPL2sev table,</span>
+<span class="comment"># containing the claim amount (``ClaimAmount``) for the same policy ids</span>
+<span class="comment"># (``IDpol``).</span>
+
+<span class="identifier">df</span> <span class="arithmetic-assignment">=</span> <span class="identifier">load_mtpl2</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">60000</span><span class="grouping">)</span>
+
+<span class="comment"># Note: filter out claims with zero amount, as the severity model</span>
+<span class="comment"># requires strictly positive target values.</span>
+<span class="identifier">df</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="grouping">(</span><span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"ClaimAmount"] == 0) & (df["ClaimNb"] &gt;= 1), "ClaimNb"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+<span class="comment"># Correct for unreasonable observations (that might be data error)</span>
+<span class="comment"># and a few exceptionally large claim amounts</span>
+<span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"ClaimNb"] = df["ClaimNb"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">upper</span><span class="arithmetic-assignment">=</span><span class="int-literal">4</span><span class="grouping">)</span>
+<span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"Exposure"] = df["Exposure"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">upper</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+<span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"ClaimAmount"] = df["ClaimAmount"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">upper</span><span class="arithmetic-assignment">=</span><span class="int-literal">200000</span><span class="grouping">)</span>
+
+<span class="identifier">log_scale_transformer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_pipeline</span><span class="grouping">(</span>
+    <span class="identifier">FunctionTransformer</span><span class="grouping">(</span><span class="identifier">func</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">StandardScaler</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="grouping">)</span>
+
+<span class="identifier">column_trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ColumnTransformer</span><span class="grouping">(</span>
+    <span class="grouping">[</span>
+        <span class="grouping">(</span><span class="string-literal">"binned_numeric"</span><span class="punctuation">,</span> <span class="identifier">KBinsDiscretizer</span><span class="grouping">(</span><span class="identifier">n_bins</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="grouping">[</span><span class="string-literal">"VehAge", "DrivAge"</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="grouping">(</span><span class="string-literal">"onehot_categorical"</span><span class="punctuation">,</span> <span class="identifier">OneHotEncoder</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="grouping">[</span><span class="string-literal">"VehBrand", "VehPower", "VehGas", "Region", "Area"</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="grouping">(</span><span class="string-literal">"passthrough_numeric", "passthrough"</span><span class="punctuation">,</span>
+            <span class="grouping">[</span><span class="string-literal">"BonusMalus"</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="grouping">(</span><span class="string-literal">"log_scaled_numeric"</span><span class="punctuation">,</span> <span class="identifier">log_scale_transformer</span><span class="punctuation">,</span>
+            <span class="grouping">[</span><span class="string-literal">"Density"</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">remainder</span><span class="arithmetic-assignment">=</span><span class="string-literal">"drop"</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+<span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_trans</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">df</span><span class="grouping">)</span>
+
+<span class="comment"># Insurances companies are interested in modeling the Pure Premium, that is</span>
+<span class="comment"># the expected total claim amount per unit of exposure for each policyholder</span>
+<span class="comment"># in their portfolio:</span>
+<span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"PurePremium"] = df["ClaimAmount"] / df["Exposure"</span><span class="grouping">]</span>
+
+<span class="comment"># This can be indirectly approximated by a 2-step modeling: the product of the</span>
+<span class="comment"># Frequency times the average claim amount per claim:</span>
+<span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"Frequency"] = df["ClaimNb"] / df["Exposure"</span><span class="grouping">]</span>
+<span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"AvgClaimAmount"] = df["ClaimAmount"] / np.fmax(df["ClaimNb"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+
+<span class="keyword">with</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">option_context</span><span class="grouping">(</span><span class="string-literal">"display.max_columns"</span><span class="punctuation">,</span> <span class="int-literal">15</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">df</span><span class="grouping">[</span><span class="identifier">df</span><span class="punctuation">.</span><span class="identifier">ClaimAmount</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">head</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment">#</span>
+<span class="comment"># Frequency model -- Poisson distribution</span>
+<span class="comment"># ---------------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># The number of claims (``ClaimNb``) is a positive integer (0 included).</span>
+<span class="comment"># Thus, this target can be modelled by a Poisson distribution.</span>
+<span class="comment"># It is then assumed to be the number of discrete events occuring with a</span>
+<span class="comment"># constant rate in a given time interval (``Exposure``, in units of years).</span>
+<span class="comment"># Here we model the frequency ``y = ClaimNb / Exposure``, which is still a</span>
+<span class="comment"># (scaled) Poisson distribution, and use ``Exposure`` as `sample_weight`.</span>
+
+<span class="identifier">df_train</span><span class="punctuation">,</span> <span class="identifier">df_test</span><span class="punctuation">,</span> <span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">X_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">train_test_split</span><span class="grouping">(</span><span class="identifier">df</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+<span class="comment"># The parameters of the model are estimated by minimizing the Poisson deviance</span>
+<span class="comment"># on the training set via a quasi-Newton solver: l-BFGS. Some of the features</span>
+<span class="comment"># are collinear, we use a weak penalization to avoid numerical issues.</span>
+<span class="identifier">glm_freq</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PoissonRegressor</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-3</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">400</span><span class="grouping">)</span>
+<span class="identifier">glm_freq</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">df_train</span><span class="grouping">[</span><span class="string-literal">"Frequency"</span><span class="grouping">]</span><span class="punctuation">,</span>
+             <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">df_train</span><span class="grouping">[</span><span class="string-literal">"Exposure"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">score_estimator</span><span class="grouping">(</span>
+    <span class="identifier">glm_freq</span><span class="punctuation">,</span>
+    <span class="identifier">X_train</span><span class="punctuation">,</span>
+    <span class="identifier">X_test</span><span class="punctuation">,</span>
+    <span class="identifier">df_train</span><span class="punctuation">,</span>
+    <span class="identifier">df_test</span><span class="punctuation">,</span>
+    <span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Evaluation of PoissonRegressor on target Frequency"</span><span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># We can visually compare observed and predicted values, aggregated by the</span>
+<span class="comment"># drivers age (``DrivAge``), vehicle age (``VehAge``) and the insurance</span>
+<span class="comment"># bonus/malus (``BonusMalus``).</span>
+
+<span class="identifier">fig</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="identifier">ncols</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">nrows</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">16</span><span class="punctuation">,</span> <span class="int-literal">8</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">fig</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">hspace</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.3</span><span class="punctuation">,</span> <span class="identifier">wspace</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.2</span><span class="grouping">)</span>
+
+<span class="identifier">plot_obs_pred</span><span class="grouping">(</span>
+    <span class="identifier">df</span><span class="arithmetic-assignment">=</span><span class="identifier">df_train</span><span class="punctuation">,</span>
+    <span class="identifier">feature</span><span class="arithmetic-assignment">=</span><span class="string-literal">"DrivAge"</span><span class="punctuation">,</span>
+    <span class="identifier">weight</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">observed</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">predicted</span><span class="arithmetic-assignment">=</span><span class="identifier">glm_freq</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">y_label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Claim Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"train data"</span><span class="punctuation">,</span>
+    <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+
+<span class="identifier">plot_obs_pred</span><span class="grouping">(</span>
+    <span class="identifier">df</span><span class="arithmetic-assignment">=</span><span class="identifier">df_test</span><span class="punctuation">,</span>
+    <span class="identifier">feature</span><span class="arithmetic-assignment">=</span><span class="string-literal">"DrivAge"</span><span class="punctuation">,</span>
+    <span class="identifier">weight</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">observed</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">predicted</span><span class="arithmetic-assignment">=</span><span class="identifier">glm_freq</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">y_label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Claim Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"test data"</span><span class="punctuation">,</span>
+    <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">fill_legend</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span>
+<span class="grouping">)</span>
+
+<span class="identifier">plot_obs_pred</span><span class="grouping">(</span>
+    <span class="identifier">df</span><span class="arithmetic-assignment">=</span><span class="identifier">df_test</span><span class="punctuation">,</span>
+    <span class="identifier">feature</span><span class="arithmetic-assignment">=</span><span class="string-literal">"VehAge"</span><span class="punctuation">,</span>
+    <span class="identifier">weight</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">observed</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">predicted</span><span class="arithmetic-assignment">=</span><span class="identifier">glm_freq</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">y_label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Claim Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"test data"</span><span class="punctuation">,</span>
+    <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">fill_legend</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span>
+<span class="grouping">)</span>
+
+<span class="identifier">plot_obs_pred</span><span class="grouping">(</span>
+    <span class="identifier">df</span><span class="arithmetic-assignment">=</span><span class="identifier">df_test</span><span class="punctuation">,</span>
+    <span class="identifier">feature</span><span class="arithmetic-assignment">=</span><span class="string-literal">"BonusMalus"</span><span class="punctuation">,</span>
+    <span class="identifier">weight</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">observed</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">predicted</span><span class="arithmetic-assignment">=</span><span class="identifier">glm_freq</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">y_label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Claim Frequency"</span><span class="punctuation">,</span>
+    <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"test data"</span><span class="punctuation">,</span>
+    <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">fill_legend</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span>
+<span class="grouping">)</span>
+
+
+<span class="comment"># %%</span>
+<span class="comment"># According to the observed data, the frequency of accidents is higher for</span>
+<span class="comment"># drivers younger than 30 years old, and is positively correlated with the</span>
+<span class="comment"># `BonusMalus` variable. Our model is able to mostly correctly model this</span>
+<span class="comment"># behaviour.</span>
+<span class="comment">#</span>
+<span class="comment"># Severity Model -  Gamma distribution</span>
+<span class="comment"># ------------------------------------</span>
+<span class="comment"># The mean claim amount or severity (`AvgClaimAmount`) can be empirically</span>
+<span class="comment"># shown to follow approximately a Gamma distribution. We fit a GLM model for</span>
+<span class="comment"># the severity with the same features as the frequency model.</span>
+<span class="comment">#</span>
+<span class="comment"># Note:</span>
+<span class="comment">#</span>
+<span class="comment"># - We filter out ``ClaimAmount == 0`` as the Gamma distribution has support</span>
+<span class="comment">#   on :math:`(0, \infty)`, not :math:`[0, \infty)`.</span>
+<span class="comment"># - We use ``ClaimNb`` as `sample_weight` to account for policies that contain</span>
+<span class="comment">#   more than one claim.</span>
+
+<span class="identifier">mask_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df_train</span><span class="grouping">[</span><span class="string-literal">"ClaimAmount"</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+<span class="identifier">mask_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df_test</span><span class="grouping">[</span><span class="string-literal">"ClaimAmount"</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+
+<span class="identifier">glm_sev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">GammaRegressor</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">10000</span><span class="grouping">)</span>
+
+<span class="identifier">glm_sev</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span>
+    <span class="identifier">X_train</span><span class="grouping">[</span><span class="identifier">mask_train</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">df_train</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="identifier">mask_train</span><span class="punctuation">,</span> <span class="string-literal">"AvgClaimAmount"</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">df_train</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="identifier">mask_train</span><span class="punctuation">,</span> <span class="string-literal">"ClaimNb"</span><span class="grouping">]</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+
+<span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">score_estimator</span><span class="grouping">(</span>
+    <span class="identifier">glm_sev</span><span class="punctuation">,</span>
+    <span class="identifier">X_train</span><span class="grouping">[</span><span class="identifier">mask_train</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">X_test</span><span class="grouping">[</span><span class="identifier">mask_test</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">df_train</span><span class="grouping">[</span><span class="identifier">mask_train</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">df_test</span><span class="grouping">[</span><span class="identifier">mask_test</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="string-literal">"AvgClaimAmount"</span><span class="punctuation">,</span>
+    <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="string-literal">"ClaimNb"</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Evaluation of GammaRegressor on target AvgClaimAmount"</span><span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Here, the scores for the test data call for caution as they are</span>
+<span class="comment"># significantly worse than for the training data indicating an overfit despite</span>
+<span class="comment"># the strong regularization.</span>
+<span class="comment">#</span>
+<span class="comment"># Note that the resulting model is the average claim amount per claim. As</span>
+<span class="comment"># such, it is conditional on having at least one claim, and cannot be used to</span>
+<span class="comment"># predict the average claim amount per policy in general.</span>
+
+<span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Mean AvgClaim Amount per policy:              %.2f "</span>
+      <span class="arithmetic-operator">%</span> <span class="identifier">df_train</span><span class="grouping">[</span><span class="string-literal">"AvgClaimAmount"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Mean AvgClaim Amount | NbClaim &gt; 0:           %.2f"</span>
+      <span class="arithmetic-operator">%</span> <span class="identifier">df_train</span><span class="grouping">[</span><span class="string-literal">"AvgClaimAmount"][df_train["AvgClaimAmount"</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Predicted Mean AvgClaim Amount | NbClaim &gt; 0: %.2f"</span>
+      <span class="arithmetic-operator">%</span> <span class="identifier">glm_sev</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="comment"># %%</span>
+<span class="comment"># We can visually compare observed and predicted values, aggregated for</span>
+<span class="comment"># the drivers age (``DrivAge``).</span>
+
+<span class="identifier">fig</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="identifier">ncols</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">nrows</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">16</span><span class="punctuation">,</span> <span class="int-literal">6</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="identifier">plot_obs_pred</span><span class="grouping">(</span>
+    <span class="identifier">df</span><span class="arithmetic-assignment">=</span><span class="identifier">df_train</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="identifier">mask_train</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">feature</span><span class="arithmetic-assignment">=</span><span class="string-literal">"DrivAge"</span><span class="punctuation">,</span>
+    <span class="identifier">weight</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">observed</span><span class="arithmetic-assignment">=</span><span class="string-literal">"AvgClaimAmount"</span><span class="punctuation">,</span>
+    <span class="identifier">predicted</span><span class="arithmetic-assignment">=</span><span class="identifier">glm_sev</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">[</span><span class="identifier">mask_train</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">y_label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Average Claim Severity"</span><span class="punctuation">,</span>
+    <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"train data"</span><span class="punctuation">,</span>
+    <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+
+<span class="identifier">plot_obs_pred</span><span class="grouping">(</span>
+    <span class="identifier">df</span><span class="arithmetic-assignment">=</span><span class="identifier">df_test</span><span class="punctuation">.</span><span class="identifier">loc</span><span class="grouping">[</span><span class="identifier">mask_test</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">feature</span><span class="arithmetic-assignment">=</span><span class="string-literal">"DrivAge"</span><span class="punctuation">,</span>
+    <span class="identifier">weight</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">observed</span><span class="arithmetic-assignment">=</span><span class="string-literal">"AvgClaimAmount"</span><span class="punctuation">,</span>
+    <span class="identifier">predicted</span><span class="arithmetic-assignment">=</span><span class="identifier">glm_sev</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">[</span><span class="identifier">mask_test</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">y_label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Average Claim Severity"</span><span class="punctuation">,</span>
+    <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"test data"</span><span class="punctuation">,</span>
+    <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">fill_legend</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span>
+<span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">tight_layout</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Overall, the drivers age (``DrivAge``) has a weak impact on the claim</span>
+<span class="comment"># severity, both in observed and predicted data.</span>
+<span class="comment">#</span>
+<span class="comment"># Pure Premium Modeling via a Product Model vs single TweedieRegressor</span>
+<span class="comment"># --------------------------------------------------------------------</span>
+<span class="comment"># As mentioned in the introduction, the total claim amount per unit of</span>
+<span class="comment"># exposure can be modeled as the product of the prediction of the</span>
+<span class="comment"># frequency model by the prediction of the severity model.</span>
+<span class="comment">#</span>
+<span class="comment"># Alternatively, one can directly model the total loss with a unique</span>
+<span class="comment"># Compound Poisson Gamma generalized linear model (with a log link function).</span>
+<span class="comment"># This model is a special case of the Tweedie GLM with a "power" parameter</span>
+<span class="comment"># :math:`p \in (1, 2)`. Here, we fix apriori the `power` parameter of the</span>
+<span class="comment"># Tweedie model to some arbitrary value (1.9) in the valid range. Ideally one</span>
+<span class="comment"># would select this value via grid-search by minimizing the negative</span>
+<span class="comment"># log-likelihood of the Tweedie model, but unfortunately the current</span>
+<span class="comment"># implementation does not allow for this (yet).</span>
+<span class="comment">#</span>
+<span class="comment"># We will compare the performance of both approaches.</span>
+<span class="comment"># To quantify the performance of both models, one can compute</span>
+<span class="comment"># the mean deviance of the train and test data assuming a Compound</span>
+<span class="comment"># Poisson-Gamma distribution of the total claim amount. This is equivalent to</span>
+<span class="comment"># a Tweedie distribution with a `power` parameter between 1 and 2.</span>
+<span class="comment">#</span>
+<span class="comment"># The :func:`sklearn.metrics.mean_tweedie_deviance` depends on a `power`</span>
+<span class="comment"># parameter. As we do not know the true value of the `power` parameter, we here</span>
+<span class="comment"># compute the mean deviances for a grid of possible values, and compare the</span>
+<span class="comment"># models side by side, i.e. we compare them at identical values of `power`.</span>
+<span class="comment"># Ideally, we hope that one model will be consistently better than the other,</span>
+<span class="comment"># regardless of `power`.</span>
+
+<span class="identifier">glm_pure_premium</span> <span class="arithmetic-assignment">=</span> <span class="identifier">TweedieRegressor</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.9</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">.1</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">10000</span><span class="grouping">)</span>
+<span class="identifier">glm_pure_premium</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">df_train</span><span class="grouping">[</span><span class="string-literal">"PurePremium"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                     <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">df_train</span><span class="grouping">[</span><span class="string-literal">"Exposure"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="identifier">tweedie_powers</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="float-literal">1.5</span><span class="punctuation">,</span> <span class="float-literal">1.7</span><span class="punctuation">,</span> <span class="float-literal">1.8</span><span class="punctuation">,</span> <span class="float-literal">1.9</span><span class="punctuation">,</span> <span class="float-literal">1.99</span><span class="punctuation">,</span> <span class="float-literal">1.999</span><span class="punctuation">,</span> <span class="float-literal">1.9999</span><span class="grouping">]</span>
+
+<span class="identifier">scores_product_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">score_estimator</span><span class="grouping">(</span>
+    <span class="grouping">(</span><span class="identifier">glm_freq</span><span class="punctuation">,</span> <span class="identifier">glm_sev</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">X_train</span><span class="punctuation">,</span>
+    <span class="identifier">X_test</span><span class="punctuation">,</span>
+    <span class="identifier">df_train</span><span class="punctuation">,</span>
+    <span class="identifier">df_test</span><span class="punctuation">,</span>
+    <span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="string-literal">"PurePremium"</span><span class="punctuation">,</span>
+    <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">tweedie_powers</span><span class="arithmetic-assignment">=</span><span class="identifier">tweedie_powers</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+
+<span class="identifier">scores_glm_pure_premium</span> <span class="arithmetic-assignment">=</span> <span class="identifier">score_estimator</span><span class="grouping">(</span>
+    <span class="identifier">glm_pure_premium</span><span class="punctuation">,</span>
+    <span class="identifier">X_train</span><span class="punctuation">,</span>
+    <span class="identifier">X_test</span><span class="punctuation">,</span>
+    <span class="identifier">df_train</span><span class="punctuation">,</span>
+    <span class="identifier">df_test</span><span class="punctuation">,</span>
+    <span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="string-literal">"PurePremium"</span><span class="punctuation">,</span>
+    <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Exposure"</span><span class="punctuation">,</span>
+    <span class="identifier">tweedie_powers</span><span class="arithmetic-assignment">=</span><span class="identifier">tweedie_powers</span>
+<span class="grouping">)</span>
+
+<span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">concat</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">scores_product_model</span><span class="punctuation">,</span> <span class="identifier">scores_glm_pure_premium</span><span class="grouping">]</span><span class="punctuation">,</span>
+                   <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">sort</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                   <span class="identifier">keys</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="string-literal">'Product Model', 'TweedieRegressor'</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Evaluation of the Product Model and the Tweedie Regressor "</span>
+      <span class="string-literal">"on target PurePremium"</span><span class="grouping">)</span>
+<span class="keyword">with</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">option_context</span><span class="grouping">(</span><span class="string-literal">'display.expand_frame_repr'</span><span class="punctuation">,</span> <span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># In this example, both modeling approaches yield comparable performance</span>
+<span class="comment"># metrics. For implementation reasons, the percentage of explained variance</span>
+<span class="comment"># :math:`D^2` is not available for the product model.</span>
+<span class="comment">#</span>
+<span class="comment"># We can additionally validate these models by comparing observed and</span>
+<span class="comment"># predicted total claim amount over the test and train subsets. We see that,</span>
+<span class="comment"># on average, both model tend to underestimate the total claim (but this</span>
+<span class="comment"># behavior depends on the amount of regularization).</span>
+
+<span class="identifier">res</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+<span class="keyword">for</span> <span class="identifier">subset_label</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">df</span> <span class="relational-operator">in</span> <span class="grouping">[</span>
+    <span class="grouping">(</span><span class="string-literal">"train"</span><span class="punctuation">,</span> <span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">df_train</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="grouping">(</span><span class="string-literal">"test"</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">df_test</span><span class="grouping">)</span><span class="punctuation">,</span>
+<span class="grouping">]</span><span class="punctuation">:</span>
+    <span class="identifier">exposure</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df</span><span class="grouping">[</span><span class="string-literal">"Exposure"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">values</span>
+    <span class="identifier">res</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span>
+        <span class="grouping">{</span>
+            <span class="string-literal">"subset"</span><span class="punctuation">:</span> <span class="identifier">subset_label</span><span class="punctuation">,</span>
+            <span class="string-literal">"observed": df["ClaimAmount"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">values</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="string-literal">"predicted, frequency*severity model"</span><span class="punctuation">:</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span>
+                <span class="identifier">exposure</span> <span class="arithmetic-operator">*</span> <span class="identifier">glm_freq</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">glm_sev</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="string-literal">"predicted, tweedie, power=%.2f"</span>
+            <span class="arithmetic-operator">%</span> <span class="identifier">glm_pure_premium</span><span class="punctuation">.</span><span class="identifier">power</span><span class="punctuation">:</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span>
+                <span class="identifier">exposure</span> <span class="arithmetic-operator">*</span> <span class="identifier">glm_pure_premium</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="grouping">}</span>
+    <span class="grouping">)</span>
+
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span><span class="identifier">res</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">set_index</span><span class="grouping">(</span><span class="string-literal">"subset"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Finally, we can compare the two models using a plot of cumulated claims: for</span>
+<span class="comment"># each model, the policyholders are ranked from safest to riskiest and the</span>
+<span class="comment"># fraction of observed total cumulated claims is plotted on the y axis. This</span>
+<span class="comment"># plot is often called the ordered Lorenz curve of the model.</span>
+<span class="comment">#</span>
+<span class="comment"># The Gini coefficient (based on the area under the curve) can be used as a</span>
+<span class="comment"># model selection metric to quantify the ability of the model to rank</span>
+<span class="comment"># policyholders. Note that this metric does not reflect the ability of the</span>
+<span class="comment"># models to make accurate predictions in terms of absolute value of total</span>
+<span class="comment"># claim amounts but only in terms of relative amounts as a ranking metric.</span>
+<span class="comment">#</span>
+<span class="comment"># Both models are able to rank policyholders by risky-ness significantly</span>
+<span class="comment"># better than chance although they are also both far from perfect due to the</span>
+<span class="comment"># natural difficulty of the prediction problem from few features.</span>
+<span class="comment">#</span>
+<span class="comment"># Note that the Gini index only characterize the ranking performance of the</span>
+<span class="comment"># model but not its calibration: any monotonic transformation of the</span>
+<span class="comment"># predictions leaves the Gini index of the model unchanged.</span>
+<span class="comment">#</span>
+<span class="comment"># Finally one should highlight that the Compound Poisson Gamma model that</span>
+<span class="comment"># is directly fit on the pure premium is operationally simpler to develop and</span>
+<span class="comment"># maintain as it consists in a single scikit-learn estimator instead of a</span>
+<span class="comment"># pair of models, each with its own set of hyperparameters.</span>
+
+
+<span class="keyword">def</span> <span class="identifier">lorenz_curve</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">exposure</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="grouping">)</span>
+    <span class="identifier">exposure</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">exposure</span><span class="grouping">)</span>
+
+    <span class="comment"># order samples by increasing predicted risk:</span>
+    <span class="identifier">ranking</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="grouping">)</span>
+    <span class="identifier">ranked_exposure</span> <span class="arithmetic-assignment">=</span> <span class="identifier">exposure</span><span class="grouping">[</span><span class="identifier">ranking</span><span class="grouping">]</span>
+    <span class="identifier">ranked_pure_premium</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="grouping">[</span><span class="identifier">ranking</span><span class="grouping">]</span>
+    <span class="identifier">cumulated_claim_amount</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cumsum</span><span class="grouping">(</span><span class="identifier">ranked_pure_premium</span> <span class="arithmetic-operator">*</span> <span class="identifier">ranked_exposure</span><span class="grouping">)</span>
+    <span class="identifier">cumulated_claim_amount</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">cumulated_claim_amount</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">cumulated_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linspace</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cumulated_claim_amount</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">cumulated_samples</span><span class="punctuation">,</span> <span class="identifier">cumulated_claim_amount</span>
+
+
+<span class="identifier">fig</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">8</span><span class="punctuation">,</span> <span class="int-literal">8</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="identifier">y_pred_product</span> <span class="arithmetic-assignment">=</span> <span class="identifier">glm_freq</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">glm_sev</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+<span class="identifier">y_pred_total</span> <span class="arithmetic-assignment">=</span> <span class="identifier">glm_pure_premium</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+
+<span class="keyword">for</span> <span class="identifier">label</span><span class="punctuation">,</span> <span class="identifier">y_pred</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="grouping">(</span><span class="string-literal">"Frequency * Severity model"</span><span class="punctuation">,</span> <span class="identifier">y_pred_product</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="grouping">(</span><span class="string-literal">"Compound Poisson Gamma"</span><span class="punctuation">,</span> <span class="identifier">y_pred_total</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">:</span>
+    <span class="identifier">ordered_samples</span><span class="punctuation">,</span> <span class="identifier">cum_claims</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lorenz_curve</span><span class="grouping">(</span>
+        <span class="identifier">df_test</span><span class="grouping">[</span><span class="string-literal">"PurePremium"], y_pred, df_test["Exposure"</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">gini</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">auc</span><span class="grouping">(</span><span class="identifier">ordered_samples</span><span class="punctuation">,</span> <span class="identifier">cum_claims</span><span class="grouping">)</span>
+    <span class="identifier">label</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">" (Gini index: {:.3f})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">gini</span><span class="grouping">)</span>
+    <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">ordered_samples</span><span class="punctuation">,</span> <span class="identifier">cum_claims</span><span class="punctuation">,</span> <span class="identifier">linestyle</span><span class="arithmetic-assignment">=</span><span class="string-literal">"-"</span><span class="punctuation">,</span> <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="identifier">label</span><span class="grouping">)</span>
+
+<span class="comment"># Oracle model: y_pred == y_test</span>
+<span class="identifier">ordered_samples</span><span class="punctuation">,</span> <span class="identifier">cum_claims</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lorenz_curve</span><span class="grouping">(</span>
+    <span class="identifier">df_test</span><span class="grouping">[</span><span class="string-literal">"PurePremium"], df_test["PurePremium"], df_test["Exposure"</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">gini</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">auc</span><span class="grouping">(</span><span class="identifier">ordered_samples</span><span class="punctuation">,</span> <span class="identifier">cum_claims</span><span class="grouping">)</span>
+<span class="identifier">label</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Oracle (Gini index: {:.3f})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">gini</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">ordered_samples</span><span class="punctuation">,</span> <span class="identifier">cum_claims</span><span class="punctuation">,</span> <span class="identifier">linestyle</span><span class="arithmetic-assignment">=</span><span class="string-literal">"-.", color="gray"</span><span class="punctuation">,</span>
+        <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="identifier">label</span><span class="grouping">)</span>
+
+<span class="comment"># Random baseline</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">linestyle</span><span class="arithmetic-assignment">=</span><span class="string-literal">"--", color="black"</span><span class="punctuation">,</span>
+        <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Random baseline"</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span>
+    <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Lorenz Curves"</span><span class="punctuation">,</span>
+    <span class="identifier">xlabel</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="string-literal">'Fraction of policyholders\n'</span>
+            <span class="string-literal">'(ordered by model from safest to riskiest)'</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">ylabel</span><span class="arithmetic-assignment">=</span><span class="string-literal">'Fraction of total claim amount'</span>
+<span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">legend</span><span class="grouping">(</span><span class="identifier">loc</span><span class="arithmetic-assignment">=</span><span class="string-literal">"upper left"</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

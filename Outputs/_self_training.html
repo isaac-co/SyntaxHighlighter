@@ -1,0 +1,354 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">MetaEstimatorMixin</span><span class="punctuation">,</span> <span class="identifier">clone</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">metaestimators</span> <span class="keyword">import</span> <span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">safe_mask</span>
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">"SelfTrainingClassifier"</span><span class="grouping">]</span>
+
+<span class="comment"># Authors: Oliver Rausch   &lt;rauscho@ethz.ch&gt;</span>
+<span class="comment">#          Patrice Becker  &lt;beckerp@ethz.ch&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_validate_estimator</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Make sure that an estimator implements the necessary methods."""</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">"predict_proba"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"base_estimator ({}) should implement predict_proba!"</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">type</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SelfTrainingClassifier</span><span class="grouping">(</span><span class="identifier">MetaEstimatorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Self-training classifier.
+
+    This class allows a given supervised classifier to function as a
+    semi-supervised classifier, allowing it to learn from unlabeled data. It
+    does this by iteratively predicting pseudo-labels for the unlabeled data
+    and adding them to the training set.
+
+    The classifier will continue iterating until either max_iter is reached, or
+    no pseudo-labels were added to the training set in the previous iteration.
+
+    Read more in the :ref:`User Guide &lt;self_training&gt;`.
+
+    Parameters
+    ----------
+    base_estimator : estimator object
+        An estimator object implementing ``fit`` and ``predict_proba``.
+        Invoking the ``fit`` method will fit a clone of the passed estimator,
+        which will be stored in the ``base_estimator_`` attribute.
+
+    threshold : float, default=0.75
+        The decision threshold for use with `criterion='threshold'`.
+        Should be in [0, 1). When using the 'threshold' criterion, a
+        :ref:`well calibrated classifier &lt;calibration&gt;` should be used.
+
+    criterion : {'threshold', 'k_best'}, default='threshold'
+        The selection criterion used to select which labels to add to the
+        training set. If 'threshold', pseudo-labels with prediction
+        probabilities above `threshold` are added to the dataset. If 'k_best',
+        the `k_best` pseudo-labels with highest prediction probabilities are
+        added to the dataset. When using the 'threshold' criterion, a
+        :ref:`well calibrated classifier &lt;calibration&gt;` should be used.
+
+    k_best : int, default=10
+        The amount of samples to add in each iteration. Only used when
+        `criterion` is k_best'.
+
+    max_iter : int or None, default=10
+        Maximum number of iterations allowed. Should be greater than or equal
+        to 0. If it is ``None``, the classifier will continue to predict labels
+        until no new pseudo-labels are added, or all unlabeled samples have
+        been labeled.
+
+    verbose : bool, default=False
+        Enable verbose output.
+
+    Attributes
+    ----------
+    base_estimator_ : estimator object
+        The fitted estimator.
+
+    classes_ : ndarray or list of ndarray of shape (n_classes,)
+        Class labels for each output. (Taken from the trained
+        ``base_estimator_``).
+
+    transduction_ : ndarray of shape (n_samples,)
+        The labels used for the final fit of the classifier, including
+        pseudo-labels added during fit.
+
+    labeled_iter_ : ndarray of shape (n_samples,)
+        The iteration in which each sample was labeled. When a sample has
+        iteration 0, the sample was already labeled in the original dataset.
+        When a sample has iteration -1, the sample was not labeled in any
+        iteration.
+
+    n_iter_ : int
+        The number of rounds of self-training, that is the number of times the
+        base estimator is fitted on relabeled variants of the training set.
+
+    termination_condition_ : {'max_iter', 'no_change', 'all_labeled'}
+        The reason that fitting was stopped.
+
+        - 'max_iter': `n_iter_` reached `max_iter`.
+        - 'no_change': no new labels were predicted.
+        - 'all_labeled': all unlabeled samples were labeled before `max_iter`
+          was reached.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn import datasets
+    &gt;&gt;&gt; from sklearn.semi_supervised import SelfTrainingClassifier
+    &gt;&gt;&gt; from sklearn.svm import SVC
+    &gt;&gt;&gt; rng = np.random.RandomState(42)
+    &gt;&gt;&gt; iris = datasets.load_iris()
+    &gt;&gt;&gt; random_unlabeled_points = rng.rand(iris.target.shape[0]) &lt; 0.3
+    &gt;&gt;&gt; iris.target[random_unlabeled_points] = -1
+    &gt;&gt;&gt; svc = SVC(probability=True, gamma="auto")
+    &gt;&gt;&gt; self_training_model = SelfTrainingClassifier(svc)
+    &gt;&gt;&gt; self_training_model.fit(iris.data, iris.target)
+    SelfTrainingClassifier(...)
+
+    References
+    ----------
+    David Yarowsky. 1995. Unsupervised word sense disambiguation rivaling
+    supervised methods. In Proceedings of the 33rd annual meeting on
+    Association for Computational Linguistics (ACL '95). Association for
+    Computational Linguistics, Stroudsburg, PA, USA, 189-196. DOI:
+    https://doi.org/10.3115/981658.981684
+    """</span>
+    <span class="identifier">_estimator_type</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"classifier"</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">base_estimator</span><span class="punctuation">,</span>
+                 <span class="identifier">threshold</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.75</span><span class="punctuation">,</span>
+                 <span class="identifier">criterion</span><span class="arithmetic-assignment">=</span><span class="string-literal">'threshold'</span><span class="punctuation">,</span>
+                 <span class="identifier">k_best</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span>
+                 <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span>
+                 <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">base_estimator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">threshold</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">criterion</span> <span class="arithmetic-assignment">=</span> <span class="identifier">criterion</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">k_best</span> <span class="arithmetic-assignment">=</span> <span class="identifier">k_best</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Fits this ``SelfTrainingClassifier`` to a dataset.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Array representing the data.
+
+        y : {array-like, sparse matrix} of shape (n_samples,)
+            Array representing the labels. Unlabeled samples should have the
+            label -1.
+
+        Returns
+        -------
+        self : object
+            Returns an instance of self.
+        """</span>
+        <span class="comment"># we need row slicing support for sparce matrices</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span>
+            <span class="string-literal">'csr', 'csc', 'lil', 'dok'</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"base_estimator cannot be None!"</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"max_iter must be &gt;= 0 or None,"</span>
+                             <span class="identifier">f</span><span class="string-literal">" got {self.max_iter}"</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="int-literal">0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"threshold must be in [0,1),"</span>
+                             <span class="identifier">f</span><span class="string-literal">" got {self.threshold}"</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">criterion</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">'threshold', 'k_best'</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"criterion must be either 'threshold' "</span>
+                             <span class="identifier">f</span><span class="string-literal">"or 'k_best', got {self.criterion}."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">'U', 'S'</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"y has dtype string. If you wish to predict on "</span>
+                             <span class="string-literal">"string targets, use dtype object, and use -1"</span>
+                             <span class="string-literal">" as the label for unlabeled samples."</span><span class="grouping">)</span>
+
+        <span class="identifier">has_label</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span> <span class="relational-operator">!=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">has_label</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"y contains no unlabeled samples"</span><span class="punctuation">,</span> <span class="identifier">UserWarning</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">criterion</span> <span class="relational-operator">==</span> <span class="string-literal">'k_best'</span> <span class="logical-operator">and</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">k_best</span> <span class="relational-operator">&gt;</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span>
+                                           <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">has_label</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"k_best is larger than the amount of unlabeled "</span>
+                          <span class="string-literal">"samples. All unlabeled samples will be labeled in "</span>
+                          <span class="string-literal">"the first iteration"</span><span class="punctuation">,</span> <span class="identifier">UserWarning</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transduction_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labeled_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">full_like</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labeled_iter_</span><span class="grouping">[</span><span class="identifier">has_label</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+        <span class="keyword">while</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">has_label</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span>
+                                         <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span>
+                <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">safe_mask</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">has_label</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transduction_</span><span class="grouping">[</span><span class="identifier">has_label</span><span class="grouping">]</span><span class="grouping">)</span>
+
+            <span class="comment"># Validate the fitted estimator since `predict_proba` can be</span>
+            <span class="comment"># delegated to an underlying "final" fitted estimator as</span>
+            <span class="comment"># generally done in meta-estimator or pipeline.</span>
+            <span class="identifier">_validate_estimator</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="grouping">)</span>
+
+            <span class="comment"># Predict on the unlabeled samples</span>
+            <span class="identifier">prob</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span>
+                <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">safe_mask</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="bitwise-operator">~</span><span class="identifier">has_label</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">prob</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span>
+            <span class="identifier">max_proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">prob</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+            <span class="comment"># Select new labeled samples</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">criterion</span> <span class="relational-operator">==</span> <span class="string-literal">'threshold'</span><span class="punctuation">:</span>
+                <span class="identifier">selected</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_proba</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">n_to_select</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">k_best</span><span class="punctuation">,</span> <span class="identifier">max_proba</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">n_to_select</span> <span class="relational-operator">==</span> <span class="identifier">max_proba</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">:</span>
+                    <span class="identifier">selected</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones_like</span><span class="grouping">(</span><span class="identifier">max_proba</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="comment"># NB these are indicies, not a mask</span>
+                    <span class="identifier">selected</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argpartition</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="identifier">max_proba</span><span class="punctuation">,</span> <span class="identifier">n_to_select</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_to_select</span><span class="grouping">]</span>
+
+            <span class="comment"># Map selected indices into original array</span>
+            <span class="identifier">selected_full</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nonzero</span><span class="grouping">(</span><span class="bitwise-operator">~</span><span class="identifier">has_label</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">selected</span><span class="grouping">]</span>
+
+            <span class="comment"># Add newly labeled confident predictions to the dataset</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transduction_</span><span class="grouping">[</span><span class="identifier">selected_full</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pred</span><span class="grouping">[</span><span class="identifier">selected</span><span class="grouping">]</span>
+            <span class="identifier">has_label</span><span class="grouping">[</span><span class="identifier">selected_full</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labeled_iter_</span><span class="grouping">[</span><span class="identifier">selected_full</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span>
+
+            <span class="keyword">if</span> <span class="identifier">selected_full</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="comment"># no changed labels</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">termination_condition_</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"no_change"</span>
+                <span class="keyword">break</span>
+
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="punctuation">:</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"End of iteration {self.n_iter_},"</span>
+                      <span class="identifier">f</span><span class="string-literal">" added {selected_full.shape[0]} new labels."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">termination_condition_</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"max_iter"</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">has_label</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">termination_condition_</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"all_labeled"</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">safe_mask</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">has_label</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transduction_</span><span class="grouping">[</span><span class="identifier">has_label</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'base_estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict the classes of X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Array representing the data.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples,)
+            Array with predicted labels.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict probability for each possible outcome.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Array representing the data.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples, n_features)
+            Array with prediction probabilities.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'base_estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Calls decision function of the `base_estimator`.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Array representing the data.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples, n_features)
+            Result of the decision function of the `base_estimator`.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'base_estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">predict_log_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict log probability for each possible outcome.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Array representing the data.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples, n_features)
+            Array with log prediction probabilities.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">predict_log_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'base_estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Calls score on the `base_estimator`.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Array representing the data.
+
+        y : array-like of shape (n_samples,)
+            Array representing the labels.
+
+        Returns
+        -------
+        score : float
+            Result of calling score on the `base_estimator`.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

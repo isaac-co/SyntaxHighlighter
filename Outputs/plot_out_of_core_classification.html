@@ -1,0 +1,429 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+======================================================
+Out-of-core classification of text documents
+======================================================
+
+This is an example showing how scikit-learn can be used for classification
+using an out-of-core approach: learning from data that doesn't fit into main
+memory. We make use of an online classifier, i.e., one that supports the
+partial_fit method, that will be fed with batches of examples. To guarantee
+that the features space remains the same over time we leverage a
+HashingVectorizer that will project each example into the same feature space.
+This is especially useful in the case of text classification where new
+features (words) may appear in each batch.
+"""</span>
+
+<span class="comment"># Authors: Eustache Diemert &lt;eustache@diemert.fr&gt;</span>
+<span class="comment">#          @FedericoV &lt;https://github.com/FedericoV/&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">glob</span> <span class="keyword">import</span> <span class="identifier">glob</span>
+<span class="keyword">import</span> <span class="identifier">itertools</span>
+<span class="keyword">import</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span>
+<span class="keyword">import</span> <span class="identifier">re</span>
+<span class="keyword">import</span> <span class="identifier">tarfile</span>
+<span class="keyword">import</span> <span class="identifier">time</span>
+<span class="keyword">import</span> <span class="identifier">sys</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>
+<span class="keyword">from</span> <span class="identifier">matplotlib</span> <span class="keyword">import</span> <span class="identifier">rcParams</span>
+
+<span class="keyword">from</span> <span class="identifier">html</span><span class="punctuation">.</span><span class="identifier">parser</span> <span class="keyword">import</span> <span class="identifier">HTMLParser</span>
+<span class="keyword">from</span> <span class="identifier">urllib</span><span class="punctuation">.</span><span class="identifier">request</span> <span class="keyword">import</span> <span class="identifier">urlretrieve</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">datasets</span> <span class="keyword">import</span> <span class="identifier">get_data_home</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">feature_extraction</span><span class="punctuation">.</span><span class="identifier">text</span> <span class="keyword">import</span> <span class="identifier">HashingVectorizer</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">SGDClassifier</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="invalid">P</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">A</span><span class="invalid">g</span><span class="invalid">g</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">Perceptron</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">naive_bayes</span> <span class="keyword">import</span> <span class="identifier">MultinomialNB</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_not_in_sphinx</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment"># Hack to detect whether we are running by the sphinx builder</span>
+    <span class="keyword">return</span> <span class="string-literal">'__file__'</span> <span class="relational-operator">in</span> <span class="invalid">g</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">b</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">s</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Reuters Dataset related routines</span>
+<span class="comment"># --------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># The dataset used in this example is Reuters-21578 as provided by the UCI ML</span>
+<span class="comment"># repository. It will be automatically downloaded and uncompressed on first</span>
+<span class="comment"># run.</span>
+
+
+
+<span class="keyword">class</span> <span class="identifier">ReutersParser</span><span class="grouping">(</span><span class="identifier">HTMLParser</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Utility class to parse a SGML file and yield documents one at a time."""</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">encoding</span><span class="arithmetic-assignment">=</span><span class="string-literal">'latin-1'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">HTMLParser</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">encoding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">encoding</span>
+
+    <span class="keyword">def</span> <span class="identifier">handle_starttag</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">tag</span><span class="punctuation">,</span> <span class="identifier">attrs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'start_'</span> <span class="arithmetic-operator">+</span> <span class="identifier">tag</span>
+        <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="punctuation">,</span> <span class="keyword">lambda</span> <span class="identifier">x</span><span class="punctuation">:</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">attrs</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">handle_endtag</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">tag</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'end_'</span> <span class="arithmetic-operator">+</span> <span class="identifier">tag</span>
+        <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="punctuation">,</span> <span class="keyword">lambda</span><span class="punctuation">:</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_reset</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_title</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_body</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_topics</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_topic_d</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">title</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">""</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">body</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">""</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topics</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_d</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">""</span>
+
+    <span class="keyword">def</span> <span class="identifier">parse</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">fd</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">docs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">chunk</span> <span class="relational-operator">in</span> <span class="identifier">fd</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">feed</span><span class="grouping">(</span><span class="identifier">chunk</span><span class="punctuation">.</span><span class="identifier">decode</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">encoding</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">doc</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">docs</span><span class="punctuation">:</span>
+                <span class="keyword">yield</span> <span class="identifier">doc</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">docs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">close</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">handle_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_body</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">body</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">data</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_title</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">title</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">data</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_topic_d</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_d</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">data</span>
+
+    <span class="keyword">def</span> <span class="identifier">start_reuters</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">attributes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">pass</span>
+
+    <span class="keyword">def</span> <span class="identifier">end_reuters</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">body</span> <span class="arithmetic-assignment">=</span> <span class="identifier">re</span><span class="punctuation">.</span><span class="identifier">sub</span><span class="grouping">(</span><span class="identifier">r</span><span class="string-literal">'\s+', r' '</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">body</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">docs</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="grouping">{</span><span class="string-literal">'title'</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">title</span><span class="punctuation">,</span>
+                          <span class="string-literal">'body'</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">body</span><span class="punctuation">,</span>
+                          <span class="string-literal">'topics'</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topics</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">start_title</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">attributes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_title</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+
+    <span class="keyword">def</span> <span class="identifier">end_title</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_title</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="keyword">def</span> <span class="identifier">start_body</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">attributes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_body</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+
+    <span class="keyword">def</span> <span class="identifier">end_body</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_body</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="keyword">def</span> <span class="identifier">start_topics</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">attributes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_topics</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+
+    <span class="keyword">def</span> <span class="identifier">end_topics</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_topics</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="keyword">def</span> <span class="identifier">start_d</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">attributes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_topic_d</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+
+    <span class="keyword">def</span> <span class="identifier">end_d</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">in_topic_d</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topics</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_d</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_d</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">""</span>
+
+
+<span class="keyword">def</span> <span class="identifier">stream_reuters_documents</span><span class="grouping">(</span><span class="identifier">data_path</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Iterate over documents of the Reuters dataset.
+
+    The Reuters archive will automatically be downloaded and uncompressed if
+    the `data_path` directory does not exist.
+
+    Documents are represented as dictionaries with 'body' (str),
+    'title' (str), 'topics' (list(str)) keys.
+
+    """</span>
+
+    <span class="identifier">DOWNLOAD_URL</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">'http://archive.ics.uci.edu/ml/machine-learning-databases/'</span>
+                    <span class="string-literal">'reuters21578-mld/reuters21578.tar.gz'</span><span class="grouping">)</span>
+    <span class="identifier">ARCHIVE_FILENAME</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'reuters21578.tar.gz'</span>
+
+    <span class="keyword">if</span> <span class="identifier">data_path</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">data_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">get_data_home</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="string-literal">"reuters"</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">data_path</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Download the dataset."""</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"downloading dataset (once and for all) into %s"</span> <span class="arithmetic-operator">%</span>
+              <span class="identifier">data_path</span><span class="grouping">)</span>
+        <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">mkdir</span><span class="grouping">(</span><span class="identifier">data_path</span><span class="grouping">)</span>
+
+        <span class="keyword">def</span> <span class="identifier">progress</span><span class="grouping">(</span><span class="identifier">blocknum</span><span class="punctuation">,</span> <span class="identifier">bs</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">total_sz_mb</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'%.2f MB'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">size</span> <span class="arithmetic-operator">/</span> <span class="float-literal">1e6</span><span class="grouping">)</span>
+            <span class="identifier">current_sz_mb</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'%.2f MB'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">blocknum</span> <span class="arithmetic-operator">*</span> <span class="identifier">bs</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="float-literal">1e6</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">_not_in_sphinx</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">stdout</span><span class="punctuation">.</span><span class="identifier">write</span><span class="grouping">(</span>
+                    <span class="string-literal">'\rdownloaded %s / %s'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">current_sz_mb</span><span class="punctuation">,</span> <span class="identifier">total_sz_mb</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">archive_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">data_path</span><span class="punctuation">,</span> <span class="identifier">ARCHIVE_FILENAME</span><span class="grouping">)</span>
+        <span class="identifier">urlretrieve</span><span class="grouping">(</span><span class="identifier">DOWNLOAD_URL</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="identifier">archive_path</span><span class="punctuation">,</span>
+                    <span class="identifier">reporthook</span><span class="arithmetic-assignment">=</span><span class="identifier">progress</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">_not_in_sphinx</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">stdout</span><span class="punctuation">.</span><span class="identifier">write</span><span class="grouping">(</span><span class="string-literal">'\r'</span><span class="grouping">)</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"untarring Reuters dataset..."</span><span class="grouping">)</span>
+        <span class="identifier">tarfile</span><span class="punctuation">.</span><span class="identifier">open</span><span class="grouping">(</span><span class="identifier">archive_path</span><span class="punctuation">,</span> <span class="string-literal">'r:gz'</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">extractall</span><span class="grouping">(</span><span class="identifier">data_path</span><span class="grouping">)</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"done."</span><span class="grouping">)</span>
+
+    <span class="identifier">parser</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ReutersParser</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">glob</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">data_path</span><span class="punctuation">,</span> <span class="string-literal">"*.sgm"</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">for</span> <span class="identifier">doc</span> <span class="relational-operator">in</span> <span class="identifier">parser</span><span class="punctuation">.</span><span class="identifier">parse</span><span class="grouping">(</span><span class="identifier">open</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="string-literal">'rb'</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">yield</span> <span class="identifier">doc</span>
+
+
+<span class="comment"># %%</span>
+<span class="comment"># Main</span>
+<span class="comment"># ----</span>
+<span class="comment">#</span>
+<span class="comment"># Create the vectorizer and limit the number of features to a reasonable</span>
+<span class="comment"># maximum</span>
+
+<span class="identifier">vectorizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">HashingVectorizer</span><span class="grouping">(</span><span class="identifier">decode_error</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ignore'</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span> <span class="arithmetic-operator">**</span> <span class="int-literal">18</span><span class="punctuation">,</span>
+                               <span class="identifier">alternate_sign</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+
+<span class="comment"># Iterator over parsed Reuters SGML files.</span>
+<span class="identifier">data_stream</span> <span class="arithmetic-assignment">=</span> <span class="identifier">stream_reuters_documents</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># We learn a binary classification between the "acq" class and all the others.</span>
+<span class="comment"># "acq" was chosen as it is more or less evenly distributed in the Reuters</span>
+<span class="comment"># files. For other datasets, one should take care of creating a test set with</span>
+<span class="comment"># a realistic portion of positive instances.</span>
+<span class="identifier">all_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">positive_class</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'acq'</span>
+
+<span class="comment"># Here are some classifiers that support the `partial_fit` method</span>
+<span class="identifier">partial_fit_classifiers</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span>
+    <span class="string-literal">'SGD'</span><span class="punctuation">:</span> <span class="identifier">SGDClassifier</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="string-literal">'Perceptron'</span><span class="punctuation">:</span> <span class="identifier">Perceptron</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="string-literal">'NB Multinomial'</span><span class="punctuation">:</span> <span class="identifier">MultinomialNB</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.01</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="string-literal">'Passive-Aggressive'</span><span class="punctuation">:</span> <span class="invalid">P</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">A</span><span class="invalid">g</span><span class="invalid">g</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+<span class="grouping">}</span>
+
+
+<span class="keyword">def</span> <span class="identifier">get_minibatch</span><span class="grouping">(</span><span class="identifier">doc_iter</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">pos_class</span><span class="arithmetic-assignment">=</span><span class="identifier">positive_class</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Extract a minibatch of examples, return a tuple X_text, y.
+
+    Note: size is before excluding invalid docs with no topics assigned.
+
+    """</span>
+    <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">(</span><span class="string-literal">'{title}\n\n{body}'.format(**doc), pos_class in doc['topics'</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">doc</span> <span class="relational-operator">in</span> <span class="identifier">itertools</span><span class="punctuation">.</span><span class="identifier">islice</span><span class="grouping">(</span><span class="identifier">doc_iter</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">doc</span><span class="grouping">[</span><span class="string-literal">'topics'</span><span class="grouping">]</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+    <span class="identifier">X_text</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">data</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">X_text</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">iter_minibatches</span><span class="grouping">(</span><span class="identifier">doc_iter</span><span class="punctuation">,</span> <span class="identifier">minibatch_size</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Generator of minibatches."""</span>
+    <span class="identifier">X_text</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_minibatch</span><span class="grouping">(</span><span class="identifier">doc_iter</span><span class="punctuation">,</span> <span class="identifier">minibatch_size</span><span class="grouping">)</span>
+    <span class="keyword">while</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">X_text</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">yield</span> <span class="identifier">X_text</span><span class="punctuation">,</span> <span class="identifier">y</span>
+        <span class="identifier">X_text</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_minibatch</span><span class="grouping">(</span><span class="identifier">doc_iter</span><span class="punctuation">,</span> <span class="identifier">minibatch_size</span><span class="grouping">)</span>
+
+
+<span class="comment"># test data statistics</span>
+<span class="identifier">test_stats</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">'n_test': 0, 'n_test_pos'</span><span class="punctuation">:</span> <span class="int-literal">0</span><span class="grouping">}</span>
+
+<span class="comment"># First we hold out a number of examples to estimate accuracy</span>
+<span class="identifier">n_test_documents</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1000</span>
+<span class="identifier">tick</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">X_test_text</span><span class="punctuation">,</span> <span class="identifier">y_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_minibatch</span><span class="grouping">(</span><span class="identifier">data_stream</span><span class="punctuation">,</span> <span class="int-literal">1000</span><span class="grouping">)</span>
+<span class="identifier">parsing_time</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">tick</span>
+<span class="identifier">tick</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">X_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectorizer</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X_test_text</span><span class="grouping">)</span>
+<span class="identifier">vectorizing_time</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">tick</span>
+<span class="identifier">test_stats</span><span class="grouping">[</span><span class="string-literal">'n_test'</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="grouping">)</span>
+<span class="identifier">test_stats</span><span class="grouping">[</span><span class="string-literal">'n_test_pos'</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="grouping">)</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Test set is %d documents (%d positive)"</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">progress</span><span class="grouping">(</span><span class="identifier">cls_name</span><span class="punctuation">,</span> <span class="identifier">stats</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Report progress information, return a string."""</span>
+    <span class="identifier">duration</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">stats</span><span class="grouping">[</span><span class="string-literal">'t0'</span><span class="grouping">]</span>
+    <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"%20s classifier : \t"</span> <span class="arithmetic-operator">%</span> <span class="identifier">cls_name</span>
+    <span class="identifier">s</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"%(n_train)6d train docs (%(n_train_pos)6d positive) "</span> <span class="arithmetic-operator">%</span> <span class="identifier">stats</span>
+    <span class="identifier">s</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"%(n_test)6d test docs (%(n_test_pos)6d positive) "</span> <span class="arithmetic-operator">%</span> <span class="identifier">test_stats</span>
+    <span class="identifier">s</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"accuracy: %(accuracy).3f "</span> <span class="arithmetic-operator">%</span> <span class="identifier">stats</span>
+    <span class="identifier">s</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"in %.2fs (%5d docs/s)"</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">duration</span><span class="punctuation">,</span> <span class="identifier">stats</span><span class="grouping">[</span><span class="string-literal">'n_train'</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">duration</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">s</span>
+
+
+<span class="identifier">cls_stats</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+
+<span class="keyword">for</span> <span class="identifier">cls_name</span> <span class="relational-operator">in</span> <span class="identifier">partial_fit_classifiers</span><span class="punctuation">:</span>
+    <span class="identifier">stats</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">'n_train': 0, 'n_train_pos'</span><span class="punctuation">:</span> <span class="int-literal">0</span><span class="punctuation">,</span>
+             <span class="string-literal">'accuracy': 0.0, 'accuracy_history': [(0, 0)], 't0'</span><span class="punctuation">:</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+             <span class="string-literal">'runtime_history': [(0, 0)], 'total_fit_time'</span><span class="punctuation">:</span> <span class="float-literal">0.0</span><span class="grouping">}</span>
+    <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">stats</span>
+
+<span class="identifier">get_minibatch</span><span class="grouping">(</span><span class="identifier">data_stream</span><span class="punctuation">,</span> <span class="identifier">n_test_documents</span><span class="grouping">)</span>
+<span class="comment"># Discard test set</span>
+
+<span class="comment"># We will feed the classifier with mini-batches of 1000 documents; this means</span>
+<span class="comment"># we have at most 1000 docs in memory at any time.  The smaller the document</span>
+<span class="comment"># batch, the bigger the relative overhead of the partial fit methods.</span>
+<span class="identifier">minibatch_size</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1000</span>
+
+<span class="comment"># Create the data_stream that parses Reuters SGML files and iterates on</span>
+<span class="comment"># documents as a stream.</span>
+<span class="identifier">minibatch_iterators</span> <span class="arithmetic-assignment">=</span> <span class="identifier">iter_minibatches</span><span class="grouping">(</span><span class="identifier">data_stream</span><span class="punctuation">,</span> <span class="identifier">minibatch_size</span><span class="grouping">)</span>
+<span class="identifier">total_vect_time</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+
+<span class="comment"># Main loop : iterate on mini-batches of examples</span>
+<span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">X_train_text</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">minibatch_iterators</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+    <span class="identifier">tick</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectorizer</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X_train_text</span><span class="grouping">)</span>
+    <span class="identifier">total_vect_time</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">tick</span>
+
+    <span class="keyword">for</span> <span class="identifier">cls_name</span><span class="punctuation">,</span> <span class="identifier">cls</span> <span class="relational-operator">in</span> <span class="identifier">partial_fit_classifiers</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">tick</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="comment"># update estimator with examples in the current mini-batch</span>
+        <span class="identifier">cls</span><span class="punctuation">.</span><span class="identifier">partial_fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="identifier">all_classes</span><span class="grouping">)</span>
+
+        <span class="comment"># accumulate test accuracy stats</span>
+        <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'total_fit_time'</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">tick</span>
+        <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'n_train'</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">X_train</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'n_train_pos'</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="grouping">)</span>
+        <span class="identifier">tick</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'accuracy'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cls</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">y_test</span><span class="grouping">)</span>
+        <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'prediction_time'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="punctuation">.</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">tick</span>
+        <span class="identifier">acc_history</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'accuracy'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                       <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'n_train'</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'accuracy_history'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">acc_history</span><span class="grouping">)</span>
+        <span class="identifier">run_history</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'accuracy'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                       <span class="identifier">total_vect_time</span> <span class="arithmetic-operator">+</span> <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'total_fit_time'</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'runtime_history'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">run_history</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">i</span> <span class="arithmetic-operator">%</span> <span class="int-literal">3</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">progress</span><span class="grouping">(</span><span class="identifier">cls_name</span><span class="punctuation">,</span> <span class="identifier">cls_stats</span><span class="grouping">[</span><span class="identifier">cls_name</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">i</span> <span class="arithmetic-operator">%</span> <span class="int-literal">3</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'\n'</span><span class="grouping">)</span>
+
+
+<span class="comment"># %%</span>
+<span class="comment"># Plot results</span>
+<span class="comment"># ------------</span>
+<span class="comment">#</span>
+<span class="comment"># The plot represents the learning curve of the classifier: the evolution</span>
+<span class="comment"># of classification accuracy over the course of the mini-batches. Accuracy is</span>
+<span class="comment"># measured on the first 1000 samples, held out as a validation set.</span>
+<span class="comment">#</span>
+<span class="comment"># To limit the memory consumption, we queue examples up to a fixed amount</span>
+<span class="comment"># before feeding them to the learner.</span>
+
+
+<span class="keyword">def</span> <span class="identifier">plot_accuracy</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">x_legend</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Plot accuracy as a function of x."""</span>
+    <span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">x</span><span class="grouping">)</span>
+    <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+    <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Classification accuracy as a function of %s'</span> <span class="arithmetic-operator">%</span> <span class="identifier">x_legend</span><span class="grouping">)</span>
+    <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'%s'</span> <span class="arithmetic-operator">%</span> <span class="identifier">x_legend</span><span class="grouping">)</span>
+    <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Accuracy'</span><span class="grouping">)</span>
+    <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">grid</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+    <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+
+<span class="identifier">rcParams</span><span class="grouping">[</span><span class="string-literal">'legend.fontsize'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">10</span>
+<span class="identifier">cls_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">cls_stats</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="comment"># Plot accuracy evolution</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="keyword">for</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">stats</span> <span class="relational-operator">in</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">cls_stats</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment"># Plot accuracy evolution with #examples</span>
+    <span class="identifier">accuracy</span><span class="punctuation">,</span> <span class="identifier">n_examples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">stats</span><span class="grouping">[</span><span class="string-literal">'accuracy_history'</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">plot_accuracy</span><span class="grouping">(</span><span class="identifier">n_examples</span><span class="punctuation">,</span> <span class="identifier">accuracy</span><span class="punctuation">,</span> <span class="string-literal">"training examples (#)"</span><span class="grouping">)</span>
+    <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">gca</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylim</span><span class="grouping">(</span><span class="grouping">(</span><span class="float-literal">0.8</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">legend</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="punctuation">,</span> <span class="identifier">loc</span><span class="arithmetic-assignment">=</span><span class="string-literal">'best'</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="keyword">for</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">stats</span> <span class="relational-operator">in</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">cls_stats</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment"># Plot accuracy evolution with runtime</span>
+    <span class="identifier">accuracy</span><span class="punctuation">,</span> <span class="identifier">runtime</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">stats</span><span class="grouping">[</span><span class="string-literal">'runtime_history'</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">plot_accuracy</span><span class="grouping">(</span><span class="identifier">runtime</span><span class="punctuation">,</span> <span class="identifier">accuracy</span><span class="punctuation">,</span> <span class="string-literal">'runtime (s)'</span><span class="grouping">)</span>
+    <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">gca</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylim</span><span class="grouping">(</span><span class="grouping">(</span><span class="float-literal">0.8</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">legend</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="punctuation">,</span> <span class="identifier">loc</span><span class="arithmetic-assignment">=</span><span class="string-literal">'best'</span><span class="grouping">)</span>
+
+<span class="comment"># Plot fitting times</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">fig</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">gcf</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">cls_runtime</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">stats</span><span class="grouping">[</span><span class="string-literal">'total_fit_time'</span><span class="grouping">]</span>
+               <span class="keyword">for</span> <span class="identifier">cls_name</span><span class="punctuation">,</span> <span class="identifier">stats</span> <span class="relational-operator">in</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">cls_stats</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span>
+
+<span class="identifier">cls_runtime</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">total_vect_time</span><span class="grouping">)</span>
+<span class="identifier">cls_names</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="string-literal">'Vectorization'</span><span class="grouping">)</span>
+<span class="identifier">bar_colors</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'b', 'g', 'r', 'c', 'm', 'y'</span><span class="grouping">]</span>
+
+<span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplot</span><span class="grouping">(</span><span class="int-literal">111</span><span class="grouping">)</span>
+<span class="identifier">rectangles</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">bar</span><span class="grouping">(</span><span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">cls_runtime</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="punctuation">,</span>
+                     <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="identifier">bar_colors</span><span class="grouping">)</span>
+
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_xticks</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linspace</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_xticklabels</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="punctuation">,</span> <span class="identifier">fontsize</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="grouping">)</span>
+<span class="identifier">ymax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">cls_runtime</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="float-literal">1.2</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylim</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">ymax</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylabel</span><span class="grouping">(</span><span class="string-literal">'runtime (s)'</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_title</span><span class="grouping">(</span><span class="string-literal">'Training Times'</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">autolabel</span><span class="grouping">(</span><span class="identifier">rectangles</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""attach some text vi autolabel on rectangles."""</span>
+    <span class="keyword">for</span> <span class="identifier">rect</span> <span class="relational-operator">in</span> <span class="identifier">rectangles</span><span class="punctuation">:</span>
+        <span class="identifier">height</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rect</span><span class="punctuation">.</span><span class="identifier">get_height</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">text</span><span class="grouping">(</span><span class="identifier">rect</span><span class="punctuation">.</span><span class="identifier">get_x</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">rect</span><span class="punctuation">.</span><span class="identifier">get_width</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span><span class="punctuation">,</span>
+                <span class="float-literal">1.05</span> <span class="arithmetic-operator">*</span> <span class="identifier">height</span><span class="punctuation">,</span> <span class="string-literal">'%.4f'</span> <span class="arithmetic-operator">%</span> <span class="identifier">height</span><span class="punctuation">,</span>
+                <span class="identifier">ha</span><span class="arithmetic-assignment">=</span><span class="string-literal">'center', va='bottom'</span><span class="grouping">)</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">setp</span><span class="grouping">(</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xticks</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">rotation</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="grouping">)</span>
+
+
+<span class="identifier">autolabel</span><span class="grouping">(</span><span class="identifier">rectangles</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">tight_layout</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">show</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># Plot prediction times</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">cls_runtime</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+<span class="identifier">cls_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">cls_stats</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="keyword">for</span> <span class="identifier">cls_name</span><span class="punctuation">,</span> <span class="identifier">stats</span> <span class="relational-operator">in</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">cls_stats</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">cls_runtime</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">stats</span><span class="grouping">[</span><span class="string-literal">'prediction_time'</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">cls_runtime</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">parsing_time</span><span class="grouping">)</span>
+<span class="identifier">cls_names</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="string-literal">'Read/Parse\n+Feat.Extr.'</span><span class="grouping">)</span>
+<span class="identifier">cls_runtime</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">vectorizing_time</span><span class="grouping">)</span>
+<span class="identifier">cls_names</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="string-literal">'Hashing\n+Vect.'</span><span class="grouping">)</span>
+
+<span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplot</span><span class="grouping">(</span><span class="int-literal">111</span><span class="grouping">)</span>
+<span class="identifier">rectangles</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">bar</span><span class="grouping">(</span><span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">cls_runtime</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="punctuation">,</span>
+                     <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="identifier">bar_colors</span><span class="grouping">)</span>
+
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_xticks</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linspace</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_xticklabels</span><span class="grouping">(</span><span class="identifier">cls_names</span><span class="punctuation">,</span> <span class="identifier">fontsize</span><span class="arithmetic-assignment">=</span><span class="int-literal">8</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">setp</span><span class="grouping">(</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xticks</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">rotation</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="grouping">)</span>
+<span class="identifier">ymax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">cls_runtime</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="float-literal">1.2</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylim</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">ymax</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylabel</span><span class="grouping">(</span><span class="string-literal">'runtime (s)'</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_title</span><span class="grouping">(</span><span class="string-literal">'Prediction Times (%d instances)'</span> <span class="arithmetic-operator">%</span> <span class="identifier">n_test_documents</span><span class="grouping">)</span>
+<span class="identifier">autolabel</span><span class="grouping">(</span><span class="identifier">rectangles</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">tight_layout</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">show</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

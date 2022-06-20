@@ -1,0 +1,646 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin python3</span>
+<span class="comment">""" Analysis tab of Display Frame of the Faceswap GUI """</span>
+
+<span class="keyword">import</span> <span class="identifier">csv</span>
+<span class="keyword">import</span> <span class="identifier">gettext</span>
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">import</span> <span class="identifier">tkinter</span> <span class="keyword">as</span> <span class="identifier">tk</span>
+<span class="keyword">from</span> <span class="identifier">tkinter</span> <span class="keyword">import</span> <span class="identifier">ttk</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">custom_widgets</span> <span class="keyword">import</span> <span class="identifier">Tooltip</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">display_page</span> <span class="keyword">import</span> <span class="identifier">DisplayPage</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">popup_session</span> <span class="keyword">import</span> <span class="identifier">SessionPopUp</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">analysis</span> <span class="keyword">import</span> <span class="identifier">Session</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">FileHandler</span><span class="punctuation">,</span> <span class="identifier">get_config</span><span class="punctuation">,</span> <span class="identifier">get_images</span><span class="punctuation">,</span> <span class="identifier">LongRunningTask</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+<span class="comment"># LOCALES</span>
+<span class="identifier">_LANG</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gettext</span><span class="punctuation">.</span><span class="identifier">translation</span><span class="grouping">(</span><span class="string-literal">"gui.tooltips", localedir="locales"</span><span class="punctuation">,</span> <span class="identifier">fallback</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_LANG</span><span class="punctuation">.</span><span class="identifier">gettext</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Analysis</span><span class="grouping">(</span><span class="identifier">DisplayPage</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint: disable=too-many-ancestors</span>
+    <span class="comment">""" Session Analysis Tab.
+
+    The area of the GUI that holds the session summary stats for model training sessions.
+
+    Parameters
+    ----------
+    parent: :class:`lib.gui.display.DisplayNotebook`
+        The :class:`ttk.Notebook` that holds this session summary statistics page
+    tab_name: str
+        The name of the tab to be displayed in the notebook
+    helptext: str
+        The help text to display for the summary statistics page
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">tab_name</span><span class="punctuation">,</span> <span class="identifier">helptext</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s: (parent, %s, tab_name: '%s', helptext: '%s')"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">tab_name</span><span class="punctuation">,</span> <span class="identifier">helptext</span><span class="grouping">)</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">tab_name</span><span class="punctuation">,</span> <span class="identifier">helptext</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summary</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset_session_info</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">_Options</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_stats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_main_frame</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>  <span class="comment"># Thread for compiling stats data in background</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_callbacks</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">set_vars</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the analysis specific tkinter variables to :attr:`vars`.
+
+        The tracked variables are the global variables that:
+            * Trigger when a graph refresh has been requested.
+            * Trigger training is commenced or halted
+            * The variable holding the location of the current Tensorboard log folder.
+
+        Returns
+        -------
+        dict
+            The dictionary of variable names to tkinter variables
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">selected_id</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">StringVar</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                    <span class="identifier">refresh_graph</span><span class="arithmetic-assignment">=</span><span class="identifier">get_config</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tk_vars</span><span class="grouping">[</span><span class="string-literal">"refreshgraph"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">is_training</span><span class="arithmetic-assignment">=</span><span class="identifier">get_config</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tk_vars</span><span class="grouping">[</span><span class="string-literal">"istraining"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">analysis_folder</span><span class="arithmetic-assignment">=</span><span class="identifier">get_config</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tk_vars</span><span class="grouping">[</span><span class="string-literal">"analysis_folder"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">on_tab_select</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Callback for when the analysis tab is selected.
+
+        If Faceswap is currently training a model, then update the statistics with the latest
+        values.
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"is_training"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Analysis update callback received"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset_session</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_main_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get the main frame to the sub-notebook to hold stats and session data.
+
+        Returns
+        -------
+        :class:`StatsData`
+            The frame that holds the analysis statistics for the Analysis notebook page
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Getting main stats frame"</span><span class="grouping">)</span>
+        <span class="identifier">mainframe</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subnotebook_add_page</span><span class="grouping">(</span><span class="string-literal">"stats"</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">StatsData</span><span class="grouping">(</span><span class="identifier">mainframe</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"selected_id"], self.helptext["stats"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"got main frame: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_set_callbacks</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Adds callbacks to update the analysis summary statistics and add them to :attr:`vars`
+
+        Training graph refresh - Updates the stats for the current training session when the graph
+        has been updated.
+
+        When the analysis folder has been populated - Updates the stats from that folder.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"refresh_graph"].trace("w"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_current_session</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"analysis_folder"].trace("w"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_populate_from_folder</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_current_session</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=unused-argument</span>
+        <span class="comment">""" Update the currently training session data on a graph update callback. """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"refresh_graph"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tab_is_active</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Analyis tab not selected. Not updating stats"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Analysis update callback received"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset_session</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_reset_session_info</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Reset the session info status to default """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Resetting session info"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">set_info</span><span class="grouping">(</span><span class="string-literal">"No session data loaded"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_populate_from_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=unused-argument</span>
+        <span class="comment">""" Populate the Analysis tab from a model folder.
+
+        Triggered when :attr:`vars` ``analysis_folder`` variable is is set.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">is_training</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">folder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"analysis_folder"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">folder</span> <span class="logical-operator">or</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">isdir</span><span class="grouping">(</span><span class="identifier">folder</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Not a valid folder"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_clear_session</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">state_files</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">fname</span>
+                       <span class="keyword">for</span> <span class="identifier">fname</span> <span class="relational-operator">in</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">listdir</span><span class="grouping">(</span><span class="identifier">folder</span><span class="grouping">)</span>
+                       <span class="keyword">if</span> <span class="identifier">fname</span><span class="punctuation">.</span><span class="identifier">endswith</span><span class="grouping">(</span><span class="string-literal">"_state.json"</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">state_files</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No state files found in folder: '%s'"</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_clear_session</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">state_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">state_files</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">state_files</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Multiple models found. Selecting: '%s'"</span><span class="punctuation">,</span> <span class="identifier">state_file</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_load_session</span><span class="grouping">(</span><span class="identifier">full_path</span><span class="arithmetic-assignment">=</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">state_file</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_get_model_name</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="identifier">state_file</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the model name from a state file's file name.
+
+        Parameters
+        ----------
+        model_dir: str
+            The folder that the model's state file resides in
+        state_file: str
+            The filename of the model's state file
+
+        Returns
+        -------
+        str or ``None``
+            The name of the model extracted from the state file's file name or ``None`` if no
+            log folders were found in the model folder
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Getting model name"</span><span class="grouping">)</span>
+        <span class="identifier">model_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">state_file</span><span class="punctuation">.</span><span class="identifier">replace</span><span class="grouping">(</span><span class="string-literal">"_state.json", ""</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"model_name: %s"</span><span class="punctuation">,</span> <span class="identifier">model_name</span><span class="grouping">)</span>
+        <span class="identifier">logs_dir</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="string-literal">"{}_logs"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">model_name</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">isdir</span><span class="grouping">(</span><span class="identifier">logs_dir</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"No logs folder found in folder: '%s'"</span><span class="punctuation">,</span> <span class="identifier">logs_dir</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span>
+        <span class="keyword">return</span> <span class="identifier">model_name</span>
+
+    <span class="keyword">def</span> <span class="identifier">_set_session_summary</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">message</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the summary data and info message.
+
+        Parameters
+        ----------
+        message: str
+            The information message to set
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting session summary. (message: '%s')"</span><span class="punctuation">,</span> <span class="identifier">message</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LongRunningTask</span><span class="grouping">(</span><span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summarise_data</span><span class="punctuation">,</span>
+                                           <span class="identifier">args</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">Session</span><span class="punctuation">,</span> <span class="grouping">)</span><span class="punctuation">,</span>
+                                           <span class="identifier">widget</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span><span class="punctuation">.</span><span class="identifier">start</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">after</span><span class="grouping">(</span><span class="int-literal">1000</span><span class="punctuation">,</span> <span class="keyword">lambda</span> <span class="identifier">msg</span><span class="arithmetic-assignment">=</span><span class="identifier">message</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_session_summary</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span><span class="punctuation">.</span><span class="identifier">complete</span><span class="punctuation">.</span><span class="identifier">is_set</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Data not yet available"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">after</span><span class="grouping">(</span><span class="int-literal">1000</span><span class="punctuation">,</span> <span class="keyword">lambda</span> <span class="identifier">msg</span><span class="arithmetic-assignment">=</span><span class="identifier">message</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_session_summary</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Retrieving data from thread"</span><span class="grouping">)</span>
+            <span class="identifier">result</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span><span class="punctuation">.</span><span class="identifier">get_result</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">result</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No result from session summary. Clearing analysis view"</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_clear_session</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="keyword">return</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summary</span> <span class="arithmetic-assignment">=</span> <span class="identifier">result</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">set_info</span><span class="grouping">(</span><span class="string-literal">"Session: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">message</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_stats</span><span class="punctuation">.</span><span class="identifier">tree_insert_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summary</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_summarise_data</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">session</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Summarize data in a LongRunningThread as it can take a while.
+
+        Parameters
+        ----------
+        session: :class:`lib.gui.analysis.Session`
+            The session object to generate the summary for
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">session</span><span class="punctuation">.</span><span class="identifier">full_summary</span>
+
+    <span class="keyword">def</span> <span class="identifier">_clear_session</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Clear the currently displayed analysis data from the Tree-View. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Clearing session"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">is_loaded</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"No session loaded. Returning"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summary</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_stats</span><span class="punctuation">.</span><span class="identifier">tree_clear</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">is_training</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset_session_info</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">clear</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_load_session</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">full_path</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the session statistics from a model's state file into the Analysis tab of the GUI
+        display window.
+
+        If a model's log files cannot be found within the model folder then the session is cleared.
+
+        Parameters
+        ----------
+        full_path: str, optional
+            The path to the state file to load session information from. If this is ``None`` then
+            a file dialog is popped to enable the user to choose a state file. Default: ``None``
+         """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loading session"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">full_path</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">full_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">FileHandler</span><span class="grouping">(</span><span class="string-literal">"filename", "state"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">l</span><span class="invalid">e</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">full_path</span><span class="punctuation">:</span>
+                <span class="keyword">return</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_clear_session</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"state_file: '%s'"</span><span class="punctuation">,</span> <span class="identifier">full_path</span><span class="grouping">)</span>
+        <span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="identifier">state_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">full_path</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"model_dir: '%s'"</span><span class="punctuation">,</span> <span class="identifier">model_dir</span><span class="grouping">)</span>
+        <span class="identifier">model_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_model_name</span><span class="grouping">(</span><span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="identifier">state_file</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">model_name</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">initialize_session</span><span class="grouping">(</span><span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="identifier">model_name</span><span class="punctuation">,</span> <span class="identifier">is_training</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">full_path</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">70</span><span class="punctuation">:</span>
+            <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"...{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">70</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_session_summary</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_reset_session</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Reset currently training sessions. Clears the current session and loads in the latest
+        data. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Reset current training session"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">is_training</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Training not running"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="keyword">if</span> <span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">logging_disabled</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Logging disabled. Not triggering analysis update"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_clear_session</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_session_summary</span><span class="grouping">(</span><span class="string-literal">"Currently running training session"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_save_session</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Launch a file dialog pop-up to save the current analysis data to a CSV file. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Saving session"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summary</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No summary data loaded. Nothing to save"</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"No summary data loaded. Nothing to save"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">savefile</span> <span class="arithmetic-assignment">=</span> <span class="identifier">FileHandler</span><span class="grouping">(</span><span class="string-literal">"save", "csv"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">l</span><span class="invalid">e</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">savefile</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No save file. Returning"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Saving to: '%s'"</span><span class="punctuation">,</span> <span class="identifier">savefile</span><span class="grouping">)</span>
+        <span class="identifier">fieldnames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">key</span> <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summary</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">with</span> <span class="identifier">savefile</span> <span class="keyword">as</span> <span class="identifier">outfile</span><span class="punctuation">:</span>
+            <span class="identifier">csvout</span> <span class="arithmetic-assignment">=</span> <span class="identifier">csv</span><span class="punctuation">.</span><span class="identifier">DictWriter</span><span class="grouping">(</span><span class="identifier">outfile</span><span class="punctuation">,</span> <span class="identifier">fieldnames</span><span class="grouping">)</span>
+            <span class="identifier">csvout</span><span class="punctuation">.</span><span class="identifier">writeheader</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">row</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_summary</span><span class="punctuation">:</span>
+                <span class="identifier">csvout</span><span class="punctuation">.</span><span class="identifier">writerow</span><span class="grouping">(</span><span class="identifier">row</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_Options</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Options buttons for the Analysis tab.
+
+    Parameters
+    ----------
+    parent: :class:`Analysis`
+        The Analysis Display Tab that holds the options buttons
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s (parent: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_parent</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parent</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_buttons</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_buttons</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_training_callback</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_buttons</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add the option buttons.
+
+        Returns
+        -------
+        dict
+            The button names to button objects
+        """</span>
+        <span class="identifier">buttons</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">btntype</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"clear", "save", "load"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding button: '%s'"</span><span class="punctuation">,</span> <span class="identifier">btntype</span><span class="grouping">)</span>
+            <span class="identifier">cmd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_parent</span><span class="punctuation">,</span> <span class="string-literal">"_{}_session"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">btntype</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">btn</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ttk</span><span class="punctuation">.</span><span class="identifier">Button</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_parent</span><span class="punctuation">.</span><span class="identifier">optsframe</span><span class="punctuation">,</span>
+                             <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">get_images</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">icons</span><span class="grouping">[</span><span class="identifier">btntype</span><span class="grouping">]</span><span class="punctuation">,</span>
+                             <span class="identifier">command</span><span class="arithmetic-assignment">=</span><span class="identifier">cmd</span><span class="grouping">)</span>
+            <span class="identifier">btn</span><span class="punctuation">.</span><span class="identifier">pack</span><span class="grouping">(</span><span class="identifier">padx</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">RIGHT</span><span class="grouping">)</span>
+            <span class="identifier">hlp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_help</span><span class="grouping">(</span><span class="identifier">btntype</span><span class="grouping">)</span>
+            <span class="identifier">Tooltip</span><span class="grouping">(</span><span class="identifier">btn</span><span class="punctuation">,</span> <span class="identifier">text</span><span class="arithmetic-assignment">=</span><span class="identifier">hlp</span><span class="punctuation">,</span> <span class="identifier">wrap_length</span><span class="arithmetic-assignment">=</span><span class="int-literal">200</span><span class="grouping">)</span>
+            <span class="identifier">buttons</span><span class="grouping">[</span><span class="identifier">btntype</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">btn</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"buttons: %s"</span><span class="punctuation">,</span> <span class="identifier">buttons</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">buttons</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_set_help</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">button_type</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the help text for option buttons.
+
+        Parameters
+        ----------
+        button_type: {"reload", "clear", "save", "load"}
+            The type of button to set the help text for
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting help"</span><span class="grouping">)</span>
+        <span class="identifier">hlp</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">""</span>
+        <span class="keyword">if</span> <span class="identifier">button_type</span> <span class="relational-operator">==</span> <span class="string-literal">"reload"</span><span class="punctuation">:</span>
+            <span class="identifier">hlp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Load/Refresh stats for the currently training session"</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">button_type</span> <span class="relational-operator">==</span> <span class="string-literal">"clear"</span><span class="punctuation">:</span>
+            <span class="identifier">hlp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Clear currently displayed session stats"</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">button_type</span> <span class="relational-operator">==</span> <span class="string-literal">"save"</span><span class="punctuation">:</span>
+            <span class="identifier">hlp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Save session stats to csv"</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">button_type</span> <span class="relational-operator">==</span> <span class="string-literal">"load"</span><span class="punctuation">:</span>
+            <span class="identifier">hlp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Load saved session stats"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">hlp</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_training_callback</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a callback to the training tkinter variable to disable save and clear buttons
+        when a model is training. """</span>
+        <span class="identifier">var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_parent</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"is_training"</span><span class="grouping">]</span>
+        <span class="identifier">var</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"w"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_buttons_state</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_set_buttons_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=unused-argument</span>
+        <span class="comment">""" Callback to enable/disable button when training is commenced and stopped. """</span>
+        <span class="identifier">is_training</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_parent</span><span class="punctuation">.</span><span class="identifier">vars</span><span class="grouping">[</span><span class="string-literal">"is_training"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">state</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"disabled" if is_training else "!disabled"</span>
+        <span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">button</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_buttons</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">name</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"load", "clear"</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">continue</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting %s button state to %s"</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">state</span><span class="grouping">)</span>
+            <span class="identifier">button</span><span class="punctuation">.</span><span class="identifier">state</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">state</span><span class="grouping">]</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">StatsData</span><span class="grouping">(</span><span class="identifier">ttk</span><span class="punctuation">.</span><span class="identifier">Frame</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint: disable=too-many-ancestors</span>
+    <span class="comment">""" Stats frame of analysis tab.
+
+    Holds the tree-view containing the summarized session statistics in the Analysis tab.
+
+    Parameters
+    ----------
+    parent: :class:`tkinter.Frame`
+        The frame within the Analysis Notebook that will hold the statistics
+    selected_id: :class:`tkinter.IntVar`
+        The tkinter variable that holds the currently selected session ID
+    helptext: str
+        The help text to display for the summary statistics page
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">selected_id</span><span class="punctuation">,</span> <span class="identifier">helptext</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s: (parent, %s, selected_id: %s, helptext: '%s')"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">selected_id</span><span class="punctuation">,</span> <span class="identifier">helptext</span><span class="grouping">)</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">parent</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_selected_id</span> <span class="arithmetic-assignment">=</span> <span class="identifier">selected_id</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_popup_positions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">Canvas</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">bd</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">highlightthickness</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">tree_frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ttk</span><span class="punctuation">.</span><span class="identifier">Frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree_canvas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">create_window</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">window</span><span class="arithmetic-assignment">=</span><span class="identifier">tree_frame</span><span class="punctuation">,</span> <span class="identifier">anchor</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">NW</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ttk</span><span class="punctuation">.</span><span class="identifier">Frame</span><span class="grouping">(</span><span class="identifier">tree_frame</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_label</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ttk</span><span class="punctuation">.</span><span class="identifier">Treeview</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_frame</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">selectmode</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">BROWSE</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scrollbar</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ttk</span><span class="punctuation">.</span><span class="identifier">Scrollbar</span><span class="grouping">(</span><span class="identifier">tree_frame</span><span class="punctuation">,</span> <span class="identifier">orient</span><span class="arithmetic-assignment">=</span><span class="string-literal">"vertical"</span><span class="punctuation">,</span> <span class="identifier">command</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">yview</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_columns</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree_configure</span><span class="grouping">(</span><span class="identifier">helptext</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">bind</span><span class="grouping">(</span><span class="string-literal">"&lt;Configure&gt;"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_resize_frame</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scrollbar</span><span class="punctuation">.</span><span class="identifier">pack</span><span class="grouping">(</span><span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">RIGHT</span><span class="punctuation">,</span> <span class="identifier">fill</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">Y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">pack</span><span class="grouping">(</span><span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">TOP</span><span class="punctuation">,</span> <span class="identifier">fill</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_frame</span><span class="punctuation">.</span><span class="identifier">pack</span><span class="grouping">(</span><span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">LEFT</span><span class="punctuation">,</span> <span class="identifier">fill</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">anchor</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">N</span><span class="punctuation">,</span> <span class="identifier">expand</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">pack</span><span class="grouping">(</span><span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">LEFT</span><span class="punctuation">,</span> <span class="identifier">fill</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">BOTH</span><span class="punctuation">,</span> <span class="identifier">expand</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pack</span><span class="grouping">(</span><span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">TOP</span><span class="punctuation">,</span> <span class="identifier">padx</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">pady</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">fill</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">BOTH</span><span class="punctuation">,</span> <span class="identifier">expand</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_label</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add the title above the tree-view. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding Treeview title"</span><span class="grouping">)</span>
+        <span class="identifier">lbl</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ttk</span><span class="punctuation">.</span><span class="identifier">Label</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_frame</span><span class="punctuation">,</span> <span class="identifier">text</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Session Stats"</span><span class="punctuation">,</span> <span class="identifier">anchor</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">CENTER</span><span class="grouping">)</span>
+        <span class="identifier">lbl</span><span class="punctuation">.</span><span class="identifier">pack</span><span class="grouping">(</span><span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">TOP</span><span class="punctuation">,</span> <span class="identifier">fill</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">padx</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">pady</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_resize_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Resize the options frame to fit the canvas.
+
+        Parameters
+        ----------
+        event: `tkinter.Event`
+            The tkinter resize event
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Resize Analysis Frame"</span><span class="grouping">)</span>
+        <span class="identifier">canvas_width</span> <span class="arithmetic-assignment">=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">width</span>
+        <span class="identifier">canvas_height</span> <span class="arithmetic-assignment">=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">height</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">itemconfig</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree_canvas</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="identifier">canvas_width</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="arithmetic-assignment">=</span><span class="identifier">canvas_height</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Resized Analysis Frame"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_tree_configure</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">helptext</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Build a tree-view widget to hold the sessions stats.
+
+        Parameters
+        ----------
+        helptext: str
+            The helptext to display when the mouse is over the tree-view
+
+        Returns
+        -------
+        list
+            The list of tree-view columns
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Configuring Treeview"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">configure</span><span class="grouping">(</span><span class="identifier">yscrollcommand</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scrollbar</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">tag_configure</span><span class="grouping">(</span><span class="string-literal">"total", background="black", foreground="white"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">bind</span><span class="grouping">(</span><span class="string-literal">"&lt;ButtonRelease-1&gt;"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_select_item</span><span class="grouping">)</span>
+        <span class="identifier">Tooltip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">,</span> <span class="identifier">text</span><span class="arithmetic-assignment">=</span><span class="identifier">helptext</span><span class="punctuation">,</span> <span class="identifier">wrap_length</span><span class="arithmetic-assignment">=</span><span class="int-literal">200</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree_columns</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_tree_columns</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add the columns to the totals tree-view.
+
+        Returns
+        -------
+        list
+            The list of tree-view columns
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding Treeview columns"</span><span class="grouping">)</span>
+        <span class="identifier">columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="string-literal">"session", 40, "#"</span><span class="grouping">)</span><span class="punctuation">,</span>
+                   <span class="grouping">(</span><span class="string-literal">"start"</span><span class="punctuation">,</span> <span class="int-literal">130</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span>
+                   <span class="grouping">(</span><span class="string-literal">"end"</span><span class="punctuation">,</span> <span class="int-literal">130</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span>
+                   <span class="grouping">(</span><span class="string-literal">"elapsed"</span><span class="punctuation">,</span> <span class="int-literal">90</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span>
+                   <span class="grouping">(</span><span class="string-literal">"batch"</span><span class="punctuation">,</span> <span class="int-literal">50</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span>
+                   <span class="grouping">(</span><span class="string-literal">"iterations"</span><span class="punctuation">,</span> <span class="int-literal">90</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span>
+                   <span class="grouping">(</span><span class="string-literal">"rate", 60, "EGs/sec"</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="grouping">[</span><span class="string-literal">"columns"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">column</span> <span class="relational-operator">in</span> <span class="identifier">columns</span><span class="grouping">]</span>
+
+        <span class="keyword">for</span> <span class="identifier">column</span> <span class="relational-operator">in</span> <span class="identifier">columns</span><span class="punctuation">:</span>
+            <span class="identifier">text</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="keyword">else</span> <span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding heading: '%s'"</span><span class="punctuation">,</span> <span class="identifier">text</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">heading</span><span class="grouping">(</span><span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">text</span><span class="arithmetic-assignment">=</span><span class="identifier">text</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">column</span><span class="grouping">(</span><span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">anchor</span><span class="arithmetic-assignment">=</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">E</span><span class="punctuation">,</span> <span class="identifier">minwidth</span><span class="arithmetic-assignment">=</span><span class="int-literal">40</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">column</span><span class="grouping">(</span><span class="string-literal">"#0"</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="int-literal">40</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">heading</span><span class="grouping">(</span><span class="string-literal">"#0", text="Graphs"</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="grouping">[</span><span class="identifier">column</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">column</span> <span class="relational-operator">in</span> <span class="identifier">columns</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">tree_insert_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">sessions_summary</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Insert the summary data into the statistics tree-view.
+
+        Parameters
+        ----------
+        sessions_summary: list
+            List of session summary dicts for populating into the tree-view
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Inserting treeview data"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">configure</span><span class="grouping">(</span><span class="identifier">height</span><span class="arithmetic-assignment">=</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">sessions_summary</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">sessions_summary</span><span class="punctuation">:</span>
+            <span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">item</span><span class="grouping">[</span><span class="identifier">column</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">column</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_columns</span><span class="grouping">]</span>
+            <span class="identifier">kwargs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">"values"</span><span class="punctuation">:</span> <span class="identifier">values</span><span class="grouping">}</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_valid_data</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="comment"># Don't show graph icon for non-existent sessions</span>
+                <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"image"] = get_images().icons["graph"</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">values</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="string-literal">"Total"</span><span class="punctuation">:</span>
+                <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"tags"] = "total"</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">insert</span><span class="grouping">(</span><span class="string-literal">"", "end"</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">tree_clear</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Clear all of the summary data from the tree-view. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Clearing treeview data"</span><span class="grouping">)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">get_children</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">configure</span><span class="grouping">(</span><span class="identifier">height</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">TclError</span><span class="punctuation">:</span>
+            <span class="comment"># Catch non-existent tree view when rebuilding the GUI</span>
+            <span class="keyword">pass</span>
+
+    <span class="keyword">def</span> <span class="identifier">_select_item</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update the session summary info with the selected item or launch graph.
+
+        If the mouse is clicked on the graph icon, then the session summary pop-up graph is
+        launched. Otherwise the selected ID is stored.
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse button release event
+        """</span>
+        <span class="identifier">region</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">identify</span><span class="grouping">(</span><span class="string-literal">"region"</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">selection</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">focus</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tree</span><span class="punctuation">.</span><span class="identifier">item</span><span class="grouping">(</span><span class="identifier">selection</span><span class="punctuation">,</span> <span class="string-literal">"values"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">values</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Selected values: %s"</span><span class="punctuation">,</span> <span class="identifier">values</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_selected_id</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">region</span> <span class="relational-operator">==</span> <span class="string-literal">"tree"</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_valid_data</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">data_points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_columns</span><span class="punctuation">.</span><span class="identifier">index</span><span class="grouping">(</span><span class="string-literal">"iterations"</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data_popup</span><span class="grouping">(</span><span class="identifier">data_points</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_valid_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">values</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check there is valid data available for popping up a graph.
+
+        Parameters
+        ----------
+        values: list
+            The values that exist for a single session that are to be validated
+        """</span>
+        <span class="identifier">col_indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_columns</span><span class="punctuation">.</span><span class="identifier">index</span><span class="grouping">(</span><span class="string-literal">"batch"), self._columns.index("iterations"</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">col_indices</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">values</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">isdigit</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"No data to graph for selected session"</span><span class="grouping">)</span>
+                <span class="keyword">return</span> <span class="bool-literal">False</span>
+        <span class="keyword">return</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">def</span> <span class="identifier">_data_popup</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data_points</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Pop up a window and control it's position
+
+        The default view is rolling average over 500 points. If there are fewer data points than
+        this, switch the default to smoothed,
+
+        Parameters
+        ----------
+        data_points: int
+            The number of iterations that are to be plotted
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Popping up data window"</span><span class="grouping">)</span>
+        <span class="identifier">scaling_factor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_config</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">scaling_factor</span>
+        <span class="identifier">toplevel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">SessionPopUp</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_selected_id</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                <span class="identifier">data_points</span><span class="grouping">)</span>
+        <span class="identifier">toplevel</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data_popup_title</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">toplevel</span><span class="punctuation">.</span><span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">call</span><span class="grouping">(</span>
+            <span class="string-literal">'wm'</span><span class="punctuation">,</span>
+            <span class="string-literal">'iconphoto'</span><span class="punctuation">,</span>
+            <span class="identifier">toplevel</span><span class="punctuation">.</span><span class="identifier">_w</span><span class="punctuation">,</span> <span class="identifier">get_images</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">icons</span><span class="grouping">[</span><span class="string-literal">"favicon"</span><span class="grouping">]</span><span class="grouping">)</span>  <span class="comment"># pylint:disable=protected-access</span>
+        <span class="identifier">position</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data_popup_get_position</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">height</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="int-literal">900</span> <span class="arithmetic-operator">*</span> <span class="identifier">scaling_factor</span><span class="grouping">)</span>
+        <span class="identifier">width</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="int-literal">480</span> <span class="arithmetic-operator">*</span> <span class="identifier">scaling_factor</span><span class="grouping">)</span>
+        <span class="identifier">toplevel</span><span class="punctuation">.</span><span class="identifier">geometry</span><span class="grouping">(</span><span class="string-literal">"{}x{}+{}+{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">height</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                               <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">width</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                               <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">position</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                               <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">position</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">toplevel</span><span class="punctuation">.</span><span class="identifier">update</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_data_popup_title</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get the summary graph popup title.
+
+        Returns
+        -------
+        str
+            The title to display at the top of the pop-up graph window
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting poup title"</span><span class="grouping">)</span>
+        <span class="identifier">selected_id</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_selected_id</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="identifier">model_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">Session</span><span class="punctuation">.</span><span class="identifier">model_filename</span><span class="grouping">)</span>
+        <span class="identifier">title</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"All Sessions"</span>
+        <span class="keyword">if</span> <span class="identifier">selected_id</span> <span class="relational-operator">!=</span> <span class="string-literal">"Total"</span><span class="punctuation">:</span>
+            <span class="identifier">title</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{} Model: Session #{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">model_name</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">selected_id</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Title: '%s'"</span><span class="punctuation">,</span> <span class="identifier">title</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="string-literal">"{} - {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">title</span><span class="punctuation">,</span> <span class="identifier">model_dir</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_data_popup_get_position</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get the position of the next window to pop the summary graph to.
+
+        Returns
+        -------
+        list
+            The [x, y] co-ordinates that the pop up window should be placed at
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"getting poup position"</span><span class="grouping">)</span>
+        <span class="identifier">init_pos</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="int-literal">120</span><span class="punctuation">,</span> <span class="int-literal">120</span><span class="grouping">]</span>
+        <span class="identifier">pos</span> <span class="arithmetic-assignment">=</span> <span class="identifier">init_pos</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">pos</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_popup_positions</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_popup_positions</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">pos</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="identifier">pos</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">item</span> <span class="arithmetic-operator">+</span> <span class="int-literal">200</span> <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">pos</span><span class="grouping">]</span>
+            <span class="identifier">init_pos</span><span class="punctuation">,</span> <span class="identifier">pos</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data_popup_check_boundaries</span><span class="grouping">(</span><span class="identifier">init_pos</span><span class="punctuation">,</span> <span class="identifier">pos</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Position: %s"</span><span class="punctuation">,</span> <span class="identifier">pos</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">pos</span>
+
+    <span class="keyword">def</span> <span class="identifier">_data_popup_check_boundaries</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">initial_position</span><span class="punctuation">,</span> <span class="identifier">position</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check that the popup remains within the screen boundaries.
+
+        Parameters
+        ----------
+        initial_position: list
+            The [x, y] position of the last displayed popup window
+        position: list
+            The requested [x, y] position for the new popup window
+
+        Returns
+        -------
+        tuple
+            The original initial_position and position, adjusted if the new window would go out of
+            bounds
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Checking poup boundaries: (initial_position: %s, position: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">initial_position</span><span class="punctuation">,</span> <span class="identifier">position</span><span class="grouping">)</span>
+        <span class="identifier">boundary_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">winfo_screenwidth</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">120</span>
+        <span class="identifier">boundary_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">winfo_screenheight</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">120</span>
+        <span class="keyword">if</span> <span class="identifier">position</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&gt;=</span> <span class="identifier">boundary_x</span> <span class="logical-operator">or</span> <span class="identifier">position</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&gt;=</span> <span class="identifier">boundary_y</span><span class="punctuation">:</span>
+            <span class="identifier">initial_position</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">initial_position</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">50</span><span class="punctuation">,</span> <span class="identifier">initial_position</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="identifier">position</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initial_position</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Returning poup boundaries: (initial_position: %s, position: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">initial_position</span><span class="punctuation">,</span> <span class="identifier">position</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">initial_position</span><span class="punctuation">,</span> <span class="identifier">position</span>
+
+    </pre>
+  </body>
+</html>

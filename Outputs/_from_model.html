@@ -1,0 +1,298 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Gilles Louppe, Mathieu Blondel, Maheshakya Wijewardena</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">SelectorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_get_feature_importances</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">clone</span><span class="punctuation">,</span> <span class="identifier">MetaEstimatorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_tags</span> <span class="keyword">import</span> <span class="identifier">_safe_tags</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">NotFittedError</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">metaestimators</span> <span class="keyword">import</span> <span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_calculate_threshold</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="identifier">threshold</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Interpret the threshold value"""</span>
+
+    <span class="keyword">if</span> <span class="identifier">threshold</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="comment"># determine default from estimator</span>
+        <span class="identifier">est_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">"penalty") and estimator.penalty == "l1"</span><span class="grouping">)</span> <span class="logical-operator">or</span>
+                <span class="string-literal">"Lasso"</span> <span class="relational-operator">in</span> <span class="identifier">est_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># the natural default threshold is 0 when l1 penalty was used</span>
+            <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">1e-5</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"mean"</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">threshold</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="string-literal">"*"</span> <span class="relational-operator">in</span> <span class="identifier">threshold</span><span class="punctuation">:</span>
+            <span class="identifier">scale</span><span class="punctuation">,</span> <span class="identifier">reference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">threshold</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">"*"</span><span class="grouping">)</span>
+            <span class="identifier">scale</span> <span class="arithmetic-assignment">=</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">scale</span><span class="punctuation">.</span><span class="identifier">strip</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">reference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reference</span><span class="punctuation">.</span><span class="identifier">strip</span><span class="grouping">(</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">reference</span> <span class="relational-operator">==</span> <span class="string-literal">"median"</span><span class="punctuation">:</span>
+                <span class="identifier">reference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">reference</span> <span class="relational-operator">==</span> <span class="string-literal">"mean"</span><span class="punctuation">:</span>
+                <span class="identifier">reference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unknown reference: "</span> <span class="arithmetic-operator">+</span> <span class="identifier">reference</span><span class="grouping">)</span>
+
+            <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale</span> <span class="arithmetic-operator">*</span> <span class="identifier">reference</span>
+
+        <span class="keyword">elif</span> <span class="identifier">threshold</span> <span class="relational-operator">==</span> <span class="string-literal">"median"</span><span class="punctuation">:</span>
+            <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+        <span class="keyword">elif</span> <span class="identifier">threshold</span> <span class="relational-operator">==</span> <span class="string-literal">"mean"</span><span class="punctuation">:</span>
+            <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Expected threshold='mean' or threshold='median' "</span>
+                             <span class="string-literal">"got %s"</span> <span class="arithmetic-operator">%</span> <span class="identifier">threshold</span><span class="grouping">)</span>
+
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">threshold</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">threshold</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SelectFromModel</span><span class="grouping">(</span><span class="identifier">MetaEstimatorMixin</span><span class="punctuation">,</span> <span class="identifier">SelectorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Meta-transformer for selecting features based on importance weights.
+
+    .. versionadded:: 0.17
+
+    Read more in the :ref:`User Guide &lt;select_from_model&gt;`.
+
+    Parameters
+    ----------
+    estimator : object
+        The base estimator from which the transformer is built.
+        This can be both a fitted (if ``prefit`` is set to True)
+        or a non-fitted estimator. The estimator should have a
+        ``feature_importances_`` or ``coef_`` attribute after fitting.
+        Otherwise, the ``importance_getter`` parameter should be used.
+
+    threshold : string or float, default=None
+        The threshold value to use for feature selection. Features whose
+        importance is greater or equal are kept while the others are
+        discarded. If "median" (resp. "mean"), then the ``threshold`` value is
+        the median (resp. the mean) of the feature importances. A scaling
+        factor (e.g., "1.25*mean") may also be used. If None and if the
+        estimator has a parameter penalty set to l1, either explicitly
+        or implicitly (e.g, Lasso), the threshold used is 1e-5.
+        Otherwise, "mean" is used by default.
+
+    prefit : bool, default=False
+        Whether a prefit model is expected to be passed into the constructor
+        directly or not. If True, ``transform`` must be called directly
+        and SelectFromModel cannot be used with ``cross_val_score``,
+        ``GridSearchCV`` and similar utilities that clone the estimator.
+        Otherwise train the model using ``fit`` and then ``transform`` to do
+        feature selection.
+
+    norm_order : non-zero int, inf, -inf, default=1
+        Order of the norm used to filter the vectors of coefficients below
+        ``threshold`` in the case where the ``coef_`` attribute of the
+        estimator is of dimension 2.
+
+    max_features : int, default=None
+        The maximum number of features to select.
+        To only select based on ``max_features``, set ``threshold=-np.inf``.
+
+        .. versionadded:: 0.20
+
+    importance_getter : str or callable, default='auto'
+        If 'auto', uses the feature importance either through a ``coef_``
+        attribute or ``feature_importances_`` attribute of estimator.
+
+        Also accepts a string that specifies an attribute name/path
+        for extracting feature importance (implemented with `attrgetter`).
+        For example, give `regressor_.coef_` in case of
+        :class:`~sklearn.compose.TransformedTargetRegressor`  or
+        `named_steps.clf.feature_importances_` in case of
+        :class:`~sklearn.pipeline.Pipeline` with its last step named `clf`.
+
+        If `callable`, overrides the default feature importance getter.
+        The callable is passed with the fitted estimator and it should
+        return importance for each feature.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    estimator_ : an estimator
+        The base estimator from which the transformer is built.
+        This is stored only when a non-fitted estimator is passed to the
+        ``SelectFromModel``, i.e when prefit is False.
+
+    threshold_ : float
+        The threshold value used for feature selection.
+
+    Notes
+    -----
+    Allows NaN/Inf in the input if the underlying estimator does as well.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.feature_selection import SelectFromModel
+    &gt;&gt;&gt; from sklearn.linear_model import LogisticRegression
+    &gt;&gt;&gt; X = [[ 0.87, -1.34,  0.31 ],
+    ...      [-2.79, -0.02, -0.85 ],
+    ...      [-1.34, -0.48, -2.55 ],
+    ...      [ 1.92,  1.48,  0.65 ]]
+    &gt;&gt;&gt; y = [0, 1, 0, 1]
+    &gt;&gt;&gt; selector = SelectFromModel(estimator=LogisticRegression()).fit(X, y)
+    &gt;&gt;&gt; selector.estimator_.coef_
+    array([[-0.3252302 ,  0.83462377,  0.49750423]])
+    &gt;&gt;&gt; selector.threshold_
+    0.55245...
+    &gt;&gt;&gt; selector.get_support()
+    array([False,  True, False])
+    &gt;&gt;&gt; selector.transform(X)
+    array([[-1.34],
+           [-0.02],
+           [-0.48],
+           [ 1.48]])
+
+    See Also
+    --------
+    RFE : Recursive feature elimination based on importance weights.
+    RFECV : Recursive feature elimination with built-in cross-validated
+        selection of the best number of features.
+    SequentialFeatureSelector : Sequential cross-validation based feature
+        selection. Does not rely on importance weights.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">threshold</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">prefit</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">norm_order</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">max_features</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">threshold</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">prefit</span> <span class="arithmetic-assignment">=</span> <span class="identifier">prefit</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span> <span class="arithmetic-assignment">=</span> <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">norm_order</span> <span class="arithmetic-assignment">=</span> <span class="identifier">norm_order</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_features</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_support_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># SelectFromModel can directly call on transform.</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">prefit</span><span class="punctuation">:</span>
+            <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span>
+        <span class="keyword">elif</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">'estimator_'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Either fit the model before transform or set'</span>
+                             <span class="string-literal">' "prefit=True" while passing the fitted'</span>
+                             <span class="string-literal">' estimator to the constructor.'</span><span class="grouping">)</span>
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_feature_importances</span><span class="grouping">(</span>
+            <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">getter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">,</span>
+            <span class="identifier">transform_func</span><span class="arithmetic-assignment">=</span><span class="string-literal">'norm'</span><span class="punctuation">,</span> <span class="identifier">norm_order</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">norm_order</span><span class="grouping">)</span>
+        <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_calculate_threshold</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scores</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">scores</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+            <span class="identifier">candidate_indices</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="identifier">scores</span><span class="punctuation">,</span> <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'mergesort'</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span><span class="grouping">]</span>
+            <span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">candidate_indices</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones_like</span><span class="grouping">(</span><span class="identifier">scores</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+        <span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">scores</span> <span class="relational-operator">&lt;</span> <span class="identifier">threshold</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">return</span> <span class="identifier">mask</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">fit_params</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the SelectFromModel meta-transformer.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The training input samples.
+
+        y : array-like of shape (n_samples,), default=None
+            The target values (integers that correspond to classes in
+            classification, real numbers in regression).
+
+        **fit_params : Other estimator specific parameters
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">"'max_features' should be an integer between"</span>
+                                <span class="string-literal">" 0 and {} features. Got {!r} instead."</span>
+                                <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span> <span class="relational-operator">&gt;</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"'max_features' should be 0 and {} features."</span>
+                                 <span class="string-literal">"Got {} instead."</span>
+                                 <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_features</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">prefit</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">NotFittedError</span><span class="grouping">(</span>
+                <span class="string-literal">"Since 'prefit=True', call transform directly"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">fit_params</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">threshold_</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_feature_importances</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">,</span>
+                                          <span class="identifier">getter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">,</span>
+                                          <span class="identifier">transform_func</span><span class="arithmetic-assignment">=</span><span class="string-literal">'norm'</span><span class="punctuation">,</span>
+                                          <span class="identifier">norm_order</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">norm_order</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">_calculate_threshold</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scores</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="string-literal">'estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">partial_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">fit_params</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the SelectFromModel meta-transformer only once.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The training input samples.
+
+        y : array-like of shape (n_samples,), default=None
+            The target values (integers that correspond to classes in
+            classification, real numbers in regression).
+
+        **fit_params : Other estimator specific parameters
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">prefit</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">NotFittedError</span><span class="grouping">(</span>
+                <span class="string-literal">"Since 'prefit=True', call transform directly"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">"estimator_"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">partial_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">fit_params</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">n_features_in_</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># For consistency with other estimators we raise a AttributeError so</span>
+        <span class="comment"># that hasattr() fails if the estimator isn't fitted.</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">NotFittedError</span> <span class="keyword">as</span> <span class="identifier">nfe</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">AttributeError</span><span class="grouping">(</span>
+                <span class="string-literal">"{} object has no n_features_in_ attribute."</span>
+                <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+            <span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">nfe</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">n_features_in_</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="string-literal">'allow_nan'</span><span class="punctuation">:</span> <span class="identifier">_safe_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">key</span><span class="arithmetic-assignment">=</span><span class="string-literal">"allow_nan"</span><span class="grouping">)</span>
+        <span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,475 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Mean shift clustering algorithm.
+
+Mean shift clustering aims to discover *blobs* in a smooth density of
+samples. It is a centroid based algorithm, which works by updating candidates
+for centroids to be the mean of the points within a given region. These
+candidates are then filtered in a post-processing stage to eliminate
+near-duplicates to form the final set of centroids.
+
+Seeding is performed using a binning technique for scalability.
+"""</span>
+
+<span class="comment"># Authors: Conrad Lee &lt;conradlee@gmail.com&gt;</span>
+<span class="comment">#          Alexandre Gramfort &lt;alexandre.gramfort@inria.fr&gt;</span>
+<span class="comment">#          Gael Varoquaux &lt;gael.varoquaux@normalesup.org&gt;</span>
+<span class="comment">#          Martino Sorbaro &lt;martino.sorbaro@ed.ac.uk&gt;</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">from</span> <span class="identifier">joblib</span> <span class="keyword">import</span> <span class="identifier">Parallel</span>
+
+<span class="keyword">from</span> <span class="identifier">collections</span> <span class="keyword">import</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">c</span><span class="invalid">t</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="identifier">gen_batches</span><span class="punctuation">,</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">ClusterMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span> <span class="keyword">import</span> <span class="identifier">NearestNeighbors</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">pairwise_distances_argmin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">_config</span> <span class="keyword">import</span> <span class="identifier">config_context</span>
+
+
+<span class="keyword">def</span> <span class="identifier">estimate_bandwidth</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">quantile</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.3</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+                       <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Estimate the bandwidth to use with the mean-shift algorithm.
+
+    That this function takes time at least quadratic in n_samples. For large
+    datasets, it's wise to set that parameter to a small value.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Input points.
+
+    quantile : float, default=0.3
+        should be between [0, 1]
+        0.5 means that the median of all pairwise distances is used.
+
+    n_samples : int, default=None
+        The number of samples to use. If not given, all samples are used.
+
+    random_state : int, RandomState instance, default=None
+        The generator used to randomly select the samples from input points
+        for bandwidth estimation. Use an int to make the randomness
+        deterministic.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run for neighbors search.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Returns
+    -------
+    bandwidth : float
+        The bandwidth parameter.
+    """</span>
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">permutation</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_samples</span><span class="grouping">]</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span>
+    <span class="identifier">n_neighbors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">quantile</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">n_neighbors</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>  <span class="comment"># cannot fit NearestNeighbors with n_neighbors = 0</span>
+        <span class="identifier">n_neighbors</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+    <span class="identifier">nbrs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                            <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+    <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="identifier">bandwidth</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+    <span class="keyword">for</span> <span class="identifier">batch</span> <span class="relational-operator">in</span> <span class="identifier">gen_batches</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">500</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">kneighbors</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">batch</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">bandwidth</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">bandwidth</span> <span class="arithmetic-operator">/</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+
+<span class="comment"># separate function for each seed's iterative loop</span>
+<span class="keyword">def</span> <span class="identifier">_mean_shift_single_seed</span><span class="grouping">(</span><span class="identifier">my_mean</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">nbrs</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment"># For each seed, climb gradient until convergence or max_iter</span>
+    <span class="identifier">bandwidth</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">get_params</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="string-literal">'radius'</span><span class="grouping">]</span>
+    <span class="identifier">stop_thresh</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">1e-3</span> <span class="arithmetic-operator">*</span> <span class="identifier">bandwidth</span>  <span class="comment"># when mean has converged</span>
+    <span class="identifier">completed_iterations</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+        <span class="comment"># Find mean of points within bandwidth</span>
+        <span class="identifier">i_nbrs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">radius_neighbors</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">my_mean</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">bandwidth</span><span class="punctuation">,</span>
+                                       <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">points_within</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">i_nbrs</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">points_within</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>  <span class="comment"># Depending on seeding strategy this condition may occur</span>
+        <span class="identifier">my_old_mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">my_mean</span>  <span class="comment"># save the old mean</span>
+        <span class="identifier">my_mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">points_within</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="comment"># If converged or at max_iter, adds the cluster</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">my_mean</span> <span class="arithmetic-operator">-</span> <span class="identifier">my_old_mean</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">stop_thresh</span> <span class="logical-operator">or</span>
+                <span class="identifier">completed_iterations</span> <span class="relational-operator">==</span> <span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+        <span class="identifier">completed_iterations</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+    <span class="keyword">return</span> <span class="identifier">tuple</span><span class="grouping">(</span><span class="identifier">my_mean</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">points_within</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">completed_iterations</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_shift</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">bandwidth</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">seeds</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">bin_seeding</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+               <span class="identifier">min_bin_freq</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">cluster_all</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">300</span><span class="punctuation">,</span>
+               <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Perform mean shift clustering of data using a flat kernel.
+
+    Read more in the :ref:`User Guide &lt;mean_shift&gt;`.
+
+    Parameters
+    ----------
+
+    X : array-like of shape (n_samples, n_features)
+        Input data.
+
+    bandwidth : float, default=None
+        Kernel bandwidth.
+
+        If bandwidth is not given, it is determined using a heuristic based on
+        the median of all pairwise distances. This will take quadratic time in
+        the number of samples. The sklearn.cluster.estimate_bandwidth function
+        can be used to do this more efficiently.
+
+    seeds : array-like of shape (n_seeds, n_features) or None
+        Point used as initial kernel locations. If None and bin_seeding=False,
+        each data point is used as a seed. If None and bin_seeding=True,
+        see bin_seeding.
+
+    bin_seeding : bool, default=False
+        If true, initial kernel locations are not locations of all
+        points, but rather the location of the discretized version of
+        points, where points are binned onto a grid whose coarseness
+        corresponds to the bandwidth. Setting this option to True will speed
+        up the algorithm because fewer seeds will be initialized.
+        Ignored if seeds argument is not None.
+
+    min_bin_freq : int, default=1
+       To speed up the algorithm, accept only those bins with at least
+       min_bin_freq points as seeds.
+
+    cluster_all : bool, default=True
+        If true, then all points are clustered, even those orphans that are
+        not within any kernel. Orphans are assigned to the nearest kernel.
+        If false, then orphans are given cluster label -1.
+
+    max_iter : int, default=300
+        Maximum number of iterations, per seed point before the clustering
+        operation terminates (for that seed point), if has not converged yet.
+
+    n_jobs : int, default=None
+        The number of jobs to use for the computation. This works by computing
+        each of the n_init runs in parallel.
+
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+        .. versionadded:: 0.17
+           Parallel Execution using *n_jobs*.
+
+    Returns
+    -------
+
+    cluster_centers : ndarray of shape (n_clusters, n_features)
+        Coordinates of cluster centers.
+
+    labels : ndarray of shape (n_samples,)
+        Cluster labels for each point.
+
+    Notes
+    -----
+    For an example, see :ref:`examples/cluster/plot_mean_shift.py
+    &lt;sphx_glr_auto_examples_cluster_plot_mean_shift.py&gt;`.
+
+    """</span>
+    <span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MeanShift</span><span class="grouping">(</span><span class="identifier">bandwidth</span><span class="arithmetic-assignment">=</span><span class="identifier">bandwidth</span><span class="punctuation">,</span> <span class="identifier">seeds</span><span class="arithmetic-assignment">=</span><span class="identifier">seeds</span><span class="punctuation">,</span>
+                      <span class="identifier">min_bin_freq</span><span class="arithmetic-assignment">=</span><span class="identifier">min_bin_freq</span><span class="punctuation">,</span>
+                      <span class="identifier">bin_seeding</span><span class="arithmetic-assignment">=</span><span class="identifier">bin_seeding</span><span class="punctuation">,</span>
+                      <span class="identifier">cluster_all</span><span class="arithmetic-assignment">=</span><span class="identifier">cluster_all</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                      <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">cluster_centers_</span><span class="punctuation">,</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">labels_</span>
+
+
+<span class="keyword">def</span> <span class="identifier">get_bin_seeds</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">bin_size</span><span class="punctuation">,</span> <span class="identifier">min_bin_freq</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Finds seeds for mean_shift.
+
+    Finds seeds by first binning data onto a grid whose lines are
+    spaced bin_size apart, and then choosing those bins with at least
+    min_bin_freq points.
+
+    Parameters
+    ----------
+
+    X : array-like of shape (n_samples, n_features)
+        Input points, the same points that will be used in mean_shift.
+
+    bin_size : float
+        Controls the coarseness of the binning. Smaller values lead
+        to more seeding (which is computationally more expensive). If you're
+        not sure how to set this, set it to the value of the bandwidth used
+        in clustering.mean_shift.
+
+    min_bin_freq : int, default=1
+        Only bins with at least min_bin_freq will be selected as seeds.
+        Raising this value decreases the number of seeds found, which
+        makes mean_shift computationally cheaper.
+
+    Returns
+    -------
+    bin_seeds : array-like of shape (n_samples, n_features)
+        Points used as initial kernel positions in clustering.mean_shift.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">bin_size</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">X</span>
+
+    <span class="comment"># Bin points</span>
+    <span class="identifier">bin_sizes</span> <span class="arithmetic-assignment">=</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">c</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">int</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">point</span> <span class="relational-operator">in</span> <span class="identifier">X</span><span class="punctuation">:</span>
+        <span class="identifier">binned_point</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">round</span><span class="grouping">(</span><span class="identifier">point</span> <span class="arithmetic-operator">/</span> <span class="identifier">bin_size</span><span class="grouping">)</span>
+        <span class="identifier">bin_sizes</span><span class="grouping">[</span><span class="identifier">tuple</span><span class="grouping">(</span><span class="identifier">binned_point</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+    <span class="comment"># Select only those bins as seeds which have enough members</span>
+    <span class="identifier">bin_seeds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">point</span> <span class="keyword">for</span> <span class="identifier">point</span><span class="punctuation">,</span> <span class="identifier">freq</span> <span class="relational-operator">in</span> <span class="identifier">bin_sizes</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">if</span>
+                          <span class="identifier">freq</span> <span class="relational-operator">&gt;=</span> <span class="identifier">min_bin_freq</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">bin_seeds</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Binning data failed with provided bin_size=%f,"</span>
+                      <span class="string-literal">" using data points as seeds."</span> <span class="arithmetic-operator">%</span> <span class="identifier">bin_size</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">X</span>
+    <span class="identifier">bin_seeds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bin_seeds</span> <span class="arithmetic-operator">*</span> <span class="identifier">bin_size</span>
+    <span class="keyword">return</span> <span class="identifier">bin_seeds</span>
+
+
+<span class="keyword">class</span> <span class="identifier">MeanShift</span><span class="grouping">(</span><span class="identifier">ClusterMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean shift clustering using a flat kernel.
+
+    Mean shift clustering aims to discover "blobs" in a smooth density of
+    samples. It is a centroid-based algorithm, which works by updating
+    candidates for centroids to be the mean of the points within a given
+    region. These candidates are then filtered in a post-processing stage to
+    eliminate near-duplicates to form the final set of centroids.
+
+    Seeding is performed using a binning technique for scalability.
+
+    Read more in the :ref:`User Guide &lt;mean_shift&gt;`.
+
+    Parameters
+    ----------
+    bandwidth : float, default=None
+        Bandwidth used in the RBF kernel.
+
+        If not given, the bandwidth is estimated using
+        sklearn.cluster.estimate_bandwidth; see the documentation for that
+        function for hints on scalability (see also the Notes, below).
+
+    seeds : array-like of shape (n_samples, n_features), default=None
+        Seeds used to initialize kernels. If not set,
+        the seeds are calculated by clustering.get_bin_seeds
+        with bandwidth as the grid size and default values for
+        other parameters.
+
+    bin_seeding : bool, default=False
+        If true, initial kernel locations are not locations of all
+        points, but rather the location of the discretized version of
+        points, where points are binned onto a grid whose coarseness
+        corresponds to the bandwidth. Setting this option to True will speed
+        up the algorithm because fewer seeds will be initialized.
+        The default value is False.
+        Ignored if seeds argument is not None.
+
+    min_bin_freq : int, default=1
+       To speed up the algorithm, accept only those bins with at least
+       min_bin_freq points as seeds.
+
+    cluster_all : bool, default=True
+        If true, then all points are clustered, even those orphans that are
+        not within any kernel. Orphans are assigned to the nearest kernel.
+        If false, then orphans are given cluster label -1.
+
+    n_jobs : int, default=None
+        The number of jobs to use for the computation. This works by computing
+        each of the n_init runs in parallel.
+
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    max_iter : int, default=300
+        Maximum number of iterations, per seed point before the clustering
+        operation terminates (for that seed point), if has not converged yet.
+
+        .. versionadded:: 0.22
+
+    Attributes
+    ----------
+    cluster_centers_ : ndarray of shape (n_clusters, n_features)
+        Coordinates of cluster centers.
+
+    labels_ : ndarray of shape (n_samples,)
+        Labels of each point.
+
+    n_iter_ : int
+        Maximum number of iterations performed on each seed.
+
+        .. versionadded:: 0.22
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import MeanShift
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[1, 1], [2, 1], [1, 0],
+    ...               [4, 7], [3, 5], [3, 6]])
+    &gt;&gt;&gt; clustering = MeanShift(bandwidth=2).fit(X)
+    &gt;&gt;&gt; clustering.labels_
+    array([1, 1, 1, 0, 0, 0])
+    &gt;&gt;&gt; clustering.predict([[0, 0], [5, 5]])
+    array([1, 0])
+    &gt;&gt;&gt; clustering
+    MeanShift(bandwidth=2)
+
+    Notes
+    -----
+
+    Scalability:
+
+    Because this implementation uses a flat kernel and
+    a Ball Tree to look up members of each kernel, the complexity will tend
+    towards O(T*n*log(n)) in lower dimensions, with n the number of samples
+    and T the number of points. In higher dimensions the complexity will
+    tend towards O(T*n^2).
+
+    Scalability can be boosted by using fewer seeds, for example by using
+    a higher value of min_bin_freq in the get_bin_seeds function.
+
+    Note that the estimate_bandwidth function is much less scalable than the
+    mean shift algorithm and will be the bottleneck if it is used.
+
+    References
+    ----------
+
+    Dorin Comaniciu and Peter Meer, "Mean Shift: A robust approach toward
+    feature space analysis". IEEE Transactions on Pattern Analysis and
+    Machine Intelligence. 2002. pp. 603-619.
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">bandwidth</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">seeds</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">bin_seeding</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">min_bin_freq</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">cluster_all</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">300</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bandwidth</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bandwidth</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">seeds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">seeds</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bin_seeding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bin_seeding</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_all</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cluster_all</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_bin_freq</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min_bin_freq</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform clustering.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Samples to cluster.
+
+        y : Ignored
+
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">bandwidth</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bandwidth</span>
+        <span class="keyword">if</span> <span class="identifier">bandwidth</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">bandwidth</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimate_bandwidth</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">bandwidth</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"bandwidth needs to be greater than zero or None,"</span>
+                             <span class="string-literal">" got %f"</span> <span class="arithmetic-operator">%</span> <span class="identifier">bandwidth</span><span class="grouping">)</span>
+
+        <span class="identifier">seeds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">seeds</span>
+        <span class="keyword">if</span> <span class="identifier">seeds</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bin_seeding</span><span class="punctuation">:</span>
+                <span class="identifier">seeds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_bin_seeds</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">bandwidth</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_bin_freq</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">seeds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">center_intensity_dict</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+
+        <span class="comment"># We use n_jobs=1 because this will be used in nested calls under</span>
+        <span class="comment"># parallel calls to _mean_shift_single_seed so there is no need for</span>
+        <span class="comment"># for further parallelism.</span>
+        <span class="identifier">nbrs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">radius</span><span class="arithmetic-assignment">=</span><span class="identifier">bandwidth</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="comment"># execute iterations on all seeds in parallel</span>
+        <span class="identifier">all_res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="grouping">(</span>
+            <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span><span class="grouping">(</span><span class="identifier">_mean_shift_single_seed</span><span class="grouping">)</span>
+            <span class="grouping">(</span><span class="identifier">seed</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">nbrs</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">seed</span> <span class="relational-operator">in</span> <span class="identifier">seeds</span><span class="grouping">)</span>
+        <span class="comment"># copy results in a dictionary</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">seeds</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">all_res</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>  <span class="comment"># i.e. len(points_within) &gt; 0</span>
+                <span class="identifier">center_intensity_dict</span><span class="grouping">[</span><span class="identifier">all_res</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">all_res</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">x</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">x</span> <span class="relational-operator">in</span> <span class="identifier">all_res</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">center_intensity_dict</span><span class="punctuation">:</span>
+            <span class="comment"># nothing near seeds</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"No point was within bandwidth=%f of any seed."</span>
+                             <span class="invalid">"</span> <span class="keyword">Try</span> <span class="identifier">a</span> <span class="identifier">different</span> <span class="identifier">seeding</span> <span class="identifier">strategy</span> <span class="invalid">\</span>
+                             <span class="logical-operator">or</span> <span class="identifier">increase</span> <span class="identifier">the</span> <span class="identifier">bandwidth</span><span class="punctuation">.</span><span class="invalid">"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">bandwidth</span><span class="grouping">)</span>
+
+        <span class="comment"># POST PROCESSING: remove near duplicate points</span>
+        <span class="comment"># If the distance between two kernels is less than the bandwidth,</span>
+        <span class="comment"># then we have to remove one because it is a duplicate. Remove the</span>
+        <span class="comment"># one with fewer points.</span>
+
+        <span class="identifier">sorted_by_intensity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">center_intensity_dict</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="identifier">key</span><span class="arithmetic-assignment">=</span><span class="keyword">lambda</span> <span class="identifier">tup</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="identifier">tup</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">tup</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="identifier">reverse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">sorted_centers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">tup</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">tup</span> <span class="relational-operator">in</span> <span class="identifier">sorted_by_intensity</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">unique</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">sorted_centers</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+        <span class="identifier">nbrs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">radius</span><span class="arithmetic-assignment">=</span><span class="identifier">bandwidth</span><span class="punctuation">,</span>
+                                <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">sorted_centers</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">center</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">sorted_centers</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">unique</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">neighbor_idxs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">radius_neighbors</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">center</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                      <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                <span class="identifier">unique</span><span class="grouping">[</span><span class="identifier">neighbor_idxs</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+                <span class="identifier">unique</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>  <span class="comment"># leave the current point as unique</span>
+        <span class="identifier">cluster_centers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted_centers</span><span class="grouping">[</span><span class="identifier">unique</span><span class="grouping">]</span>
+
+        <span class="comment"># ASSIGN LABELS: a point belongs to the cluster that it is closest to</span>
+        <span class="identifier">nbrs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                                <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">cluster_centers</span><span class="grouping">)</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+        <span class="identifier">distances</span><span class="punctuation">,</span> <span class="identifier">idxs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">kneighbors</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_all</span><span class="punctuation">:</span>
+            <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idxs</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">labels</span><span class="punctuation">.</span><span class="identifier">fill</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">bool_selector</span> <span class="arithmetic-assignment">=</span> <span class="identifier">distances</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="identifier">bandwidth</span>
+            <span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">bool_selector</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idxs</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">bool_selector</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_centers_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cluster_centers</span><span class="punctuation">,</span> <span class="identifier">labels</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict the closest cluster each sample in X belongs to.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            New data to predict.
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+            Index of the cluster each sample belongs to.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">with</span> <span class="identifier">config_context</span><span class="grouping">(</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">pairwise_distances_argmin</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_centers_</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,315 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Manoj Kumar mks542@nyu.edu</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">optimize</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">LinearModel</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">axis0_safe_slice</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">safe_sparse_dot</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">optimize</span> <span class="keyword">import</span> <span class="identifier">_check_optimize_result</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_huber_loss_and_gradient</span><span class="grouping">(</span><span class="identifier">w</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">epsilon</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Returns the Huber loss and the gradient.
+
+    Parameters
+    ----------
+    w : ndarray, shape (n_features + 1,) or (n_features + 2,)
+        Feature vector.
+        w[:n_features] gives the coefficients
+        w[-1] gives the scale factor and if the intercept is fit w[-2]
+        gives the intercept factor.
+
+    X : ndarray of shape (n_samples, n_features)
+        Input data.
+
+    y : ndarray of shape (n_samples,)
+        Target vector.
+
+    epsilon : float
+        Robustness of the Huber estimator.
+
+    alpha : float
+        Regularization parameter.
+
+    sample_weight : ndarray of shape (n_samples,), default=None
+        Weight assigned to each sample.
+
+    Returns
+    -------
+    loss : float
+        Huber loss.
+
+    gradient : ndarray, shape (len(w))
+        Returns the derivative of the Huber loss with respect to each
+        coefficient, intercept and the scale as a vector.
+    """</span>
+    <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+    <span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span> <span class="relational-operator">==</span> <span class="identifier">w</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+        <span class="identifier">intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="grouping">]</span>
+    <span class="identifier">sigma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">w</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_features</span><span class="grouping">]</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="comment"># Calculate the values where |y - X'w -c / sigma| &gt; epsilon</span>
+    <span class="comment"># The values above this threshold are outliers.</span>
+    <span class="identifier">linear_loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">w</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+        <span class="identifier">linear_loss</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">intercept</span>
+    <span class="identifier">abs_linear_loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">linear_loss</span><span class="grouping">)</span>
+    <span class="identifier">outliers_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">abs_linear_loss</span> <span class="relational-operator">&gt;</span> <span class="identifier">epsilon</span> <span class="arithmetic-operator">*</span> <span class="identifier">sigma</span>
+
+    <span class="comment"># Calculate the linear loss due to the outliers.</span>
+    <span class="comment"># This is equal to (2 * M * |y - X'w -c / sigma| - M**2) * sigma</span>
+    <span class="identifier">outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">abs_linear_loss</span><span class="grouping">[</span><span class="identifier">outliers_mask</span><span class="grouping">]</span>
+    <span class="identifier">num_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">count_nonzero</span><span class="grouping">(</span><span class="identifier">outliers_mask</span><span class="grouping">)</span>
+    <span class="identifier">n_non_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">num_outliers</span>
+
+    <span class="comment"># n_sq_outliers includes the weight give to the outliers while</span>
+    <span class="comment"># num_outliers is just the number of outliers.</span>
+    <span class="identifier">outliers_sw</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">outliers_mask</span><span class="grouping">]</span>
+    <span class="identifier">n_sw_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">outliers_sw</span><span class="grouping">)</span>
+    <span class="identifier">outlier_loss</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">epsilon</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">outliers_sw</span> <span class="arithmetic-operator">*</span> <span class="identifier">outliers</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+                    <span class="identifier">sigma</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_sw_outliers</span> <span class="arithmetic-operator">*</span> <span class="identifier">epsilon</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span>
+
+    <span class="comment"># Calculate the quadratic loss due to the non-outliers.-</span>
+    <span class="comment"># This is equal to |(y - X'w - c)**2 / sigma**2| * sigma</span>
+    <span class="identifier">non_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linear_loss</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">outliers_mask</span><span class="grouping">]</span>
+    <span class="identifier">weighted_non_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">outliers_mask</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">non_outliers</span>
+    <span class="identifier">weighted_loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">weighted_non_outliers</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">non_outliers</span><span class="grouping">)</span>
+    <span class="identifier">squared_loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">weighted_loss</span> <span class="arithmetic-operator">/</span> <span class="identifier">sigma</span>
+
+    <span class="keyword">if</span> <span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+        <span class="identifier">grad</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">grad</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+
+    <span class="comment"># Gradient due to the squared loss.</span>
+    <span class="identifier">X_non_outliers</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">axis0_safe_slice</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="bitwise-operator">~</span><span class="identifier">outliers_mask</span><span class="punctuation">,</span> <span class="identifier">n_non_outliers</span><span class="grouping">)</span>
+    <span class="identifier">grad</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_features</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+        <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">sigma</span> <span class="arithmetic-operator">*</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">weighted_non_outliers</span><span class="punctuation">,</span> <span class="identifier">X_non_outliers</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Gradient due to the linear loss.</span>
+    <span class="identifier">signed_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones_like</span><span class="grouping">(</span><span class="identifier">outliers</span><span class="grouping">)</span>
+    <span class="identifier">signed_outliers_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linear_loss</span><span class="grouping">[</span><span class="identifier">outliers_mask</span><span class="grouping">]</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span>
+    <span class="identifier">signed_outliers</span><span class="grouping">[</span><span class="identifier">signed_outliers_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">-1.0</span>
+    <span class="identifier">X_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">axis0_safe_slice</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">outliers_mask</span><span class="punctuation">,</span> <span class="identifier">num_outliers</span><span class="grouping">)</span>
+    <span class="identifier">sw_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">outliers_mask</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">signed_outliers</span>
+    <span class="identifier">grad</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_features</span><span class="grouping">]</span> <span class="arithmetic-assignment">-=</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">epsilon</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span>
+        <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">sw_outliers</span><span class="punctuation">,</span> <span class="identifier">X_outliers</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Gradient due to the penalty.</span>
+    <span class="identifier">grad</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_features</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">alpha</span> <span class="arithmetic-operator">*</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">w</span>
+
+    <span class="comment"># Gradient due to sigma.</span>
+    <span class="identifier">grad</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span>
+    <span class="identifier">grad</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">n_sw_outliers</span> <span class="arithmetic-operator">*</span> <span class="identifier">epsilon</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span>
+    <span class="identifier">grad</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">squared_loss</span> <span class="arithmetic-operator">/</span> <span class="identifier">sigma</span>
+
+    <span class="comment"># Gradient due to the intercept.</span>
+    <span class="keyword">if</span> <span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+        <span class="identifier">grad</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">weighted_non_outliers</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">sigma</span>
+        <span class="identifier">grad</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="arithmetic-assignment">-=</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">epsilon</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">sw_outliers</span><span class="grouping">)</span>
+
+    <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">sigma</span> <span class="arithmetic-operator">+</span> <span class="identifier">squared_loss</span> <span class="arithmetic-operator">+</span> <span class="identifier">outlier_loss</span>
+    <span class="identifier">loss</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">alpha</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">w</span><span class="punctuation">,</span> <span class="identifier">w</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">grad</span>
+
+
+<span class="keyword">class</span> <span class="identifier">HuberRegressor</span><span class="grouping">(</span><span class="identifier">LinearModel</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Linear regression model that is robust to outliers.
+
+    The Huber Regressor optimizes the squared loss for the samples where
+    ``|(y - X'w) / sigma| &lt; epsilon`` and the absolute loss for the samples
+    where ``|(y - X'w) / sigma| &gt; epsilon``, where w and sigma are parameters
+    to be optimized. The parameter sigma makes sure that if y is scaled up
+    or down by a certain factor, one does not need to rescale epsilon to
+    achieve the same robustness. Note that this does not take into account
+    the fact that the different features of X may be of different scales.
+
+    This makes sure that the loss function is not heavily influenced by the
+    outliers while not completely ignoring their effect.
+
+    Read more in the :ref:`User Guide &lt;huber_regression&gt;`
+
+    .. versionadded:: 0.18
+
+    Parameters
+    ----------
+    epsilon : float, greater than 1.0, default=1.35
+        The parameter epsilon controls the number of samples that should be
+        classified as outliers. The smaller the epsilon, the more robust it is
+        to outliers.
+
+    max_iter : int, default=100
+        Maximum number of iterations that
+        ``scipy.optimize.minimize(method="L-BFGS-B")`` should run for.
+
+    alpha : float, default=0.0001
+        Regularization parameter.
+
+    warm_start : bool, default=False
+        This is useful if the stored attributes of a previously used model
+        has to be reused. If set to False, then the coefficients will
+        be rewritten for every call to fit.
+        See :term:`the Glossary &lt;warm_start&gt;`.
+
+    fit_intercept : bool, default=True
+        Whether or not to fit the intercept. This can be set to False
+        if the data is already centered around the origin.
+
+    tol : float, default=1e-05
+        The iteration will stop when
+        ``max{|proj g_i | i = 1, ..., n}`` &lt;= ``tol``
+        where pg_i is the i-th component of the projected gradient.
+
+    Attributes
+    ----------
+    coef_ : array, shape (n_features,)
+        Features got by optimizing the Huber loss.
+
+    intercept_ : float
+        Bias.
+
+    scale_ : float
+        The value by which ``|y - X'w - c|`` is scaled down.
+
+    n_iter_ : int
+        Number of iterations that
+        ``scipy.optimize.minimize(method="L-BFGS-B")`` has run for.
+
+        .. versionchanged:: 0.20
+
+            In SciPy &lt;= 1.0.0 the number of lbfgs iterations may exceed
+            ``max_iter``. ``n_iter_`` will now report at most ``max_iter``.
+
+    outliers_ : array, shape (n_samples,)
+        A boolean mask which is set to True where the samples are identified
+        as outliers.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.linear_model import HuberRegressor, LinearRegression
+    &gt;&gt;&gt; from sklearn.datasets import make_regression
+    &gt;&gt;&gt; rng = np.random.RandomState(0)
+    &gt;&gt;&gt; X, y, coef = make_regression(
+    ...     n_samples=200, n_features=2, noise=4.0, coef=True, random_state=0)
+    &gt;&gt;&gt; X[:4] = rng.uniform(10, 20, (4, 2))
+    &gt;&gt;&gt; y[:4] = rng.uniform(10, 20, 4)
+    &gt;&gt;&gt; huber = HuberRegressor().fit(X, y)
+    &gt;&gt;&gt; huber.score(X, y)
+    -7.284...
+    &gt;&gt;&gt; huber.predict(X[:1,])
+    array([806.7200...])
+    &gt;&gt;&gt; linear = LinearRegression().fit(X, y)
+    &gt;&gt;&gt; print("True coefficients:", coef)
+    True coefficients: [20.4923...  34.1698...]
+    &gt;&gt;&gt; print("Huber coefficients:", huber.coef_)
+    Huber coefficients: [17.7906... 31.0106...]
+    &gt;&gt;&gt; print("Linear Regression coefficients:", linear.coef_)
+    Linear Regression coefficients: [-1.9221...  7.0226...]
+
+    References
+    ----------
+    .. [1] Peter J. Huber, Elvezio M. Ronchetti, Robust Statistics
+           Concomitant scale estimates, pg 172
+    .. [2] Art B. Owen (2006), A robust hybrid of lasso and ridge regression.
+           https://statweb.stanford.edu/~owen/reports/hhu.pdf
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">epsilon</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.35</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.0001</span><span class="punctuation">,</span>
+                 <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-05</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span> <span class="arithmetic-assignment">=</span> <span class="identifier">epsilon</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_intercept</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model according to the given training data.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples and
+            n_features is the number of features.
+
+        y : array-like, shape (n_samples,)
+            Target vector relative to X.
+
+        sample_weight : array-like, shape (n_samples,)
+            Weight given to each sample.
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csr'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span> <span class="relational-operator">&lt;</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"epsilon should be greater than or equal to 1.0, got %f"</span>
+                <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span> <span class="logical-operator">and</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">'coef_'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">parameters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span>
+                <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale_</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+                <span class="identifier">parameters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">parameters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="comment"># Make sure to initialize the scale parameter to a strictly</span>
+            <span class="comment"># positive value:</span>
+            <span class="identifier">parameters</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+
+        <span class="comment"># Sigma or the scale factor should be non-negative.</span>
+        <span class="comment"># Setting it to be zero might cause undefined bounds hence we set it</span>
+        <span class="comment"># to a value close to zero.</span>
+        <span class="identifier">bounds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">tile</span><span class="grouping">(</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">parameters</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">bounds</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span> <span class="arithmetic-operator">*</span> <span class="int-literal">10</span>
+
+        <span class="identifier">opt_res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">optimize</span><span class="punctuation">.</span><span class="identifier">minimize</span><span class="grouping">(</span>
+            <span class="identifier">_huber_loss_and_gradient</span><span class="punctuation">,</span> <span class="identifier">parameters</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">"L-BFGS-B"</span><span class="punctuation">,</span> <span class="identifier">jac</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">args</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">options</span><span class="arithmetic-assignment">=</span><span class="grouping">{</span><span class="string-literal">"maxiter": self.max_iter, "gtol": self.tol, "iprint"</span><span class="punctuation">:</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">}</span><span class="punctuation">,</span>
+            <span class="identifier">bounds</span><span class="arithmetic-assignment">=</span><span class="identifier">bounds</span><span class="grouping">)</span>
+
+        <span class="identifier">parameters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">opt_res</span><span class="punctuation">.</span><span class="identifier">x</span>
+
+        <span class="keyword">if</span> <span class="identifier">opt_res</span><span class="punctuation">.</span><span class="identifier">status</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"HuberRegressor convergence failed:"</span>
+                             <span class="string-literal">" l-BFGS-b solver terminated with %s"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">opt_res</span><span class="punctuation">.</span><span class="identifier">message</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_optimize_result</span><span class="grouping">(</span><span class="string-literal">"lbfgs"</span><span class="punctuation">,</span> <span class="identifier">opt_res</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parameters</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parameters</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parameters</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>
+
+        <span class="identifier">residual</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span>
+            <span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">outliers_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">residual</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale_</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    </pre>
+  </body>
+</html>

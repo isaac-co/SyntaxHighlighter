@@ -1,0 +1,526 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Caching loader for the 20 newsgroups text classification dataset.
+
+
+The description of the dataset is available on the official website at:
+
+    http://people.csail.mit.edu/jrennie/20Newsgroups/
+
+Quoting the introduction:
+
+    The 20 Newsgroups data set is a collection of approximately 20,000
+    newsgroup documents, partitioned (nearly) evenly across 20 different
+    newsgroups. To the best of my knowledge, it was originally collected
+    by Ken Lang, probably for his Newsweeder: Learning to filter netnews
+    paper, though he does not explicitly mention this collection. The 20
+    newsgroups collection has become a popular data set for experiments
+    in text applications of machine learning techniques, such as text
+    classification and text clustering.
+
+This dataset loader will download the recommended "by date" variant of the
+dataset and which features a point in time split between the train and
+test sets. The compressed dataset size is around 14 Mb compressed. Once
+uncompressed the train set is 52 MB and the test set is 34 MB.
+"""</span>
+<span class="comment"># Copyright (c) 2011 Olivier Grisel &lt;olivier.grisel@ensta.org&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">from</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span> <span class="keyword">import</span> <span class="identifier">dirname</span><span class="punctuation">,</span> <span class="identifier">join</span>
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">tarfile</span>
+<span class="keyword">import</span> <span class="identifier">pickle</span>
+<span class="keyword">import</span> <span class="identifier">shutil</span>
+<span class="keyword">import</span> <span class="identifier">re</span>
+<span class="keyword">import</span> <span class="identifier">codecs</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">as</span> <span class="identifier">sp</span>
+<span class="keyword">import</span> <span class="identifier">joblib</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">get_data_home</span>
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">load_files</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_convert_data_dataframe</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_pkl_filepath</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_fetch_remote</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">RemoteFileMetadata</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">feature_extraction</span><span class="punctuation">.</span><span class="identifier">text</span> <span class="keyword">import</span> <span class="identifier">CountVectorizer</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">preprocessing</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="identifier">Bunch</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+<span class="comment"># The original data can be found at:</span>
+<span class="comment"># https://people.csail.mit.edu/jrennie/20Newsgroups/20news-bydate.tar.gz</span>
+<span class="identifier">ARCHIVE</span> <span class="arithmetic-assignment">=</span> <span class="identifier">RemoteFileMetadata</span><span class="grouping">(</span>
+    <span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="string-literal">'20news-bydate.tar.gz'</span><span class="punctuation">,</span>
+    <span class="identifier">url</span><span class="arithmetic-assignment">=</span><span class="string-literal">'https://ndownloader.figshare.com/files/5975967'</span><span class="punctuation">,</span>
+    <span class="identifier">checksum</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="string-literal">'8f1b2514ca22a5ade8fbb9cfa5727df9'</span>
+              <span class="string-literal">'5fa587f4c87b786e15c759fa66d95610'</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="identifier">CACHE_NAME</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"20news-bydate.pkz"</span>
+<span class="identifier">TRAIN_FOLDER</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"20news-bydate-train"</span>
+<span class="identifier">TEST_FOLDER</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"20news-bydate-test"</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_download_20newsgroups</span><span class="grouping">(</span><span class="identifier">target_dir</span><span class="punctuation">,</span> <span class="identifier">cache_path</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Download the 20 newsgroups data and stored it as a zipped pickle."""</span>
+    <span class="identifier">train_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">target_dir</span><span class="punctuation">,</span> <span class="identifier">TRAIN_FOLDER</span><span class="grouping">)</span>
+    <span class="identifier">test_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">target_dir</span><span class="punctuation">,</span> <span class="identifier">TEST_FOLDER</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">target_dir</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">makedirs</span><span class="grouping">(</span><span class="identifier">target_dir</span><span class="grouping">)</span>
+
+    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Downloading dataset from %s (14 MB)"</span><span class="punctuation">,</span> <span class="identifier">ARCHIVE</span><span class="punctuation">.</span><span class="identifier">url</span><span class="grouping">)</span>
+    <span class="identifier">archive_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_fetch_remote</span><span class="grouping">(</span><span class="identifier">ARCHIVE</span><span class="punctuation">,</span> <span class="identifier">dirname</span><span class="arithmetic-assignment">=</span><span class="identifier">target_dir</span><span class="grouping">)</span>
+
+    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Decompressing %s"</span><span class="punctuation">,</span> <span class="identifier">archive_path</span><span class="grouping">)</span>
+    <span class="identifier">tarfile</span><span class="punctuation">.</span><span class="identifier">open</span><span class="grouping">(</span><span class="identifier">archive_path</span><span class="punctuation">,</span> <span class="string-literal">"r:gz"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">extractall</span><span class="grouping">(</span><span class="identifier">path</span><span class="arithmetic-assignment">=</span><span class="identifier">target_dir</span><span class="grouping">)</span>
+    <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">remove</span><span class="grouping">(</span><span class="identifier">archive_path</span><span class="grouping">)</span>
+
+    <span class="comment"># Store a zipped pickle</span>
+    <span class="identifier">cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">train</span><span class="arithmetic-assignment">=</span><span class="identifier">load_files</span><span class="grouping">(</span><span class="identifier">train_path</span><span class="punctuation">,</span> <span class="identifier">encoding</span><span class="arithmetic-assignment">=</span><span class="string-literal">'latin1'</span><span class="grouping">)</span><span class="punctuation">,</span>
+                 <span class="identifier">test</span><span class="arithmetic-assignment">=</span><span class="identifier">load_files</span><span class="grouping">(</span><span class="identifier">test_path</span><span class="punctuation">,</span> <span class="identifier">encoding</span><span class="arithmetic-assignment">=</span><span class="string-literal">'latin1'</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">compressed_content</span> <span class="arithmetic-assignment">=</span> <span class="identifier">codecs</span><span class="punctuation">.</span><span class="identifier">encode</span><span class="grouping">(</span><span class="identifier">pickle</span><span class="punctuation">.</span><span class="identifier">dumps</span><span class="grouping">(</span><span class="identifier">cache</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="string-literal">'zlib_codec'</span><span class="grouping">)</span>
+    <span class="keyword">with</span> <span class="identifier">open</span><span class="grouping">(</span><span class="identifier">cache_path</span><span class="punctuation">,</span> <span class="string-literal">'wb'</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">f</span><span class="punctuation">:</span>
+        <span class="identifier">f</span><span class="punctuation">.</span><span class="identifier">write</span><span class="grouping">(</span><span class="identifier">compressed_content</span><span class="grouping">)</span>
+
+    <span class="identifier">shutil</span><span class="punctuation">.</span><span class="identifier">rmtree</span><span class="grouping">(</span><span class="identifier">target_dir</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">cache</span>
+
+
+<span class="keyword">def</span> <span class="identifier">strip_newsgroup_header</span><span class="grouping">(</span><span class="identifier">text</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Given text in "news" format, strip the headers, by removing everything
+    before the first blank line.
+
+    Parameters
+    ----------
+    text : str
+        The text from which to remove the signature block.
+    """</span>
+    <span class="identifier">_before</span><span class="punctuation">,</span> <span class="identifier">_blankline</span><span class="punctuation">,</span> <span class="identifier">after</span> <span class="arithmetic-assignment">=</span> <span class="identifier">text</span><span class="punctuation">.</span><span class="identifier">partition</span><span class="grouping">(</span><span class="string-literal">'\n\n'</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">after</span>
+
+
+<span class="identifier">_QUOTE_RE</span> <span class="arithmetic-assignment">=</span> <span class="identifier">re</span><span class="punctuation">.</span><span class="identifier">compile</span><span class="grouping">(</span><span class="identifier">r</span><span class="string-literal">'(writes in|writes:|wrote:|says:|said:'</span>
+                       <span class="identifier">r</span><span class="string-literal">'|^In article|^Quoted from|^\||^&gt;)'</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">strip_newsgroup_quoting</span><span class="grouping">(</span><span class="identifier">text</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Given text in "news" format, strip lines beginning with the quote
+    characters &gt; or |, plus lines that often introduce a quoted section
+    (for example, because they contain the string 'writes:'.)
+
+    Parameters
+    ----------
+    text : str
+        The text from which to remove the signature block.
+    """</span>
+    <span class="identifier">good_lines</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">line</span> <span class="keyword">for</span> <span class="identifier">line</span> <span class="relational-operator">in</span> <span class="identifier">text</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">'\n'</span><span class="grouping">)</span>
+                  <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">_QUOTE_RE</span><span class="punctuation">.</span><span class="identifier">search</span><span class="grouping">(</span><span class="identifier">line</span><span class="grouping">)</span><span class="grouping">]</span>
+    <span class="keyword">return</span> <span class="string-literal">'\n'</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">good_lines</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">strip_newsgroup_footer</span><span class="grouping">(</span><span class="identifier">text</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Given text in "news" format, attempt to remove a signature block.
+
+    As a rough heuristic, we assume that signatures are set apart by either
+    a blank line or a line made of hyphens, and that it is the last such line
+    in the file (disregarding blank lines at the end).
+
+    Parameters
+    ----------
+    text : str
+        The text from which to remove the signature block.
+    """</span>
+    <span class="identifier">lines</span> <span class="arithmetic-assignment">=</span> <span class="identifier">text</span><span class="punctuation">.</span><span class="identifier">strip</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">'\n'</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">line_num</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">lines</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">line</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lines</span><span class="grouping">[</span><span class="identifier">line_num</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">line</span><span class="punctuation">.</span><span class="identifier">strip</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">strip</span><span class="grouping">(</span><span class="string-literal">'-') == ''</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+
+    <span class="keyword">if</span> <span class="identifier">line_num</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="string-literal">'\n'</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">lines</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">line_num</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">text</span>
+
+
+<span class="keyword">def</span> <span class="identifier">fetch_20newsgroups</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">subset</span><span class="arithmetic-assignment">=</span><span class="string-literal">'train'</span><span class="punctuation">,</span> <span class="identifier">categories</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                       <span class="identifier">shuffle</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">42</span><span class="punctuation">,</span>
+                       <span class="identifier">remove</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                       <span class="identifier">download_if_missing</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">y</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Load the filenames and data from the 20 newsgroups dataset \
+(classification).
+
+    Download it if necessary.
+
+    =================   ==========
+    Classes                     20
+    Samples total            18846
+    Dimensionality               1
+    Features                  text
+    =================   ==========
+
+    Read more in the :ref:`User Guide &lt;20newsgroups_dataset&gt;`.
+
+    Parameters
+    ----------
+    data_home : str, default=None
+        Specify a download and cache folder for the datasets. If None,
+        all scikit-learn data is stored in '~/scikit_learn_data' subfolders.
+
+    subset : {'train', 'test', 'all'}, default='train'
+        Select the dataset to load: 'train' for the training set, 'test'
+        for the test set, 'all' for both, with shuffled ordering.
+
+    categories : array-like, dtype=str or unicode, default=None
+        If None (default), load all the categories.
+        If not None, list of category names to load (other categories
+        ignored).
+
+    shuffle : bool, default=True
+        Whether or not to shuffle the data: might be important for models that
+        make the assumption that the samples are independent and identically
+        distributed (i.i.d.), such as stochastic gradient descent.
+
+    random_state : int, RandomState instance or None, default=None
+        Determines random number generation for dataset shuffling. Pass an int
+        for reproducible output across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    remove : tuple, default=()
+        May contain any subset of ('headers', 'footers', 'quotes'). Each of
+        these are kinds of text that will be detected and removed from the
+        newsgroup posts, preventing classifiers from overfitting on
+        metadata.
+
+        'headers' removes newsgroup headers, 'footers' removes blocks at the
+        ends of posts that look like signatures, and 'quotes' removes lines
+        that appear to be quoting another post.
+
+        'headers' follows an exact standard; the other filters are not always
+        correct.
+
+    download_if_missing : bool, default=True
+        If False, raise an IOError if the data is not locally available
+        instead of trying to download the data from the source site.
+
+    return_X_y : bool, default=False
+        If True, returns `(data.data, data.target)` instead of a Bunch
+        object.
+
+        .. versionadded:: 0.22
+
+    Returns
+    -------
+    bunch : :class:`~sklearn.utils.Bunch`
+        Dictionary-like object, with the following attributes.
+
+        data : list of shape (n_samples,)
+            The data list to learn.
+        target: ndarray of shape (n_samples,)
+            The target labels.
+        filenames: list of shape (n_samples,)
+            The path to the location of the data.
+        DESCR: str
+            The full description of the dataset.
+        target_names: list of shape (n_classes,)
+            The names of target classes.
+
+    (data, target) : tuple if `return_X_y=True`
+        .. versionadded:: 0.22
+    """</span>
+
+    <span class="identifier">data_home</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_data_home</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span><span class="grouping">)</span>
+    <span class="identifier">cache_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_pkl_filepath</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="punctuation">,</span> <span class="identifier">CACHE_NAME</span><span class="grouping">)</span>
+    <span class="identifier">twenty_home</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="punctuation">,</span> <span class="string-literal">"20news_home"</span><span class="grouping">)</span>
+    <span class="identifier">cache</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+    <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">cache_path</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="keyword">with</span> <span class="identifier">open</span><span class="grouping">(</span><span class="identifier">cache_path</span><span class="punctuation">,</span> <span class="string-literal">'rb'</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">f</span><span class="punctuation">:</span>
+                <span class="identifier">compressed_content</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span><span class="punctuation">.</span><span class="identifier">read</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">uncompressed_content</span> <span class="arithmetic-assignment">=</span> <span class="identifier">codecs</span><span class="punctuation">.</span><span class="identifier">decode</span><span class="grouping">(</span>
+                <span class="identifier">compressed_content</span><span class="punctuation">,</span> <span class="string-literal">'zlib_codec'</span><span class="grouping">)</span>
+            <span class="identifier">cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pickle</span><span class="punctuation">.</span><span class="identifier">loads</span><span class="grouping">(</span><span class="identifier">uncompressed_content</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="invalid">E</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="int-literal">80</span> <span class="arithmetic-operator">*</span> <span class="string-literal">'_'</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'Cache loading failed'</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="int-literal">80</span> <span class="arithmetic-operator">*</span> <span class="string-literal">'_'</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">e</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">cache</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">download_if_missing</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Downloading 20news dataset. "</span>
+                        <span class="string-literal">"This may take a few minutes."</span><span class="grouping">)</span>
+            <span class="identifier">cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_download_20newsgroups</span><span class="grouping">(</span><span class="identifier">target_dir</span><span class="arithmetic-assignment">=</span><span class="identifier">twenty_home</span><span class="punctuation">,</span>
+                                           <span class="identifier">cache_path</span><span class="arithmetic-assignment">=</span><span class="identifier">cache_path</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">IOError</span><span class="grouping">(</span><span class="string-literal">'20Newsgroups dataset not found'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">subset</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'train', 'test'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">subset</span><span class="grouping">]</span>
+    <span class="keyword">elif</span> <span class="identifier">subset</span> <span class="relational-operator">==</span> <span class="string-literal">'all'</span><span class="punctuation">:</span>
+        <span class="identifier">data_lst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">filenames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">subset</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'train', 'test'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">subset</span><span class="grouping">]</span>
+            <span class="identifier">data_lst</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span>
+            <span class="identifier">target</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span><span class="grouping">)</span>
+            <span class="identifier">filenames</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">filenames</span><span class="grouping">)</span>
+
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_lst</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">target</span><span class="grouping">)</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">filenames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">"subset can only be 'train', 'test' or 'all', got '%s'"</span> <span class="arithmetic-operator">%</span> <span class="identifier">subset</span><span class="grouping">)</span>
+
+    <span class="identifier">module_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">__file__</span><span class="grouping">)</span>
+    <span class="keyword">with</span> <span class="identifier">open</span><span class="grouping">(</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">module_path</span><span class="punctuation">,</span> <span class="string-literal">'descr', 'twenty_newsgroups.rst'</span><span class="grouping">)</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">rst_file</span><span class="punctuation">:</span>
+        <span class="identifier">fdescr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rst_file</span><span class="punctuation">.</span><span class="identifier">read</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">DESCR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fdescr</span>
+
+    <span class="keyword">if</span> <span class="string-literal">'headers'</span> <span class="relational-operator">in</span> <span class="identifier">remove</span><span class="punctuation">:</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">strip_newsgroup_header</span><span class="grouping">(</span><span class="identifier">text</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">text</span> <span class="relational-operator">in</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="string-literal">'footers'</span> <span class="relational-operator">in</span> <span class="identifier">remove</span><span class="punctuation">:</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">strip_newsgroup_footer</span><span class="grouping">(</span><span class="identifier">text</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">text</span> <span class="relational-operator">in</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="string-literal">'quotes'</span> <span class="relational-operator">in</span> <span class="identifier">remove</span><span class="punctuation">:</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">strip_newsgroup_quoting</span><span class="grouping">(</span><span class="identifier">text</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">text</span> <span class="relational-operator">in</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="identifier">categories</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target_names</span><span class="punctuation">.</span><span class="identifier">index</span><span class="grouping">(</span><span class="identifier">cat</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">cat</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">cat</span> <span class="relational-operator">in</span> <span class="identifier">categories</span><span class="grouping">]</span>
+        <span class="comment"># Sort the categories to have the ordering of the labels</span>
+        <span class="identifier">labels</span><span class="punctuation">.</span><span class="identifier">sort</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">categories</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">in1d</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">filenames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">filenames</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+        <span class="comment"># searchsorted to have continuous labels</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span><span class="grouping">)</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">categories</span><span class="grouping">)</span>
+        <span class="comment"># Use an object array to shuffle: avoids memory copy</span>
+        <span class="identifier">data_lst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+        <span class="identifier">data_lst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_lst</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_lst</span><span class="punctuation">.</span><span class="identifier">tolist</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">shuffle</span><span class="punctuation">:</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">shuffle</span><span class="grouping">(</span><span class="identifier">indices</span><span class="grouping">)</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">filenames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">filenames</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span>
+        <span class="comment"># Use an object array to shuffle: avoids memory copy</span>
+        <span class="identifier">data_lst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+        <span class="identifier">data_lst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_lst</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span>
+        <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_lst</span><span class="punctuation">.</span><span class="identifier">tolist</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">y</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">target</span>
+
+    <span class="keyword">return</span> <span class="identifier">data</span>
+
+
+<span class="keyword">def</span> <span class="identifier">fetch_20newsgroups_vectorized</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">subset</span><span class="arithmetic-assignment">=</span><span class="string-literal">"train"</span><span class="punctuation">,</span> <span class="identifier">remove</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                  <span class="identifier">download_if_missing</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">y</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                  <span class="identifier">normalize</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Load and vectorize the 20 newsgroups dataset (classification).
+
+    Download it if necessary.
+
+    This is a convenience function; the transformation is done using the
+    default settings for
+    :class:`~sklearn.feature_extraction.text.CountVectorizer`. For more
+    advanced usage (stopword filtering, n-gram extraction, etc.), combine
+    fetch_20newsgroups with a custom
+    :class:`~sklearn.feature_extraction.text.CountVectorizer`,
+    :class:`~sklearn.feature_extraction.text.HashingVectorizer`,
+    :class:`~sklearn.feature_extraction.text.TfidfTransformer` or
+    :class:`~sklearn.feature_extraction.text.TfidfVectorizer`.
+
+    The resulting counts are normalized using
+    :func:`sklearn.preprocessing.normalize` unless normalize is set to False.
+
+    =================   ==========
+    Classes                     20
+    Samples total            18846
+    Dimensionality          130107
+    Features                  real
+    =================   ==========
+
+    Read more in the :ref:`User Guide &lt;20newsgroups_dataset&gt;`.
+
+    Parameters
+    ----------
+    subset : {'train', 'test', 'all'}, default='train'
+        Select the dataset to load: 'train' for the training set, 'test'
+        for the test set, 'all' for both, with shuffled ordering.
+
+    remove : tuple, default=()
+        May contain any subset of ('headers', 'footers', 'quotes'). Each of
+        these are kinds of text that will be detected and removed from the
+        newsgroup posts, preventing classifiers from overfitting on
+        metadata.
+
+        'headers' removes newsgroup headers, 'footers' removes blocks at the
+        ends of posts that look like signatures, and 'quotes' removes lines
+        that appear to be quoting another post.
+
+    data_home : str, default=None
+        Specify an download and cache folder for the datasets. If None,
+        all scikit-learn data is stored in '~/scikit_learn_data' subfolders.
+
+    download_if_missing : bool, default=True
+        If False, raise an IOError if the data is not locally available
+        instead of trying to download the data from the source site.
+
+    return_X_y : bool, default=False
+        If True, returns ``(data.data, data.target)`` instead of a Bunch
+        object.
+
+        .. versionadded:: 0.20
+
+    normalize : bool, default=True
+        If True, normalizes each document's feature vector to unit norm using
+        :func:`sklearn.preprocessing.normalize`.
+
+        .. versionadded:: 0.22
+
+    as_frame : bool, default=False
+        If True, the data is a pandas DataFrame including columns with
+        appropriate dtypes (numeric, string, or categorical). The target is
+        a pandas DataFrame or Series depending on the number of
+        `target_columns`.
+
+        .. versionadded:: 0.24
+
+    Returns
+    -------
+    bunch : :class:`~sklearn.utils.Bunch`
+        Dictionary-like object, with the following attributes.
+
+        data: {sparse matrix, dataframe} of shape (n_samples, n_features)
+            The input data matrix. If ``as_frame`` is `True`, ``data`` is
+            a pandas DataFrame with sparse columns.
+        target: {ndarray, series} of shape (n_samples,)
+            The target labels. If ``as_frame`` is `True`, ``target`` is a
+            pandas Series.
+        target_names: list of shape (n_classes,)
+            The names of target classes.
+        DESCR: str
+            The full description of the dataset.
+        frame: dataframe of shape (n_samples, n_features + 1)
+            Only present when `as_frame=True`. Pandas DataFrame with ``data``
+            and ``target``.
+
+            .. versionadded:: 0.24
+
+    (data, target) : tuple if ``return_X_y`` is True
+        `data` and `target` would be of the format defined in the `Bunch`
+        description above.
+
+        .. versionadded:: 0.20
+    """</span>
+    <span class="identifier">data_home</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_data_home</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span><span class="grouping">)</span>
+    <span class="identifier">filebase</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'20newsgroup_vectorized'</span>
+    <span class="keyword">if</span> <span class="identifier">remove</span><span class="punctuation">:</span>
+        <span class="identifier">filebase</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">'remove-' + ('-'</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">remove</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">target_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_pkl_filepath</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="punctuation">,</span> <span class="identifier">filebase</span> <span class="arithmetic-operator">+</span> <span class="string-literal">".pkl"</span><span class="grouping">)</span>
+
+    <span class="comment"># we shuffle but use a fixed seed for the memoization</span>
+    <span class="identifier">data_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fetch_20newsgroups</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span><span class="punctuation">,</span>
+                                    <span class="identifier">subset</span><span class="arithmetic-assignment">=</span><span class="string-literal">'train'</span><span class="punctuation">,</span>
+                                    <span class="identifier">categories</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                    <span class="identifier">shuffle</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                    <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">12</span><span class="punctuation">,</span>
+                                    <span class="identifier">remove</span><span class="arithmetic-assignment">=</span><span class="identifier">remove</span><span class="punctuation">,</span>
+                                    <span class="identifier">download_if_missing</span><span class="arithmetic-assignment">=</span><span class="identifier">download_if_missing</span><span class="grouping">)</span>
+
+    <span class="identifier">data_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fetch_20newsgroups</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span><span class="punctuation">,</span>
+                                   <span class="identifier">subset</span><span class="arithmetic-assignment">=</span><span class="string-literal">'test'</span><span class="punctuation">,</span>
+                                   <span class="identifier">categories</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                   <span class="identifier">shuffle</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                   <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">12</span><span class="punctuation">,</span>
+                                   <span class="identifier">remove</span><span class="arithmetic-assignment">=</span><span class="identifier">remove</span><span class="punctuation">,</span>
+                                   <span class="identifier">download_if_missing</span><span class="arithmetic-assignment">=</span><span class="identifier">download_if_missing</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">target_file</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">joblib</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">target_file</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">ValueError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"The cached dataset located in {target_file} was fetched "</span>
+                <span class="identifier">f</span><span class="string-literal">"with an older scikit-learn version and it is not compatible "</span>
+                <span class="identifier">f</span><span class="string-literal">"with the scikit-learn version imported. You need to "</span>
+                <span class="identifier">f</span><span class="string-literal">"manually delete the file: {target_file}."</span>
+            <span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">vectorizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">CountVectorizer</span><span class="grouping">(</span><span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int16</span><span class="grouping">)</span>
+        <span class="identifier">X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectorizer</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">data_train</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tocsr</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">X_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectorizer</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">data_test</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tocsr</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectorizer</span><span class="punctuation">.</span><span class="identifier">get_feature_names</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">joblib</span><span class="punctuation">.</span><span class="identifier">dump</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">feature_names</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">target_file</span><span class="punctuation">,</span> <span class="identifier">compress</span><span class="arithmetic-assignment">=</span><span class="int-literal">9</span><span class="grouping">)</span>
+
+    <span class="comment"># the data is stored as int16 for compactness</span>
+    <span class="comment"># but normalize needs floats</span>
+    <span class="keyword">if</span> <span class="identifier">normalize</span><span class="punctuation">:</span>
+        <span class="identifier">X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_train</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+        <span class="identifier">X_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_test</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+        <span class="identifier">preprocessing</span><span class="punctuation">.</span><span class="identifier">normalize</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">preprocessing</span><span class="punctuation">.</span><span class="identifier">normalize</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="identifier">target_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_train</span><span class="punctuation">.</span><span class="identifier">target_names</span>
+
+    <span class="keyword">if</span> <span class="identifier">subset</span> <span class="relational-operator">==</span> <span class="string-literal">"train"</span><span class="punctuation">:</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_train</span>
+        <span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_train</span><span class="punctuation">.</span><span class="identifier">target</span>
+    <span class="keyword">elif</span> <span class="identifier">subset</span> <span class="relational-operator">==</span> <span class="string-literal">"test"</span><span class="punctuation">:</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_test</span>
+        <span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_test</span><span class="punctuation">.</span><span class="identifier">target</span>
+    <span class="keyword">elif</span> <span class="identifier">subset</span> <span class="relational-operator">==</span> <span class="string-literal">"all"</span><span class="punctuation">:</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tocsr</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">data_train</span><span class="punctuation">.</span><span class="identifier">target</span><span class="punctuation">,</span> <span class="identifier">data_test</span><span class="punctuation">.</span><span class="identifier">target</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"%r is not a valid subset: should be one of "</span>
+                         <span class="string-literal">"['train', 'test', 'all']"</span> <span class="arithmetic-operator">%</span> <span class="identifier">subset</span><span class="grouping">)</span>
+
+    <span class="identifier">module_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">__file__</span><span class="grouping">)</span>
+    <span class="keyword">with</span> <span class="identifier">open</span><span class="grouping">(</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">module_path</span><span class="punctuation">,</span> <span class="string-literal">'descr', 'twenty_newsgroups.rst'</span><span class="grouping">)</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">rst_file</span><span class="punctuation">:</span>
+        <span class="identifier">fdescr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rst_file</span><span class="punctuation">.</span><span class="identifier">read</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="identifier">frame</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+    <span class="identifier">target_name</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'category_class'</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">target</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_convert_data_dataframe</span><span class="grouping">(</span>
+            <span class="string-literal">"fetch_20newsgroups_vectorized"</span><span class="punctuation">,</span>
+            <span class="identifier">data</span><span class="punctuation">,</span>
+            <span class="identifier">target</span><span class="punctuation">,</span>
+            <span class="identifier">feature_names</span><span class="punctuation">,</span>
+            <span class="identifier">target_names</span><span class="arithmetic-assignment">=</span><span class="identifier">target_name</span><span class="punctuation">,</span>
+            <span class="identifier">sparse_data</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span>
+        <span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">y</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">target</span>
+
+    <span class="keyword">return</span> <span class="identifier">Bunch</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">data</span><span class="punctuation">,</span>
+                 <span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="identifier">target</span><span class="punctuation">,</span>
+                 <span class="identifier">frame</span><span class="arithmetic-assignment">=</span><span class="identifier">frame</span><span class="punctuation">,</span>
+                 <span class="identifier">target_names</span><span class="arithmetic-assignment">=</span><span class="identifier">target_names</span><span class="punctuation">,</span>
+                 <span class="identifier">feature_names</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span><span class="punctuation">,</span>
+                 <span class="identifier">DESCR</span><span class="arithmetic-assignment">=</span><span class="identifier">fdescr</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

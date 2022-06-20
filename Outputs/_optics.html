@@ -1,0 +1,947 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># -*- coding: utf-8 -*-</span>
+<span class="comment">"""Ordering Points To Identify the Clustering Structure (OPTICS)
+
+These routines execute the OPTICS algorithm, and implement various
+cluster extraction methods of the ordered list.
+
+Authors: Shane Grigsby &lt;refuge@rocktalus.com&gt;
+         Adrin Jalali &lt;adrinjalali@gmail.com&gt;
+         Erich Schubert &lt;erich@debian.org&gt;
+         Hanmin Qin &lt;qinhanmin2005@sina.com&gt;
+License: BSD 3 clause
+"""</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">DataConversionWarning</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">PAIRWISE_BOOLEAN_FUNCTIONS</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">gen_batches</span><span class="punctuation">,</span> <span class="identifier">get_chunk_n_rows</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span> <span class="keyword">import</span> <span class="identifier">NearestNeighbors</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">ClusterMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">pairwise_distances</span>
+
+
+<span class="keyword">class</span> <span class="identifier">OPTICS</span><span class="grouping">(</span><span class="identifier">ClusterMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Estimate clustering structure from vector array.
+
+    OPTICS (Ordering Points To Identify the Clustering Structure), closely
+    related to DBSCAN, finds core sample of high density and expands clusters
+    from them [1]_. Unlike DBSCAN, keeps cluster hierarchy for a variable
+    neighborhood radius. Better suited for usage on large datasets than the
+    current sklearn implementation of DBSCAN.
+
+    Clusters are then extracted using a DBSCAN-like method
+    (cluster_method = 'dbscan') or an automatic
+    technique proposed in [1]_ (cluster_method = 'xi').
+
+    This implementation deviates from the original OPTICS by first performing
+    k-nearest-neighborhood searches on all points to identify core sizes, then
+    computing only the distances to unprocessed points when constructing the
+    cluster order. Note that we do not employ a heap to manage the expansion
+    candidates, so the time complexity will be O(n^2).
+
+    Read more in the :ref:`User Guide &lt;optics&gt;`.
+
+    Parameters
+    ----------
+    min_samples : int &gt; 1 or float between 0 and 1, default=5
+        The number of samples in a neighborhood for a point to be considered as
+        a core point. Also, up and down steep regions can't have more than
+        ``min_samples`` consecutive non-steep points. Expressed as an absolute
+        number or a fraction of the number of samples (rounded to be at least
+        2).
+
+    max_eps : float, default=np.inf
+        The maximum distance between two samples for one to be considered as
+        in the neighborhood of the other. Default value of ``np.inf`` will
+        identify clusters across all scales; reducing ``max_eps`` will result
+        in shorter run times.
+
+    metric : str or callable, default='minkowski'
+        Metric to use for distance computation. Any metric from scikit-learn
+        or scipy.spatial.distance can be used.
+
+        If metric is a callable function, it is called on each
+        pair of instances (rows) and the resulting value recorded. The callable
+        should take two arrays as input and return one value indicating the
+        distance between them. This works for Scipy's metrics, but is less
+        efficient than passing the metric name as a string. If metric is
+        "precomputed", X is assumed to be a distance matrix and must be square.
+
+        Valid values for metric are:
+
+        - from scikit-learn: ['cityblock', 'cosine', 'euclidean', 'l1', 'l2',
+          'manhattan']
+
+        - from scipy.spatial.distance: ['braycurtis', 'canberra', 'chebyshev',
+          'correlation', 'dice', 'hamming', 'jaccard', 'kulsinski',
+          'mahalanobis', 'minkowski', 'rogerstanimoto', 'russellrao',
+          'seuclidean', 'sokalmichener', 'sokalsneath', 'sqeuclidean',
+          'yule']
+
+        See the documentation for scipy.spatial.distance for details on these
+        metrics.
+
+    p : int, default=2
+        Parameter for the Minkowski metric from
+        :class:`~sklearn.metrics.pairwise_distances`. When p = 1, this is
+        equivalent to using manhattan_distance (l1), and euclidean_distance
+        (l2) for p = 2. For arbitrary p, minkowski_distance (l_p) is used.
+
+    metric_params : dict, default=None
+        Additional keyword arguments for the metric function.
+
+    cluster_method : str, default='xi'
+        The extraction method used to extract clusters using the calculated
+        reachability and ordering. Possible values are "xi" and "dbscan".
+
+    eps : float, default=None
+        The maximum distance between two samples for one to be considered as
+        in the neighborhood of the other. By default it assumes the same value
+        as ``max_eps``.
+        Used only when ``cluster_method='dbscan'``.
+
+    xi : float between 0 and 1, default=0.05
+        Determines the minimum steepness on the reachability plot that
+        constitutes a cluster boundary. For example, an upwards point in the
+        reachability plot is defined by the ratio from one point to its
+        successor being at most 1-xi.
+        Used only when ``cluster_method='xi'``.
+
+    predecessor_correction : bool, default=True
+        Correct clusters according to the predecessors calculated by OPTICS
+        [2]_. This parameter has minimal effect on most datasets.
+        Used only when ``cluster_method='xi'``.
+
+    min_cluster_size : int &gt; 1 or float between 0 and 1, default=None
+        Minimum number of samples in an OPTICS cluster, expressed as an
+        absolute number or a fraction of the number of samples (rounded to be
+        at least 2). If ``None``, the value of ``min_samples`` is used instead.
+        Used only when ``cluster_method='xi'``.
+
+    algorithm : {'auto', 'ball_tree', 'kd_tree', 'brute'}, default='auto'
+        Algorithm used to compute the nearest neighbors:
+
+        - 'ball_tree' will use :class:`BallTree`
+        - 'kd_tree' will use :class:`KDTree`
+        - 'brute' will use a brute-force search.
+        - 'auto' will attempt to decide the most appropriate algorithm
+          based on the values passed to :meth:`fit` method. (default)
+
+        Note: fitting on sparse input will override the setting of
+        this parameter, using brute force.
+
+    leaf_size : int, default=30
+        Leaf size passed to :class:`BallTree` or :class:`KDTree`. This can
+        affect the speed of the construction and query, as well as the memory
+        required to store the tree. The optimal value depends on the
+        nature of the problem.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run for neighbors search.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Attributes
+    ----------
+    labels_ : ndarray of shape (n_samples,)
+        Cluster labels for each point in the dataset given to fit().
+        Noisy samples and points which are not included in a leaf cluster
+        of ``cluster_hierarchy_`` are labeled as -1.
+
+    reachability_ : ndarray of shape (n_samples,)
+        Reachability distances per sample, indexed by object order. Use
+        ``clust.reachability_[clust.ordering_]`` to access in cluster order.
+
+    ordering_ : ndarray of shape (n_samples,)
+        The cluster ordered list of sample indices.
+
+    core_distances_ : ndarray of shape (n_samples,)
+        Distance at which each sample becomes a core point, indexed by object
+        order. Points which will never be core have a distance of inf. Use
+        ``clust.core_distances_[clust.ordering_]`` to access in cluster order.
+
+    predecessor_ : ndarray of shape (n_samples,)
+        Point that a sample was reached from, indexed by object order.
+        Seed points have a predecessor of -1.
+
+    cluster_hierarchy_ : ndarray of shape (n_clusters, 2)
+        The list of clusters in the form of ``[start, end]`` in each row, with
+        all indices inclusive. The clusters are ordered according to
+        ``(end, -start)`` (ascending) so that larger clusters encompassing
+        smaller clusters come after those smaller ones. Since ``labels_`` does
+        not reflect the hierarchy, usually
+        ``len(cluster_hierarchy_) &gt; np.unique(optics.labels_)``. Please also
+        note that these indices are of the ``ordering_``, i.e.
+        ``X[ordering_][start:end + 1]`` form a cluster.
+        Only available when ``cluster_method='xi'``.
+
+    See Also
+    --------
+    DBSCAN : A similar clustering for a specified neighborhood radius (eps).
+        Our implementation is optimized for runtime.
+
+    References
+    ----------
+    .. [1] Ankerst, Mihael, Markus M. Breunig, Hans-Peter Kriegel,
+       and Jörg Sander. "OPTICS: ordering points to identify the clustering
+       structure." ACM SIGMOD Record 28, no. 2 (1999): 49-60.
+
+    .. [2] Schubert, Erich, Michael Gertz.
+       "Improving the Cluster Structure Extracted from OPTICS Plots." Proc. of
+       the Conference "Lernen, Wissen, Daten, Analysen" (LWDA) (2018): 318-329.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import OPTICS
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[1, 2], [2, 5], [3, 6],
+    ...               [8, 7], [8, 8], [7, 3]])
+    &gt;&gt;&gt; clustering = OPTICS(min_samples=2).fit(X)
+    &gt;&gt;&gt; clustering.labels_
+    array([0, 0, 0, 1, 1, 1])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">max_eps</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'minkowski'</span><span class="punctuation">,</span>
+                 <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">cluster_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'xi'</span><span class="punctuation">,</span> <span class="identifier">eps</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">xi</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.05</span><span class="punctuation">,</span> <span class="identifier">predecessor_correction</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">min_cluster_size</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span> <span class="identifier">leaf_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_eps</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min_samples</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_cluster_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min_cluster_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">algorithm</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metric</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metric_params</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">p</span> <span class="arithmetic-assignment">=</span> <span class="identifier">p</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">leaf_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">leaf_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cluster_method</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eps</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">xi</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predecessor_correction</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predecessor_correction</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform OPTICS clustering.
+
+        Extracts an ordered list of points and reachability distances, and
+        performs initial clustering using ``max_eps`` distance specified at
+        OPTICS object instantiation.
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features), or \
+                (n_samples, n_samples) if metric=’precomputed’
+            A feature array, or array of distances between samples if
+            metric='precomputed'.
+
+        y : ignored
+            Ignored.
+
+        Returns
+        -------
+        self : instance of OPTICS
+            The instance.
+        """</span>
+
+        <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bool</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric</span> <span class="relational-operator">in</span> <span class="identifier">PAIRWISE_BOOLEAN_FUNCTIONS</span> <span class="keyword">else</span> <span class="identifier">float</span>
+        <span class="keyword">if</span> <span class="identifier">dtype</span> <span class="relational-operator">==</span> <span class="identifier">bool</span> <span class="logical-operator">and</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="relational-operator">!=</span> <span class="identifier">bool</span><span class="punctuation">:</span>
+            <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"Data will be converted to boolean for"</span>
+                   <span class="identifier">f</span><span class="string-literal">" metric {self.metric}, to avoid this warning,"</span>
+                   <span class="identifier">f</span><span class="string-literal">" you may convert the data prior to calling fit."</span><span class="grouping">)</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">,</span> <span class="identifier">DataConversionWarning</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_method</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">'dbscan', 'xi'</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"cluster_method should be one of"</span>
+                             <span class="string-literal">" 'dbscan' or 'xi' but is %s"</span> <span class="arithmetic-operator">%</span>
+                             <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_method</span><span class="grouping">)</span>
+
+        <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">ordering_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">core_distances_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">reachability_</span><span class="punctuation">,</span>
+         <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predecessor_</span><span class="grouping">)</span> <span class="arithmetic-assignment">=</span> <span class="identifier">compute_optics_graph</span><span class="grouping">(</span>
+             <span class="identifier">X</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_samples</span><span class="punctuation">,</span> <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span><span class="punctuation">,</span>
+             <span class="identifier">leaf_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">leaf_size</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric</span><span class="punctuation">,</span>
+             <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric_params</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+             <span class="identifier">max_eps</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_eps</span><span class="grouping">)</span>
+
+        <span class="comment"># Extract clusters from the calculated orders and reachability</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_method</span> <span class="relational-operator">==</span> <span class="string-literal">'xi'</span><span class="punctuation">:</span>
+            <span class="identifier">labels_</span><span class="punctuation">,</span> <span class="identifier">clusters_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cluster_optics_xi</span><span class="grouping">(</span>
+                <span class="identifier">reachability</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">reachability_</span><span class="punctuation">,</span>
+                <span class="identifier">predecessor</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predecessor_</span><span class="punctuation">,</span>
+                <span class="identifier">ordering</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">ordering_</span><span class="punctuation">,</span>
+                <span class="identifier">min_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_samples</span><span class="punctuation">,</span>
+                <span class="identifier">min_cluster_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_cluster_size</span><span class="punctuation">,</span>
+                <span class="identifier">xi</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">xi</span><span class="punctuation">,</span>
+                <span class="identifier">predecessor_correction</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predecessor_correction</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_hierarchy_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clusters_</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_method</span> <span class="relational-operator">==</span> <span class="string-literal">'dbscan'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eps</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_eps</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eps</span>
+
+            <span class="keyword">if</span> <span class="identifier">eps</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_eps</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Specify an epsilon smaller than %s. Got %s.'</span>
+                                 <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_eps</span><span class="punctuation">,</span> <span class="identifier">eps</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cluster_optics_dbscan</span><span class="grouping">(</span>
+                <span class="identifier">reachability</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">reachability_</span><span class="punctuation">,</span>
+                <span class="identifier">core_distances</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">core_distances_</span><span class="punctuation">,</span>
+                <span class="identifier">ordering</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">ordering_</span><span class="punctuation">,</span> <span class="identifier">eps</span><span class="arithmetic-assignment">=</span><span class="identifier">eps</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">labels_</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_validate_size</span><span class="grouping">(</span><span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">param_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">if</span> <span class="identifier">size</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">size</span> <span class="relational-operator">!=</span>
+                     <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">size</span><span class="grouping">)</span>
+                     <span class="logical-operator">and</span> <span class="identifier">size</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'%s must be a positive integer '</span>
+                         <span class="string-literal">'or a float between 0 and 1. Got %r'</span> <span class="arithmetic-operator">%</span>
+                         <span class="grouping">(</span><span class="identifier">param_name</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">size</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'%s must be no greater than the'</span>
+                         <span class="string-literal">' number of samples (%d). Got %d'</span> <span class="arithmetic-operator">%</span>
+                         <span class="grouping">(</span><span class="identifier">param_name</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="comment"># OPTICS helper functions</span>
+<span class="keyword">def</span> <span class="identifier">_compute_core_distances_</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">neighbors</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="punctuation">,</span> <span class="identifier">working_memory</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute the k-th nearest neighbor of each sample
+
+    Equivalent to neighbors.kneighbors(X, self.min_samples)[0][:, -1]
+    but with more memory efficiency.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        The data.
+    neighbors : NearestNeighbors instance
+        The fitted nearest neighbors estimator.
+    working_memory : int, default=None
+        The sought maximum memory for temporary distance matrix chunks.
+        When None (default), the value of
+        ``sklearn.get_config()['working_memory']`` is used.
+
+    Returns
+    -------
+    core_distances : ndarray of shape (n_samples,)
+        Distance at which each sample becomes a core point.
+        Points which will never be core have a distance of inf.
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="identifier">core_distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="identifier">core_distances</span><span class="punctuation">.</span><span class="identifier">fill</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nan</span><span class="grouping">)</span>
+
+    <span class="identifier">chunk_n_rows</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_chunk_n_rows</span><span class="grouping">(</span><span class="identifier">row_bytes</span><span class="arithmetic-assignment">=</span><span class="int-literal">16</span> <span class="arithmetic-operator">*</span> <span class="identifier">min_samples</span><span class="punctuation">,</span>
+                                    <span class="identifier">max_n_rows</span><span class="arithmetic-assignment">=</span><span class="identifier">n_samples</span><span class="punctuation">,</span>
+                                    <span class="identifier">working_memory</span><span class="arithmetic-assignment">=</span><span class="identifier">working_memory</span><span class="grouping">)</span>
+    <span class="identifier">slices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gen_batches</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">chunk_n_rows</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">sl</span> <span class="relational-operator">in</span> <span class="identifier">slices</span><span class="punctuation">:</span>
+        <span class="identifier">core_distances</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">neighbors</span><span class="punctuation">.</span><span class="identifier">kneighbors</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="keyword">return</span> <span class="identifier">core_distances</span>
+
+
+<span class="keyword">def</span> <span class="identifier">compute_optics_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="punctuation">,</span> <span class="identifier">max_eps</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="punctuation">,</span>
+                         <span class="identifier">algorithm</span><span class="punctuation">,</span> <span class="identifier">leaf_size</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Computes the OPTICS reachability graph.
+
+    Read more in the :ref:`User Guide &lt;optics&gt;`.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n_samples, n_features), or \
+            (n_samples, n_samples) if metric=’precomputed’.
+        A feature array, or array of distances between samples if
+        metric='precomputed'
+
+    min_samples : int &gt; 1 or float between 0 and 1
+        The number of samples in a neighborhood for a point to be considered
+        as a core point. Expressed as an absolute number or a fraction of the
+        number of samples (rounded to be at least 2).
+
+    max_eps : float, default=np.inf
+        The maximum distance between two samples for one to be considered as
+        in the neighborhood of the other. Default value of ``np.inf`` will
+        identify clusters across all scales; reducing ``max_eps`` will result
+        in shorter run times.
+
+    metric : str or callable, default='minkowski'
+        Metric to use for distance computation. Any metric from scikit-learn
+        or scipy.spatial.distance can be used.
+
+        If metric is a callable function, it is called on each
+        pair of instances (rows) and the resulting value recorded. The callable
+        should take two arrays as input and return one value indicating the
+        distance between them. This works for Scipy's metrics, but is less
+        efficient than passing the metric name as a string. If metric is
+        "precomputed", X is assumed to be a distance matrix and must be square.
+
+        Valid values for metric are:
+
+        - from scikit-learn: ['cityblock', 'cosine', 'euclidean', 'l1', 'l2',
+          'manhattan']
+
+        - from scipy.spatial.distance: ['braycurtis', 'canberra', 'chebyshev',
+          'correlation', 'dice', 'hamming', 'jaccard', 'kulsinski',
+          'mahalanobis', 'minkowski', 'rogerstanimoto', 'russellrao',
+          'seuclidean', 'sokalmichener', 'sokalsneath', 'sqeuclidean',
+          'yule']
+
+        See the documentation for scipy.spatial.distance for details on these
+        metrics.
+
+    p : int, default=2
+        Parameter for the Minkowski metric from
+        :class:`~sklearn.metrics.pairwise_distances`. When p = 1, this is
+        equivalent to using manhattan_distance (l1), and euclidean_distance
+        (l2) for p = 2. For arbitrary p, minkowski_distance (l_p) is used.
+
+    metric_params : dict, default=None
+        Additional keyword arguments for the metric function.
+
+    algorithm : {'auto', 'ball_tree', 'kd_tree', 'brute'}, default='auto'
+        Algorithm used to compute the nearest neighbors:
+
+        - 'ball_tree' will use :class:`BallTree`
+        - 'kd_tree' will use :class:`KDTree`
+        - 'brute' will use a brute-force search.
+        - 'auto' will attempt to decide the most appropriate algorithm
+          based on the values passed to :meth:`fit` method. (default)
+
+        Note: fitting on sparse input will override the setting of
+        this parameter, using brute force.
+
+    leaf_size : int, default=30
+        Leaf size passed to :class:`BallTree` or :class:`KDTree`. This can
+        affect the speed of the construction and query, as well as the memory
+        required to store the tree. The optimal value depends on the
+        nature of the problem.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run for neighbors search.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Returns
+    -------
+    ordering_ : array of shape (n_samples,)
+        The cluster ordered list of sample indices.
+
+    core_distances_ : array of shape (n_samples,)
+        Distance at which each sample becomes a core point, indexed by object
+        order. Points which will never be core have a distance of inf. Use
+        ``clust.core_distances_[clust.ordering_]`` to access in cluster order.
+
+    reachability_ : array of shape (n_samples,)
+        Reachability distances per sample, indexed by object order. Use
+        ``clust.reachability_[clust.ordering_]`` to access in cluster order.
+
+    predecessor_ : array of shape (n_samples,)
+        Point that a sample was reached from, indexed by object order.
+        Seed points have a predecessor of -1.
+
+    References
+    ----------
+    .. [1] Ankerst, Mihael, Markus M. Breunig, Hans-Peter Kriegel,
+       and Jörg Sander. "OPTICS: ordering points to identify the clustering
+       structure." ACM SIGMOD Record 28, no. 2 (1999): 49-60.
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="identifier">_validate_size</span><span class="grouping">(</span><span class="identifier">min_samples</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="string-literal">'min_samples'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">min_samples</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">min_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">min_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Start all points as 'unprocessed' ##</span>
+    <span class="identifier">reachability_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="identifier">reachability_</span><span class="punctuation">.</span><span class="identifier">fill</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="grouping">)</span>
+    <span class="identifier">predecessor_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+    <span class="identifier">predecessor_</span><span class="punctuation">.</span><span class="identifier">fill</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+    <span class="identifier">nbrs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">min_samples</span><span class="punctuation">,</span>
+                            <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="identifier">algorithm</span><span class="punctuation">,</span>
+                            <span class="identifier">leaf_size</span><span class="arithmetic-assignment">=</span><span class="identifier">leaf_size</span><span class="punctuation">,</span>
+                            <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">metric</span><span class="punctuation">,</span>
+                            <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="identifier">metric_params</span><span class="punctuation">,</span>
+                            <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">p</span><span class="punctuation">,</span>
+                            <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+
+    <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="comment"># Here we first do a kNN query for each point, this differs from</span>
+    <span class="comment"># the original OPTICS that only used epsilon range queries.</span>
+    <span class="comment"># TODO: handle working_memory somehow?</span>
+    <span class="identifier">core_distances_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_compute_core_distances_</span><span class="grouping">(</span><span class="identifier">X</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">nbrs</span><span class="punctuation">,</span>
+                                               <span class="identifier">min_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">min_samples</span><span class="punctuation">,</span>
+                                               <span class="identifier">working_memory</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+    <span class="comment"># OPTICS puts an upper limit on these, use inf for undefined.</span>
+    <span class="identifier">core_distances_</span><span class="grouping">[</span><span class="identifier">core_distances_</span> <span class="relational-operator">&gt;</span> <span class="identifier">max_eps</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">around</span><span class="grouping">(</span><span class="identifier">core_distances_</span><span class="punctuation">,</span>
+              <span class="identifier">decimals</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">core_distances_</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">precision</span><span class="punctuation">,</span>
+              <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">core_distances_</span><span class="grouping">)</span>
+
+    <span class="comment"># Main OPTICS loop. Not parallelizable. The order that entries are</span>
+    <span class="comment"># written to the 'ordering_' list is important!</span>
+    <span class="comment"># Note that this implementation is O(n^2) theoretically, but</span>
+    <span class="comment"># supposedly with very low constant factors.</span>
+    <span class="identifier">processed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+    <span class="identifier">ordering</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">ordering_idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Choose next based on smallest reachability distance</span>
+        <span class="comment"># (And prefer smaller ids on ties, possibly np.inf!)</span>
+        <span class="identifier">index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">processed</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">point</span> <span class="arithmetic-assignment">=</span> <span class="identifier">index</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmin</span><span class="grouping">(</span><span class="identifier">reachability_</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">]</span>
+
+        <span class="identifier">processed</span><span class="grouping">[</span><span class="identifier">point</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="identifier">ordering</span><span class="grouping">[</span><span class="identifier">ordering_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">point</span>
+        <span class="keyword">if</span> <span class="identifier">core_distances_</span><span class="grouping">[</span><span class="identifier">point</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="punctuation">:</span>
+            <span class="identifier">_set_reach_dist</span><span class="grouping">(</span><span class="identifier">core_distances_</span><span class="arithmetic-assignment">=</span><span class="identifier">core_distances_</span><span class="punctuation">,</span>
+                            <span class="identifier">reachability_</span><span class="arithmetic-assignment">=</span><span class="identifier">reachability_</span><span class="punctuation">,</span>
+                            <span class="identifier">predecessor_</span><span class="arithmetic-assignment">=</span><span class="identifier">predecessor_</span><span class="punctuation">,</span>
+                            <span class="identifier">point_index</span><span class="arithmetic-assignment">=</span><span class="identifier">point</span><span class="punctuation">,</span>
+                            <span class="identifier">processed</span><span class="arithmetic-assignment">=</span><span class="identifier">processed</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">nbrs</span><span class="arithmetic-assignment">=</span><span class="identifier">nbrs</span><span class="punctuation">,</span>
+                            <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="identifier">metric_params</span><span class="punctuation">,</span>
+                            <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">max_eps</span><span class="arithmetic-assignment">=</span><span class="identifier">max_eps</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isinf</span><span class="grouping">(</span><span class="identifier">reachability_</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"All reachability values are inf. Set a larger"</span>
+                      <span class="string-literal">" max_eps or all data will be considered outliers."</span><span class="punctuation">,</span>
+                      <span class="identifier">UserWarning</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">core_distances_</span><span class="punctuation">,</span> <span class="identifier">reachability_</span><span class="punctuation">,</span> <span class="identifier">predecessor_</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_set_reach_dist</span><span class="grouping">(</span><span class="identifier">core_distances_</span><span class="punctuation">,</span> <span class="identifier">reachability_</span><span class="punctuation">,</span> <span class="identifier">predecessor_</span><span class="punctuation">,</span>
+                    <span class="identifier">point_index</span><span class="punctuation">,</span> <span class="identifier">processed</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">nbrs</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="punctuation">,</span>
+                    <span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">max_eps</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">P</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">point_index</span><span class="punctuation">:</span><span class="identifier">point_index</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="comment"># Assume that radius_neighbors is faster without distances</span>
+    <span class="comment"># and we don't need all distances, nevertheless, this means</span>
+    <span class="comment"># we may be doing some work twice.</span>
+    <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nbrs</span><span class="punctuation">.</span><span class="identifier">radius_neighbors</span><span class="grouping">(</span><span class="identifier">P</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="arithmetic-assignment">=</span><span class="identifier">max_eps</span><span class="punctuation">,</span>
+                                    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="comment"># Getting indices of neighbors that have not been processed</span>
+    <span class="identifier">unproc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">compress</span><span class="grouping">(</span><span class="bitwise-operator">~</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">processed</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="grouping">)</span>
+    <span class="comment"># Neighbors of current point are already processed.</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">unproc</span><span class="punctuation">.</span><span class="identifier">size</span><span class="punctuation">:</span>
+        <span class="keyword">return</span>
+
+    <span class="comment"># Only compute distances to unprocessed neighbors:</span>
+    <span class="keyword">if</span> <span class="identifier">metric</span> <span class="relational-operator">==</span> <span class="string-literal">'precomputed'</span><span class="punctuation">:</span>
+        <span class="identifier">dists</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">point_index</span><span class="punctuation">,</span> <span class="identifier">unproc</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">metric_params</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">metric_params</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">metric</span> <span class="relational-operator">==</span> <span class="string-literal">'minkowski' and 'p'</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">_params</span><span class="punctuation">:</span>
+            <span class="comment"># the same logic as neighbors, p is ignored if explicitly set</span>
+            <span class="comment"># in the dict params</span>
+            <span class="identifier">_params</span><span class="grouping">[</span><span class="string-literal">'p'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">p</span>
+        <span class="identifier">dists</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pairwise_distances</span><span class="grouping">(</span><span class="identifier">P</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">unproc</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                   <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                   <span class="arithmetic-operator">**</span><span class="identifier">_params</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="identifier">rdists</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="identifier">dists</span><span class="punctuation">,</span> <span class="identifier">core_distances_</span><span class="grouping">[</span><span class="identifier">point_index</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">around</span><span class="grouping">(</span><span class="identifier">rdists</span><span class="punctuation">,</span> <span class="identifier">decimals</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">rdists</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">precision</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">rdists</span><span class="grouping">)</span>
+    <span class="identifier">improved</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">rdists</span> <span class="relational-operator">&lt;</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">reachability_</span><span class="punctuation">,</span> <span class="identifier">unproc</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">reachability_</span><span class="grouping">[</span><span class="identifier">unproc</span><span class="grouping">[</span><span class="identifier">improved</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rdists</span><span class="grouping">[</span><span class="identifier">improved</span><span class="grouping">]</span>
+    <span class="identifier">predecessor_</span><span class="grouping">[</span><span class="identifier">unproc</span><span class="grouping">[</span><span class="identifier">improved</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">point_index</span>
+
+
+<span class="keyword">def</span> <span class="identifier">cluster_optics_dbscan</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">reachability</span><span class="punctuation">,</span> <span class="identifier">core_distances</span><span class="punctuation">,</span> <span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">eps</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Performs DBSCAN extraction for an arbitrary epsilon.
+
+    Extracting the clusters runs in linear time. Note that this results in
+    ``labels_`` which are close to a :class:`~sklearn.cluster.DBSCAN` with
+    similar settings and ``eps``, only if ``eps`` is close to ``max_eps``.
+
+    Parameters
+    ----------
+    reachability : array of shape (n_samples,)
+        Reachability distances calculated by OPTICS (``reachability_``)
+
+    core_distances : array of shape (n_samples,)
+        Distances at which points become core (``core_distances_``)
+
+    ordering : array of shape (n_samples,)
+        OPTICS ordered point indices (``ordering_``)
+
+    eps : float
+        DBSCAN ``eps`` parameter. Must be set to &lt; ``max_eps``. Results
+        will be close to DBSCAN algorithm if ``eps`` and ``max_eps`` are close
+        to one another.
+
+    Returns
+    -------
+    labels_ : array of shape (n_samples,)
+        The estimated labels.
+
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">core_distances</span><span class="grouping">)</span>
+    <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+
+    <span class="identifier">far_reach</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reachability</span> <span class="relational-operator">&gt;</span> <span class="identifier">eps</span>
+    <span class="identifier">near_core</span> <span class="arithmetic-assignment">=</span> <span class="identifier">core_distances</span> <span class="relational-operator">&lt;=</span> <span class="identifier">eps</span>
+    <span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">ordering</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cumsum</span><span class="grouping">(</span><span class="identifier">far_reach</span><span class="grouping">[</span><span class="identifier">ordering</span><span class="grouping">]</span> <span class="bitwise-operator">&</span> <span class="identifier">near_core</span><span class="grouping">[</span><span class="identifier">ordering</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+    <span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">far_reach</span> <span class="bitwise-operator">&</span> <span class="bitwise-operator">~</span><span class="identifier">near_core</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+    <span class="keyword">return</span> <span class="identifier">labels</span>
+
+
+<span class="keyword">def</span> <span class="identifier">cluster_optics_xi</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">reachability</span><span class="punctuation">,</span> <span class="identifier">predecessor</span><span class="punctuation">,</span> <span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="punctuation">,</span>
+                      <span class="identifier">min_cluster_size</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">xi</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.05</span><span class="punctuation">,</span>
+                      <span class="identifier">predecessor_correction</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Automatically extract clusters according to the Xi-steep method.
+
+    Parameters
+    ----------
+    reachability : ndarray of shape (n_samples,)
+        Reachability distances calculated by OPTICS (`reachability_`)
+
+    predecessor : ndarray of shape (n_samples,)
+        Predecessors calculated by OPTICS.
+
+    ordering : ndarray of shape (n_samples,)
+        OPTICS ordered point indices (`ordering_`)
+
+    min_samples : int &gt; 1 or float between 0 and 1
+        The same as the min_samples given to OPTICS. Up and down steep regions
+        can't have more then ``min_samples`` consecutive non-steep points.
+        Expressed as an absolute number or a fraction of the number of samples
+        (rounded to be at least 2).
+
+    min_cluster_size : int &gt; 1 or float between 0 and 1, default=None
+        Minimum number of samples in an OPTICS cluster, expressed as an
+        absolute number or a fraction of the number of samples (rounded to be
+        at least 2). If ``None``, the value of ``min_samples`` is used instead.
+
+    xi : float between 0 and 1, default=0.05
+        Determines the minimum steepness on the reachability plot that
+        constitutes a cluster boundary. For example, an upwards point in the
+        reachability plot is defined by the ratio from one point to its
+        successor being at most 1-xi.
+
+    predecessor_correction : bool, default=True
+        Correct clusters based on the calculated predecessors.
+
+    Returns
+    -------
+    labels : ndarray of shape (n_samples,)
+        The labels assigned to samples. Points which are not included
+        in any cluster are labeled as -1.
+
+    clusters : ndarray of shape (n_clusters, 2)
+        The list of clusters in the form of ``[start, end]`` in each row, with
+        all indices inclusive. The clusters are ordered according to ``(end,
+        -start)`` (ascending) so that larger clusters encompassing smaller
+        clusters come after such nested smaller clusters. Since ``labels`` does
+        not reflect the hierarchy, usually ``len(clusters) &gt;
+        np.unique(labels)``.
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">reachability</span><span class="grouping">)</span>
+    <span class="identifier">_validate_size</span><span class="grouping">(</span><span class="identifier">min_samples</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="string-literal">'min_samples'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">min_samples</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">min_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">min_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">min_cluster_size</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">min_cluster_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min_samples</span>
+    <span class="identifier">_validate_size</span><span class="grouping">(</span><span class="identifier">min_cluster_size</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="string-literal">'min_cluster_size'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">min_cluster_size</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">min_cluster_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">min_cluster_size</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_xi_cluster</span><span class="grouping">(</span><span class="identifier">reachability</span><span class="grouping">[</span><span class="identifier">ordering</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">predecessor</span><span class="grouping">[</span><span class="identifier">ordering</span><span class="grouping">]</span><span class="punctuation">,</span>
+                           <span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">xi</span><span class="punctuation">,</span>
+                           <span class="identifier">min_samples</span><span class="punctuation">,</span> <span class="identifier">min_cluster_size</span><span class="punctuation">,</span>
+                           <span class="identifier">predecessor_correction</span><span class="grouping">)</span>
+    <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_extract_xi_labels</span><span class="grouping">(</span><span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">clusters</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">clusters</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_extend_region</span><span class="grouping">(</span><span class="identifier">steep_point</span><span class="punctuation">,</span> <span class="identifier">xward_point</span><span class="punctuation">,</span> <span class="identifier">start</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Extend the area until it's maximal.
+
+    It's the same function for both upward and downward reagions, depending on
+    the given input parameters. Assuming:
+
+        - steep_{upward/downward}: bool array indicating whether a point is a
+          steep {upward/downward};
+        - upward/downward: bool array indicating whether a point is
+          upward/downward;
+
+    To extend an upward reagion, ``steep_point=steep_upward`` and
+    ``xward_point=downward`` are expected, and to extend a downward region,
+    ``steep_point=steep_downward`` and ``xward_point=upward``.
+
+    Parameters
+    ----------
+    steep_point : ndarray of shape (n_samples,), dtype=bool
+        True if the point is steep downward (upward).
+
+    xward_point : ndarray of shape (n_samples,), dtype=bool
+        True if the point is an upward (respectively downward) point.
+
+    start : int
+        The start of the xward region.
+
+    min_samples : int
+       The same as the min_samples given to OPTICS. Up and down steep
+       regions can't have more then ``min_samples`` consecutive non-steep
+       points.
+
+    Returns
+    -------
+    index : int
+        The current index iterating over all the samples, i.e. where we are up
+        to in our search.
+
+    end : int
+        The end of the region, which can be behind the index. The region
+        includes the ``end`` index.
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">steep_point</span><span class="grouping">)</span>
+    <span class="identifier">non_xward_points</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="identifier">index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">start</span>
+    <span class="identifier">end</span> <span class="arithmetic-assignment">=</span> <span class="identifier">start</span>
+    <span class="comment"># find a maximal area</span>
+    <span class="keyword">while</span> <span class="identifier">index</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">steep_point</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">non_xward_points</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+            <span class="identifier">end</span> <span class="arithmetic-assignment">=</span> <span class="identifier">index</span>
+        <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="identifier">xward_point</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="comment"># it's not a steep point, but still goes up.</span>
+            <span class="identifier">non_xward_points</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+            <span class="comment"># region should include no more than min_samples consecutive</span>
+            <span class="comment"># non steep xward points.</span>
+            <span class="keyword">if</span> <span class="identifier">non_xward_points</span> <span class="relational-operator">&gt;</span> <span class="identifier">min_samples</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">end</span>
+        <span class="identifier">index</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+    <span class="keyword">return</span> <span class="identifier">end</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_update_filter_sdas</span><span class="grouping">(</span><span class="identifier">sdas</span><span class="punctuation">,</span> <span class="identifier">mib</span><span class="punctuation">,</span> <span class="identifier">xi_complement</span><span class="punctuation">,</span> <span class="identifier">reachability_plot</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Update steep down areas (SDAs) using the new maximum in between (mib)
+    value, and the given complement of xi, i.e. ``1 - xi``.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isinf</span><span class="grouping">(</span><span class="identifier">mib</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="identifier">res</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">sda</span> <span class="keyword">for</span> <span class="identifier">sda</span> <span class="relational-operator">in</span> <span class="identifier">sdas</span>
+           <span class="keyword">if</span> <span class="identifier">mib</span> <span class="relational-operator">&lt;=</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">sda</span><span class="grouping">[</span><span class="string-literal">'start'</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">xi_complement</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">sda</span> <span class="relational-operator">in</span> <span class="identifier">res</span><span class="punctuation">:</span>
+        <span class="identifier">sda</span><span class="grouping">[</span><span class="string-literal">'mib'] = max(sda['mib'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">mib</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">res</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_correct_predecessor</span><span class="grouping">(</span><span class="identifier">reachability_plot</span><span class="punctuation">,</span> <span class="identifier">predecessor_plot</span><span class="punctuation">,</span> <span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">e</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Correct for predecessors.
+
+    Applies Algorithm 2 of [1]_.
+
+    Input parameters are ordered by the computer OPTICS ordering.
+
+    .. [1] Schubert, Erich, Michael Gertz.
+       "Improving the Cluster Structure Extracted from OPTICS Plots." Proc. of
+       the Conference "Lernen, Wissen, Daten, Analysen" (LWDA) (2018): 318-329.
+    """</span>
+    <span class="keyword">while</span> <span class="identifier">s</span> <span class="relational-operator">&lt;</span> <span class="identifier">e</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">s</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">e</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">e</span>
+        <span class="identifier">p_e</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ordering</span><span class="grouping">[</span><span class="identifier">predecessor_plot</span><span class="grouping">[</span><span class="identifier">e</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">e</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">p_e</span> <span class="relational-operator">==</span> <span class="identifier">ordering</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">e</span>
+        <span class="identifier">e</span> <span class="arithmetic-assignment">-=</span> <span class="int-literal">1</span>
+    <span class="keyword">return</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_xi_cluster</span><span class="grouping">(</span><span class="identifier">reachability_plot</span><span class="punctuation">,</span> <span class="identifier">predecessor_plot</span><span class="punctuation">,</span> <span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">xi</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="punctuation">,</span>
+                <span class="identifier">min_cluster_size</span><span class="punctuation">,</span> <span class="identifier">predecessor_correction</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Automatically extract clusters according to the Xi-steep method.
+
+    This is rouphly an implementation of Figure 19 of the OPTICS paper.
+
+    Parameters
+    ----------
+    reachability_plot : array-like of shape (n_samples,)
+        The reachability plot, i.e. reachability ordered according to
+        the calculated ordering, all computed by OPTICS.
+
+    predecessor_plot : array-like of shape (n_samples,)
+        Predecessors ordered according to the calculated ordering.
+
+    xi : float, between 0 and 1
+        Determines the minimum steepness on the reachability plot that
+        constitutes a cluster boundary. For example, an upwards point in the
+        reachability plot is defined by the ratio from one point to its
+        successor being at most 1-xi.
+
+    min_samples : int &gt; 1
+        The same as the min_samples given to OPTICS. Up and down steep regions
+        can't have more then ``min_samples`` consecutive non-steep points.
+
+    min_cluster_size : int &gt; 1
+        Minimum number of samples in an OPTICS cluster.
+
+    predecessor_correction : bool
+        Correct clusters based on the calculated predecessors.
+
+    Returns
+    -------
+    clusters : ndarray of shape (n_clusters, 2)
+        The list of clusters in the form of [start, end] in each row, with all
+        indices inclusive. The clusters are ordered in a way that larger
+        clusters encompassing smaller clusters come after those smaller
+        clusters.
+    """</span>
+
+    <span class="comment"># Our implementation adds an inf to the end of reachability plot</span>
+    <span class="comment"># this helps to find potential clusters at the end of the</span>
+    <span class="comment"># reachability plot even if there's no upward region at the end of it.</span>
+    <span class="identifier">reachability_plot</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">hstack</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">reachability_plot</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">xi_complement</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">xi</span>
+    <span class="identifier">sdas</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>  <span class="comment"># steep down areas, introduced in section 4.3.2 of the paper</span>
+    <span class="identifier">clusters</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="identifier">index</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="identifier">mib</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>  <span class="comment"># maximum in between, section 4.3.2</span>
+
+    <span class="comment"># Our implementation corrects a mistake in the original</span>
+    <span class="comment"># paper, i.e., in Definition 9 steep downward point,</span>
+    <span class="comment"># r(p) * (1 - x1) &lt;= r(p + 1) should be</span>
+    <span class="comment"># r(p) * (1 - x1) &gt;= r(p + 1)</span>
+    <span class="keyword">with</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">errstate</span><span class="grouping">(</span><span class="identifier">invalid</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ignore'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">ratio</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">steep_upward</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ratio</span> <span class="relational-operator">&lt;=</span> <span class="identifier">xi_complement</span>
+        <span class="identifier">steep_downward</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ratio</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="identifier">xi_complement</span>
+        <span class="identifier">downward</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ratio</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span>
+        <span class="identifier">upward</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ratio</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span>
+
+    <span class="comment"># the following loop is is almost exactly as Figure 19 of the paper.</span>
+    <span class="comment"># it jumps over the areas which are not either steep down or up areas</span>
+    <span class="keyword">for</span> <span class="identifier">steep_index</span> <span class="relational-operator">in</span> <span class="identifier">iter</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">steep_upward</span> <span class="bitwise-operator">|</span> <span class="identifier">steep_downward</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># just continue if steep_index has been a part of a discovered xward</span>
+        <span class="comment"># area.</span>
+        <span class="keyword">if</span> <span class="identifier">steep_index</span> <span class="relational-operator">&lt;</span> <span class="identifier">index</span><span class="punctuation">:</span>
+            <span class="keyword">continue</span>
+
+        <span class="identifier">mib</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">mib</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">index</span><span class="punctuation">:</span><span class="identifier">steep_index</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># steep downward areas</span>
+        <span class="keyword">if</span> <span class="identifier">steep_downward</span><span class="grouping">[</span><span class="identifier">steep_index</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">sdas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_update_filter_sdas</span><span class="grouping">(</span><span class="identifier">sdas</span><span class="punctuation">,</span> <span class="identifier">mib</span><span class="punctuation">,</span> <span class="identifier">xi_complement</span><span class="punctuation">,</span>
+                                       <span class="identifier">reachability_plot</span><span class="grouping">)</span>
+            <span class="identifier">D_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">steep_index</span>
+            <span class="identifier">D_end</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_extend_region</span><span class="grouping">(</span><span class="identifier">steep_downward</span><span class="punctuation">,</span> <span class="identifier">upward</span><span class="punctuation">,</span>
+                                   <span class="identifier">D_start</span><span class="punctuation">,</span> <span class="identifier">min_samples</span><span class="grouping">)</span>
+            <span class="identifier">D</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">'start': D_start, 'end': D_end, 'mib'</span><span class="punctuation">:</span> <span class="int-literal">0</span><span class="punctuation">.</span><span class="grouping">}</span>
+            <span class="identifier">sdas</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">D</span><span class="grouping">)</span>
+            <span class="identifier">index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">D_end</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+            <span class="identifier">mib</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span>
+
+        <span class="comment"># steep upward areas</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">sdas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_update_filter_sdas</span><span class="grouping">(</span><span class="identifier">sdas</span><span class="punctuation">,</span> <span class="identifier">mib</span><span class="punctuation">,</span> <span class="identifier">xi_complement</span><span class="punctuation">,</span>
+                                       <span class="identifier">reachability_plot</span><span class="grouping">)</span>
+            <span class="identifier">U_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">steep_index</span>
+            <span class="identifier">U_end</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_extend_region</span><span class="grouping">(</span><span class="identifier">steep_upward</span><span class="punctuation">,</span> <span class="identifier">downward</span><span class="punctuation">,</span> <span class="identifier">U_start</span><span class="punctuation">,</span>
+                                   <span class="identifier">min_samples</span><span class="grouping">)</span>
+            <span class="identifier">index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">U_end</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+            <span class="identifier">mib</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span>
+
+            <span class="identifier">U_clusters</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+            <span class="keyword">for</span> <span class="identifier">D</span> <span class="relational-operator">in</span> <span class="identifier">sdas</span><span class="punctuation">:</span>
+                <span class="identifier">c_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">D</span><span class="grouping">[</span><span class="string-literal">'start'</span><span class="grouping">]</span>
+                <span class="identifier">c_end</span> <span class="arithmetic-assignment">=</span> <span class="identifier">U_end</span>
+
+                <span class="comment"># line (**), sc2*</span>
+                <span class="keyword">if</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">c_end</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">xi_complement</span> <span class="relational-operator">&lt;</span> <span class="identifier">D</span><span class="grouping">[</span><span class="string-literal">'mib'</span><span class="grouping">]</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+
+                <span class="comment"># Definition 11: criterion 4</span>
+                <span class="identifier">D_max</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">D</span><span class="grouping">[</span><span class="string-literal">'start'</span><span class="grouping">]</span><span class="grouping">]</span>
+                <span class="keyword">if</span> <span class="identifier">D_max</span> <span class="arithmetic-operator">*</span> <span class="identifier">xi_complement</span> <span class="relational-operator">&gt;=</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">c_end</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+                    <span class="comment"># Find the first index from the left side which is almost</span>
+                    <span class="comment"># at the same level as the end of the detected cluster.</span>
+                    <span class="keyword">while</span> <span class="grouping">(</span><span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">c_start</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span>
+                           <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">c_end</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span>
+                           <span class="logical-operator">and</span> <span class="identifier">c_start</span> <span class="relational-operator">&lt;</span> <span class="identifier">D</span><span class="grouping">[</span><span class="string-literal">'end'</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="identifier">c_start</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+                <span class="keyword">elif</span> <span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">c_end</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">xi_complement</span> <span class="relational-operator">&gt;=</span> <span class="identifier">D_max</span><span class="punctuation">:</span>
+                    <span class="comment"># Find the first index from the right side which is almost</span>
+                    <span class="comment"># at the same level as the beginning of the detected</span>
+                    <span class="comment"># cluster.</span>
+                    <span class="comment"># Our implementation corrects a mistake in the original</span>
+                    <span class="comment"># paper, i.e., in Definition 11 4c, r(x) &lt; r(sD) should be</span>
+                    <span class="comment"># r(x) &gt; r(sD).</span>
+                    <span class="keyword">while</span> <span class="grouping">(</span><span class="identifier">reachability_plot</span><span class="grouping">[</span><span class="identifier">c_end</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="identifier">D_max</span>
+                           <span class="logical-operator">and</span> <span class="identifier">c_end</span> <span class="relational-operator">&gt;</span> <span class="identifier">U_start</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="identifier">c_end</span> <span class="arithmetic-assignment">-=</span> <span class="int-literal">1</span>
+
+                <span class="comment"># predecessor correction</span>
+                <span class="keyword">if</span> <span class="identifier">predecessor_correction</span><span class="punctuation">:</span>
+                    <span class="identifier">c_start</span><span class="punctuation">,</span> <span class="identifier">c_end</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_correct_predecessor</span><span class="grouping">(</span><span class="identifier">reachability_plot</span><span class="punctuation">,</span>
+                                                          <span class="identifier">predecessor_plot</span><span class="punctuation">,</span>
+                                                          <span class="identifier">ordering</span><span class="punctuation">,</span>
+                                                          <span class="identifier">c_start</span><span class="punctuation">,</span>
+                                                          <span class="identifier">c_end</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">c_start</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+
+                <span class="comment"># Definition 11: criterion 3.a</span>
+                <span class="keyword">if</span> <span class="identifier">c_end</span> <span class="arithmetic-operator">-</span> <span class="identifier">c_start</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span> <span class="relational-operator">&lt;</span> <span class="identifier">min_cluster_size</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+
+                <span class="comment"># Definition 11: criterion 1</span>
+                <span class="keyword">if</span> <span class="identifier">c_start</span> <span class="relational-operator">&gt;</span> <span class="identifier">D</span><span class="grouping">[</span><span class="string-literal">'end'</span><span class="grouping">]</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+
+                <span class="comment"># Definition 11: criterion 2</span>
+                <span class="keyword">if</span> <span class="identifier">c_end</span> <span class="relational-operator">&lt;</span> <span class="identifier">U_start</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+
+                <span class="identifier">U_clusters</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">c_start</span><span class="punctuation">,</span> <span class="identifier">c_end</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="comment"># add smaller clusters first.</span>
+            <span class="identifier">U_clusters</span><span class="punctuation">.</span><span class="identifier">reverse</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">clusters</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">U_clusters</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">clusters</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_extract_xi_labels</span><span class="grouping">(</span><span class="identifier">ordering</span><span class="punctuation">,</span> <span class="identifier">clusters</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Extracts the labels from the clusters returned by `_xi_cluster`.
+    We rely on the fact that clusters are stored
+    with the smaller clusters coming before the larger ones.
+
+    Parameters
+    ----------
+    ordering : array-like of shape (n_samples,)
+        The ordering of points calculated by OPTICS
+
+    clusters : array-like of shape (n_clusters, 2)
+        List of clusters i.e. (start, end) tuples,
+        as returned by `_xi_cluster`.
+
+    Returns
+    -------
+    labels : ndarray of shape (n_samples,)
+    """</span>
+
+    <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">full</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">ordering</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+    <span class="identifier">label</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="keyword">for</span> <span class="identifier">c</span> <span class="relational-operator">in</span> <span class="identifier">clusters</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">c</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">:</span><span class="grouping">(</span><span class="identifier">c</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">c</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">:</span><span class="grouping">(</span><span class="identifier">c</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">label</span>
+            <span class="identifier">label</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+    <span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">ordering</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">labels</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">labels</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,849 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Handles Data Augmentation for feeding Faceswap Models """</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+
+<span class="keyword">from</span> <span class="identifier">random</span> <span class="keyword">import</span> <span class="identifier">shuffle</span><span class="punctuation">,</span> <span class="identifier">choice</span>
+<span class="keyword">from</span> <span class="identifier">threading</span> <span class="keyword">import</span> <span class="identifier">Lock</span>
+<span class="keyword">from</span> <span class="identifier">zlib</span> <span class="keyword">import</span> <span class="identifier">decompress</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">cv2</span>
+<span class="keyword">from</span> <span class="identifier">tqdm</span> <span class="keyword">import</span> <span class="identifier">tqdm</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">align</span> <span class="keyword">import</span> <span class="identifier">AlignedFace</span><span class="punctuation">,</span> <span class="identifier">DetectedFace</span><span class="punctuation">,</span> <span class="identifier">get_centered_size</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">image</span> <span class="keyword">import</span> <span class="identifier">read_image_batch</span><span class="punctuation">,</span> <span class="identifier">read_image_meta_batch</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">multithreading</span> <span class="keyword">import</span> <span class="identifier">BackgroundGenerator</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">FaceswapError</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">ImageAugmentation</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+<span class="identifier">_FACE_CACHES</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_cache</span><span class="grouping">(</span><span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">config</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Obtain a :class:`_Cache` object for the given side. If the object does not pre-exist then
+    create it.
+
+    Parameters
+    ----------
+    side: str
+        `"a"` or `"b"`. The side of the model to obtain the cache for
+    filenames: list
+        The filenames of all the images. This can either be the full path or the base name. If the
+        full paths are passed in, they are stripped to base name for use as the cache key.
+    config: dict
+        The user selected training configuration options
+
+    Returns
+    -------
+    :class:`_Cache`
+        The face meta information cache for the requested side
+    """</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">_FACE_CACHES</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">side</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Creating cache. Side: %s"</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+        <span class="identifier">_FACE_CACHES</span><span class="grouping">[</span><span class="identifier">side</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_Cache</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">config</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">_FACE_CACHES</span><span class="grouping">[</span><span class="identifier">side</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_check_reset</span><span class="grouping">(</span><span class="identifier">face_cache</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Check whether a given cache needs to be reset because a face centering change has been
+    detected in the other cache.
+
+    Parameters
+    ----------
+    face_cache: :class:`_Cache`
+        The cache object that is checking whether it should reset
+
+    Returns
+    -------
+    bool
+        ``True`` if the given object should reset the cache, otherwise ``False``
+    """</span>
+    <span class="identifier">check_cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">cache</span> <span class="keyword">for</span> <span class="identifier">cache</span> <span class="relational-operator">in</span> <span class="identifier">_FACE_CACHES</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">cache</span> <span class="relational-operator">!=</span> <span class="identifier">face_cache</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+    <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_cache</span> <span class="keyword">if</span> <span class="identifier">check_cache</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">check_cache</span><span class="punctuation">.</span><span class="identifier">check_reset</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_Cache</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" A thread safe mechanism for collecting and holding face meta information (masks, "
+    "alignments data etc.) for multiple :class:`TrainingDataGenerator`s.
+
+    Each side may have up to 3 generators (training, preview and time-lapse). To conserve VRAM
+    these need to share access to the same face information for the images they are processing.
+
+    As the cache is populated at run-time, thread safe writes are required for the first epoch.
+    Following that, the cache is only used for reads, which is thread safe intrinsically.
+
+    It would probably be quicker to set locks on each individual face, but for code complexity
+    reasons, and the fact that the lock is only taken up during cache population, and it should
+    only be being read multiple times on save iterations, we lock the whole cache during writes.
+
+    Parameters
+    ----------
+    filenames: list
+        The filenames of all the images. This can either be the full path or the base name. If the
+        full paths are passed in, they are stripped to base name for use as the cache key.
+    config: dict
+        The user selected training configuration options
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">config</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lock</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Lock</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">cached</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">filenames</span><span class="grouping">}</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_aligned_landmarks</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_partial_load</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_full</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_has_reset</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span> <span class="arithmetic-assignment">=</span> <span class="identifier">config</span><span class="grouping">[</span><span class="string-literal">"centering"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">config</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">cache_full</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""bool: ``True`` if the cache has been fully populated. ``False`` if there are items still
+        to be cached. """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_full</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_full</span>
+        <span class="keyword">with</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lock</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_full</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">partially_loaded</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if the cache has been partially loaded for Warp To Landmarks otherwise
+        ``False`` """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_partial_load</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_partial_load</span>
+        <span class="keyword">with</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lock</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_partial_load</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">extract_version</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" float: The alignments file version used to extract the faces. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">aligned_landmarks</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The filename as key, aligned landmarks as value """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_aligned_landmarks</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">with</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lock</span><span class="punctuation">:</span>
+                <span class="comment"># For Warp-To-Landmarks a race condition can occur where this is referenced from</span>
+                <span class="comment"># the opposite side prior to it being populated, so block on a lock.</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_aligned_landmarks</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">key</span><span class="punctuation">:</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"aligned_face"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">landmarks</span>
+                                           <span class="keyword">for</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_aligned_landmarks</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">crop_size</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The pixel size of the cropped aligned face """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span>
+
+    <span class="keyword">def</span> <span class="identifier">check_reset</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether this cache has been reset due to a face centering change, and reset the
+        flag if it has.
+
+        Returns
+        -------
+        bool
+            ``True`` if the cache has been reset because of a face centering change due to
+            legacy alignments, otherwise ``False``. """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_has_reset</span>
+        <span class="keyword">if</span> <span class="identifier">retval</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Resetting 'has_reset' flag"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_has_reset</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_items</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the cached items for a list of filenames. The returned list is in the same order
+        as the provided filenames.
+
+        Parameters
+        ----------
+        filenames: list
+            A list of image filenames to obtain the cached data for
+
+        Returns
+        -------
+        list
+            List of dictionaries containing the cached metadata. The list returns in the same order
+            as the filenames received
+        """</span>
+        <span class="keyword">return</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">filenames</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">cache_metadata</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the batch with metadata for items that need caching and cache them to
+        :attr:`_cache`.
+
+        Parameters
+        ----------
+        filenames: list
+            List of full paths to image file names
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The batch of face images loaded from disk
+        """</span>
+        <span class="identifier">keys</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">filenames</span><span class="grouping">]</span>
+        <span class="keyword">with</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lock</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">_check_reset</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset_cache</span><span class="grouping">(</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+            <span class="identifier">needs_cache</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">filename</span>
+                           <span class="keyword">for</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">keys</span><span class="grouping">)</span>
+                           <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"cached"</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Needs cache: %s"</span><span class="punctuation">,</span> <span class="identifier">needs_cache</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">needs_cache</span><span class="punctuation">:</span>
+                <span class="comment"># Don't bother reading the metadata if no images in this batch need caching</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"All metadata already cached for: %s"</span><span class="punctuation">,</span> <span class="identifier">keys</span><span class="grouping">)</span>
+                <span class="keyword">return</span> <span class="identifier">read_image_batch</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">)</span>
+
+            <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">metadata</span> <span class="arithmetic-assignment">=</span> <span class="identifier">read_image_batch</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="invalid">w</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">a</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">folder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">details</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+                    <span class="string-literal">"{0} ({1})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                        <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">f</span><span class="string-literal">"{img.shape[1]}px"</span> <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">img</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">img</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="keyword">for</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">img</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">keys</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="grouping">)</span><span class="grouping">]</span>
+                <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"There are mismatched image sizes in the folder '{folder}'. All training "</span>
+                       <span class="string-literal">"images for each side must have the same dimensions.\nThe batch that "</span>
+                       <span class="identifier">f</span><span class="string-literal">"failed contains the following files:\n{details}."</span><span class="grouping">)</span>
+                <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+
+            <span class="comment"># Populate items into cache</span>
+            <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">needs_cache</span><span class="punctuation">:</span>
+                <span class="identifier">key</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+                <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metadata</span><span class="grouping">[</span><span class="identifier">filenames</span><span class="punctuation">.</span><span class="identifier">index</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">]</span>
+
+                <span class="comment"># Version Check</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_version</span><span class="grouping">(</span><span class="identifier">meta</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_partial_load</span><span class="punctuation">:</span>  <span class="comment"># Faces already loaded for Warp-to-landmarks</span>
+                    <span class="identifier">detected_face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"detected_face"</span><span class="grouping">]</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="identifier">detected_face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_aligned_face</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span>
+                                                           <span class="identifier">meta</span><span class="grouping">[</span><span class="string-literal">"alignments"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                           <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_mask</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">detected_face</span><span class="grouping">)</span>
+                <span class="keyword">for</span> <span class="identifier">area</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"eye", "mouth"</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_localized_mask</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">detected_face</span><span class="punctuation">,</span> <span class="identifier">area</span><span class="grouping">)</span>
+
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"cached"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+            <span class="comment"># Update the :attr:`cache_full` attribute</span>
+            <span class="identifier">cache_full</span> <span class="arithmetic-assignment">=</span> <span class="identifier">all</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"cached"</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">cache_full</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Cache filled: '%s'"</span><span class="punctuation">,</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_full</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cache_full</span>
+
+        <span class="keyword">return</span> <span class="identifier">batch</span>
+
+    <span class="keyword">def</span> <span class="identifier">pre_fill</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" When warp to landmarks is enabled, the cache must be pre-filled, as each side needs
+        access to the other side's alignments.
+
+        Parameters
+        ----------
+        filenames: list
+            The list of full paths to the images to load the metadata from
+        side: str
+            `"a"` or `"b"`. The side of the model being cached. Used for info output
+        """</span>
+        <span class="keyword">with</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lock</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">meta</span> <span class="relational-operator">in</span> <span class="identifier">tqdm</span><span class="grouping">(</span><span class="identifier">read_image_meta_batch</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">desc</span><span class="arithmetic-assignment">=</span><span class="string-literal">"WTL: Caching Landmarks ({})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">side</span><span class="punctuation">.</span><span class="identifier">upper</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">total</span><span class="arithmetic-assignment">=</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">leave</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="string-literal">"itxt" not in meta or "alignments" not in meta["itxt"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"Invalid face image found. Aborting: '{filename}'"</span><span class="grouping">)</span>
+
+                <span class="identifier">size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">meta</span><span class="grouping">[</span><span class="string-literal">"width"</span><span class="grouping">]</span>
+                <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">meta</span><span class="grouping">[</span><span class="string-literal">"itxt"</span><span class="grouping">]</span>
+                <span class="comment"># Version Check</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_version</span><span class="grouping">(</span><span class="identifier">meta</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+                <span class="identifier">detected_face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_aligned_face</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">meta</span><span class="grouping">[</span><span class="string-literal">"alignments"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"detected_face"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_face</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_partial_load</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">def</span> <span class="identifier">_validate_version</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">png_meta</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Validate that there are not a mix of v1.0 extracted faces and v2.x faces.
+
+        Parameters
+        ----------
+        png_meta: dict
+            The information held within the Faceswap PNG Header
+        filename: str
+            The full path to the file being validated
+
+        Raises
+        ------
+        FaceswapError
+            If a version 1.0 face appears in a 2.x set or vice versa
+        """</span>
+        <span class="identifier">alignment_version</span> <span class="arithmetic-assignment">=</span> <span class="identifier">png_meta</span><span class="grouping">[</span><span class="string-literal">"source"]["alignments_version"</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting initial extract version: %s"</span><span class="punctuation">,</span> <span class="identifier">alignment_version</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment_version</span>
+            <span class="keyword">if</span> <span class="identifier">alignment_version</span> <span class="relational-operator">==</span> <span class="float-literal">1.0</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span> <span class="relational-operator">!=</span> <span class="string-literal">"legacy"</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_reset_cache</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span> <span class="relational-operator">==</span> <span class="float-literal">1.0</span> <span class="logical-operator">and</span> <span class="identifier">alignment_version</span> <span class="relational-operator">&gt;</span> <span class="float-literal">1.0</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="grouping">(</span>
+                <span class="identifier">alignment_version</span> <span class="relational-operator">==</span> <span class="float-literal">1.0</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span> <span class="relational-operator">&gt;</span> <span class="float-literal">1.0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"Mixing legacy and full head extracted facesets is not supported. "</span>
+                                <span class="string-literal">"The following folder contains a mix of extracted face types: "</span>
+                                <span class="string-literal">"{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">alignment_version</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extract_version</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_reset_cache</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">set_flag</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" In the event that a legacy extracted face has been seen, and centering is not legacy
+        the cache will need to be reset for legacy centering.
+
+        Parameters
+        ----------
+        set_flag: bool
+            ``True`` if the flag should be set to indicate that the cache is being reset because of
+            a legacy face set/centering mismatch. ``False`` if the cache is being reset because it
+            has detected a reset flag from the opposite cache.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">set_flag</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"You are using legacy extracted faces but have selected '%s' centering "</span>
+                           <span class="string-literal">"which is incompatible. Switching centering to 'legacy'"</span><span class="punctuation">,</span>
+                           <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"centering"] = "legacy"</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"legacy"</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">key</span><span class="punctuation">:</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">cached</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">}</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_full</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="keyword">if</span> <span class="identifier">set_flag</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_has_reset</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_aligned_face</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="punctuation">,</span> <span class="identifier">image_size</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a :class:`lib.align.AlignedFace` object to the cache.
+
+        Parameters
+        ----------
+        filename: str
+            The file path for the current image
+        alignments: dict
+            The alignments for a single face, extracted from a PNG header
+        image_size: int
+            The pixel size of the image loaded from disk
+
+        Returns
+        -------
+        :class:`lib.align.DetectedFace`
+            The Detected Face object that was used to create the Aligned Face
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_centered_size</span><span class="grouping">(</span><span class="string-literal">"legacy" if self._extract_version == 1.0 else "head"</span><span class="punctuation">,</span>
+                                           <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="punctuation">,</span>
+                                           <span class="identifier">image_size</span><span class="grouping">)</span>
+
+        <span class="identifier">detected_face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">detected_face</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">p</span><span class="invalid">n</span><span class="invalid">g</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">a</span><span class="grouping">(</span><span class="identifier">alignments</span><span class="grouping">)</span>
+
+        <span class="identifier">aligned_face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                                   <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="punctuation">,</span>
+                                   <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span><span class="punctuation">,</span>
+                                   <span class="identifier">is_aligned</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Caching aligned face for: %s"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"aligned_face"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">aligned_face</span>
+        <span class="keyword">return</span> <span class="identifier">detected_face</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">detected_face</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the mask to the cache if a mask is required for training.
+
+        Parameters
+        ----------
+        filename: str
+            The file path for the current image
+        detected_face: :class:`lib.align.DetectedFace`
+            The detected face object that holds the masks
+
+        Raises
+        ------
+        FaceswapError
+            If the requested mask type is not available an error is returned along with a list
+            of available masks
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"penalized_mask_loss"] and not self._config["learn_mask"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"mask_type"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No mask selected. Not validating"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"mask_type"</span><span class="grouping">]</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span>
+                <span class="string-literal">"You have selected the mask type '{}' but at least one face does not contain the "</span>
+                <span class="string-literal">"selected mask.\nThe face that failed was: '{}'\nThe masks that exist for this "</span>
+                <span class="string-literal">"face are: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"mask_type"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">key</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"mask_type"</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">set_blur_and_threshold</span><span class="grouping">(</span><span class="identifier">blur_kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"mask_blur_kernel"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                    <span class="identifier">threshold</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"mask_threshold"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">pose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"aligned_face"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">pose</span>
+        <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">set_sub_crop</span><span class="grouping">(</span><span class="identifier">pose</span><span class="punctuation">.</span><span class="identifier">offset</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">pose</span><span class="punctuation">.</span><span class="identifier">offset</span><span class="grouping">[</span><span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">stored_centering</span><span class="grouping">]</span><span class="punctuation">,</span>
+                          <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Caching mask for: %s"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"mask"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_localized_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">detected_face</span><span class="punctuation">,</span> <span class="identifier">area</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load a localized mask to the cache for the given area if it is required for training.
+
+        Parameters
+        ----------
+        filename: str
+            The file path for the current image
+        detected_face: :class:`lib.align.DetectedFace`
+            The detected face object that holds the masks
+        area: str
+            `"eye"` or `"mouth"`. The area of the face to obtain the mask for
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">[</span><span class="string-literal">"penalized_mask_loss"] or self._config[f"{area}_multiplier"</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="identifier">key</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"eyes" if area == "eye"</span> <span class="keyword">else</span> <span class="identifier">area</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Caching localized '%s' mask for: %s"</span><span class="punctuation">,</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">f</span><span class="string-literal">"mask_{key}"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">get_landmark_mask</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span><span class="punctuation">,</span>
+            <span class="identifier">key</span><span class="punctuation">,</span>
+            <span class="identifier">aligned</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="punctuation">,</span>
+            <span class="identifier">dilation</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-operator">//</span> <span class="int-literal">32</span><span class="punctuation">,</span>
+            <span class="identifier">blur_kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-operator">//</span> <span class="int-literal">16</span><span class="punctuation">,</span>
+            <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">TrainingDataGenerator</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" A Training Data Generator for compiling data for feeding to a model.
+
+    This class is called from :mod:`plugins.train.trainer._base` and launches a background
+    iterator that compiles augmented data, target data and sample data.
+
+    Parameters
+    ----------
+    model_input_size: int
+        The expected input size for the model. It is assumed that the input to the model is always
+        a square image. This is the size, in pixels, of the `width` and the `height` of the input
+        to the model.
+    model_output_shapes: list
+        A list of tuples defining the output shapes from the model, in the order that the outputs
+        are returned. The tuples should be in (`height`, `width`, `channels`) format.
+    coverage_ratio: float
+        The ratio of the training image to be trained on. Dictates how much of the image will be
+        cropped out. E.G: a coverage ratio of 0.625 will result in cropping a 160px box from a
+        256px image (:math:`256 * 0.625 = 160`).
+    color_order: ["rgb", "bgr"]
+        The color order that the model expects as input
+    augment_color: bool
+        ``True`` if color is to be augmented, otherwise ``False``
+    no_flip: bool
+        ``True`` if the image shouldn't be randomly flipped as part of augmentation, otherwise
+        ``False``
+    no_warp: bool
+        ``True`` if the image shouldn't be warped as part of augmentation, otherwise ``False``
+    warp_to_landmarks: bool
+        ``True`` if the random warp method should warp to similar landmarks from the other side,
+        ``False`` if the standard random warp method should be used.
+    face_cache: dict
+        A thread safe dictionary containing a cache of information relating to all faces being
+        trained on
+    config: dict
+        The configuration `dict` generated from :file:`config.train.ini` containing the trainer
+        plugin configuration options.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">model_input_size</span><span class="punctuation">,</span> <span class="identifier">model_output_shapes</span><span class="punctuation">,</span> <span class="identifier">coverage_ratio</span><span class="punctuation">,</span> <span class="identifier">color_order</span><span class="punctuation">,</span>
+                 <span class="identifier">augment_color</span><span class="punctuation">,</span> <span class="identifier">no_flip</span><span class="punctuation">,</span> <span class="identifier">no_warp</span><span class="punctuation">,</span> <span class="identifier">warp_to_landmarks</span><span class="punctuation">,</span> <span class="identifier">config</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (model_input_size: %s, model_output_shapes: %s, "</span>
+                     <span class="string-literal">"coverage_ratio: %s, color_order: %s, augment_color: %s, no_flip: %s, "</span>
+                     <span class="string-literal">"no_warp: %s, warp_to_landmarks: %s, config: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">model_input_size</span><span class="punctuation">,</span> <span class="identifier">model_output_shapes</span><span class="punctuation">,</span>
+                     <span class="identifier">coverage_ratio</span><span class="punctuation">,</span> <span class="identifier">color_order</span><span class="punctuation">,</span> <span class="identifier">augment_color</span><span class="punctuation">,</span> <span class="identifier">no_flip</span><span class="punctuation">,</span> <span class="identifier">no_warp</span><span class="punctuation">,</span>
+                     <span class="identifier">warp_to_landmarks</span><span class="punctuation">,</span> <span class="identifier">config</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">config</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model_input_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model_input_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model_output_shapes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model_output_shapes</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coverage_ratio</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coverage_ratio</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_color_order</span> <span class="arithmetic-assignment">=</span> <span class="identifier">color_order</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_augment_color</span> <span class="arithmetic-assignment">=</span> <span class="identifier">augment_color</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_no_flip</span> <span class="arithmetic-assignment">=</span> <span class="identifier">no_flip</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_warp_to_landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warp_to_landmarks</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_no_warp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">no_warp</span>
+
+        <span class="comment"># Batchsize and processing class are set when this class is called by a feeder</span>
+        <span class="comment"># from lib.training_data</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_nearest_landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">minibatch_ab</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">images</span><span class="punctuation">,</span> <span class="identifier">batchsize</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span>
+                     <span class="identifier">do_shuffle</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">is_preview</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">is_timelapse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" A Background iterator to return augmented images, samples and targets.
+
+        The exit point from this class and the sole attribute that should be referenced. Called
+        from :mod:`plugins.train.trainer._base`. Returns an iterator that yields images for
+        training, preview and time-lapses.
+
+        Parameters
+        ----------
+        images: list
+            A list of image paths that will be used to compile the final augmented data from.
+        batchsize: int
+            The batchsize for this iterator. Images will be returned in :class:`numpy.ndarray`
+            objects of this size from the iterator.
+        side: {'a' or 'b'}
+            The side of the model that this iterator is for.
+        do_shuffle: bool, optional
+            Whether data should be shuffled prior to loading from disk. If true, each time the full
+            list of filenames are processed, the data will be reshuffled to make sure they are not
+            returned in the same order. Default: ``True``
+        is_preview: bool, optional
+            Indicates whether this iterator is generating preview images. If ``True`` then certain
+            augmentations will not be performed. Default: ``False``
+        is_timelapse: bool optional
+            Indicates whether this iterator is generating time-lapse images. If ``True``, then
+            certain augmentations will not be performed. Default: ``False``
+
+        Yields
+        ------
+        dict
+            The following items are contained in each `dict` yielded from this iterator:
+
+            * **feed** (:class:`numpy.ndarray`) - The feed for the model. The array returned is \
+            in the format (`batchsize`, `height`, `width`, `channels`). This is the :attr:`x` \
+            parameter for :func:`keras.models.model.train_on_batch`.
+
+            * **targets** (`list`) - A list of 4-dimensional :class:`numpy.ndarray` objects in \
+            the order and size of each output of the model as defined in \
+            :attr:`model_output_shapes`. the format of these arrays will be (`batchsize`, \
+            `height`, `width`, `3`). This is the :attr:`y` parameter for \
+            :func:`keras.models.model.train_on_batch` **NB:** masks are not included in the \
+            `targets` list. If required for feeding into the Keras model, they will need to be \
+            added to this list in :mod:`plugins.train.trainer._base` from the `masks` key.
+
+            * **masks** (:class:`numpy.ndarray`) - A 4-dimensional array containing the target \
+            masks in the format (`batchsize`, `height`, `width`, `1`).
+
+            * **samples** (:class:`numpy.ndarray`) - A 4-dimensional array containing the samples \
+            for feeding to the model's predict function for generating preview and time-lapse \
+            samples. The array will be in the format (`batchsize`, `height`, `width`, \
+            `channels`). **NB:** This item will only exist in the `dict` if :attr:`is_preview` \
+            or :attr:`is_timelapse` is ``True``
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Queue batches: (image_count: %s, batchsize: %s, side: '%s', do_shuffle: %s, "</span>
+                     <span class="string-literal">"is_preview, %s, is_timelapse: %s)"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">images</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">batchsize</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">do_shuffle</span><span class="punctuation">,</span>
+                     <span class="identifier">is_preview</span><span class="punctuation">,</span> <span class="identifier">is_timelapse</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batchsize</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_cache</span><span class="grouping">(</span><span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">images</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ImageAugmentation</span><span class="grouping">(</span><span class="identifier">batchsize</span><span class="punctuation">,</span>
+                                             <span class="identifier">is_preview</span> <span class="logical-operator">or</span> <span class="identifier">is_timelapse</span><span class="punctuation">,</span>
+                                             <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model_input_size</span><span class="punctuation">,</span>
+                                             <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model_output_shapes</span><span class="punctuation">,</span>
+                                             <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coverage_ratio</span><span class="punctuation">,</span>
+                                             <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_config</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_warp_to_landmarks</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span><span class="punctuation">.</span><span class="identifier">partially_loaded</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span><span class="punctuation">.</span><span class="identifier">pre_fill</span><span class="grouping">(</span><span class="identifier">images</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+
+        <span class="identifier">args</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">images</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">do_shuffle</span><span class="punctuation">,</span> <span class="identifier">batchsize</span><span class="grouping">)</span>
+        <span class="identifier">batcher</span> <span class="arithmetic-assignment">=</span> <span class="identifier">BackgroundGenerator</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_minibatch</span><span class="punctuation">,</span> <span class="identifier">thread_count</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">args</span><span class="arithmetic-assignment">=</span><span class="identifier">args</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">batcher</span><span class="punctuation">.</span><span class="identifier">iterator</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;&lt; INTERNAL METHODS &gt;&gt; #</span>
+    <span class="keyword">def</span> <span class="identifier">_validate_samples</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Ensures that the total number of images within :attr:`images` is greater or equal to
+        the selected :attr:`batchsize`. Raises an exception if this is not the case. """</span>
+        <span class="identifier">length</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Number of images is lower than batch-size (Note that too few "</span>
+               <span class="string-literal">"images may lead to bad training). # images: {}, "</span>
+               <span class="string-literal">"batch-size: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">length</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="keyword">assert</span> <span class="identifier">length</span> <span class="relational-operator">&gt;=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span><span class="punctuation">,</span> <span class="identifier">msg</span>
+        <span class="keyword">except</span> <span class="invalid">A</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">E</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">r</span> <span class="keyword">as</span> <span class="identifier">err</span><span class="punctuation">:</span>
+            <span class="identifier">msg</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span><span class="string-literal">"\nYou should increase the number of images in your training set or lower "</span>
+                    <span class="string-literal">"your batch-size."</span><span class="grouping">)</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">err</span>
+
+    <span class="keyword">def</span> <span class="identifier">_minibatch</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">images</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">do_shuffle</span><span class="punctuation">,</span> <span class="identifier">batchsize</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" A generator function that yields the augmented, target and sample images.
+        see :func:`minibatch_ab` for more details on the output. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loading minibatch generator: (image_count: %s, side: '%s', do_shuffle: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">images</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">do_shuffle</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_samples</span><span class="grouping">(</span><span class="identifier">images</span><span class="grouping">)</span>
+
+        <span class="keyword">def</span> <span class="identifier">_img_iter</span><span class="grouping">(</span><span class="identifier">imgs</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">do_shuffle</span><span class="punctuation">:</span>
+                    <span class="identifier">shuffle</span><span class="grouping">(</span><span class="identifier">imgs</span><span class="grouping">)</span>
+                <span class="keyword">for</span> <span class="identifier">img</span> <span class="relational-operator">in</span> <span class="identifier">imgs</span><span class="punctuation">:</span>
+                    <span class="keyword">yield</span> <span class="identifier">img</span>
+
+        <span class="identifier">img_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_img_iter</span><span class="grouping">(</span><span class="identifier">images</span><span class="grouping">)</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="identifier">img_paths</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">next</span><span class="grouping">(</span><span class="identifier">img_iter</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">batchsize</span><span class="grouping">)</span><span class="grouping">]</span>
+            <span class="keyword">yield</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_process_batch</span><span class="grouping">(</span><span class="identifier">img_paths</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Finished minibatch generator: (side: '%s')"</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_process_batch</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Performs the augmentation and compiles target images and samples.
+
+        If this is the first time a face has been loaded, then it's meta data is extracted from the
+        png header and added to :attr:`_face_cache`
+
+        See
+        :func:`minibatch_ab` for more details on the output.
+
+        Parameters
+        ----------
+        filenames: list
+            List of full paths to image file names
+        side: str
+            The side of the model being trained on (`a` or `b`)
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Process batch: (filenames: '%s', side: '%s')"</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span><span class="punctuation">.</span><span class="identifier">cache_full</span><span class="punctuation">:</span>
+            <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span><span class="punctuation">.</span><span class="identifier">cache_metadata</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">read_image_batch</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">)</span>
+
+        <span class="identifier">cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span><span class="punctuation">.</span><span class="identifier">get_items</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="grouping">)</span>
+        <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_crop_to_center</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">cache</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+        <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_apply_mask</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">cache</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+        <span class="identifier">processed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="comment"># Initialize processing training size on first image</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">initialized</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">initialize</span><span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="comment"># Get Landmarks prior to manipulating the image</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_warp_to_landmarks</span><span class="punctuation">:</span>
+            <span class="identifier">batch_dst_pts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_closest_match</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">landmarks</span><span class="grouping">)</span>
+            <span class="identifier">warp_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">batch_src_points</span><span class="arithmetic-assignment">=</span><span class="identifier">landmarks</span><span class="punctuation">,</span> <span class="identifier">batch_dst_points</span><span class="arithmetic-assignment">=</span><span class="identifier">batch_dst_pts</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">warp_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="comment"># Color Augmentation of the image only</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_augment_color</span><span class="punctuation">:</span>
+            <span class="identifier">batch</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">3</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">color_adjust</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">3</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="comment"># Random Transform and flip</span>
+        <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_no_flip</span><span class="punctuation">:</span>
+            <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">random_flip</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span>
+
+        <span class="comment"># Switch color order for RGB models</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_color_order</span> <span class="relational-operator">==</span> <span class="string-literal">"rgb"</span><span class="punctuation">:</span>
+            <span class="identifier">batch</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">3</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span>
+
+        <span class="comment"># Add samples to output if this is for display</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">is_display</span><span class="punctuation">:</span>
+            <span class="identifier">processed</span><span class="grouping">[</span><span class="string-literal">"samples"] = batch[..., :3].astype("float32"</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="float-literal">255.0</span>
+
+        <span class="comment"># Get Targets</span>
+        <span class="identifier">processed</span><span class="punctuation">.</span><span class="identifier">update</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">get_targets</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Random Warp # TODO change masks to have a input mask and a warped target mask</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_no_warp</span><span class="punctuation">:</span>
+            <span class="identifier">processed</span><span class="grouping">[</span><span class="string-literal">"feed"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">skip_warp</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">3</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">processed</span><span class="grouping">[</span><span class="string-literal">"feed"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_processing</span><span class="punctuation">.</span><span class="identifier">warp</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">3</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                       <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_warp_to_landmarks</span><span class="punctuation">,</span>
+                                                       <span class="arithmetic-operator">**</span><span class="identifier">warp_kwargs</span><span class="grouping">)</span><span class="grouping">]</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Processed batch: (filenames: %s, side: '%s', processed: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">filenames</span><span class="punctuation">,</span>
+                     <span class="identifier">side</span><span class="punctuation">,</span>
+                     <span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">v</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span> <span class="keyword">else</span><span class="grouping">[</span><span class="identifier">i</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">v</span><span class="grouping">]</span>
+                      <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">processed</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">processed</span>
+
+    <span class="keyword">def</span> <span class="identifier">_crop_to_center</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">cache</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Crops the training image out of the full extract image based on the centering used in
+        the user's configuration settings.
+
+        If legacy extract images are being used then this just returns the extracted batch with
+        their corresponding landmarks.
+
+        Parameters
+        ----------
+        filenames: list
+            The list of filenames that correspond to this batch
+        cache: list
+            The list of cached items (aligned faces, masks etc.) corresponding to the batch
+        batch: :class:`numpy.ndarray`
+            The batch of faces that have been loaded from disk
+        side: str
+            '"a"' or '"b"' the side that is being processed
+
+        Returns
+        -------
+        batch: :class:`numpy.ndarray`
+            The centered faces cropped out of the loaded batch
+        landmarks: :class:`numpy.ndarray`
+            The aligned landmarks for this batch. NB: The aligned landmarks do not directly
+            correspond to the size of the extracted face. They are scaled to the source training
+            image, not the sub-image.
+
+        Raises
+        ------
+        FaceswapError
+            If Alignment information is not available for any of the images being loaded in
+            the batch
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Cropping training images info: (filenames: %s, side: '%s')"</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+        <span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"aligned_face"</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">cache</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_cache</span><span class="punctuation">.</span><span class="identifier">extract_version</span> <span class="relational-operator">==</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="comment"># Legacy extract. Don't crop, just return batch with landmarks</span>
+            <span class="keyword">return</span> <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks</span> <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">aligned</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks</span> <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">aligned</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">cropped</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">align</span><span class="punctuation">.</span><span class="identifier">extract_face</span><span class="grouping">(</span><span class="identifier">img</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">align</span><span class="punctuation">,</span> <span class="identifier">img</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">aligned</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">cropped</span><span class="punctuation">,</span> <span class="identifier">landmarks</span>
+
+    <span class="keyword">def</span> <span class="identifier">_apply_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">cache</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Applies the mask to the 4th channel of the image. If masks are not being used
+        applies a dummy all ones mask.
+
+        If the configuration options `eye_multiplier` and/or `mouth_multiplier` are greater than 1
+        then these masks are applied to the final channels of the batch respectively.
+
+        Parameters
+        ----------
+        filenames: list
+            The list of filenames that correspond to this batch
+        cache: list
+            The list of cached items (aligned faces, masks etc.) corresponding to the batch
+        batch: :class:`numpy.ndarray`
+            The batch of faces that have been loaded from disk
+        side: str
+            '"a"' or '"b"' the side that is being processed
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The batch with masks applied to the final channels
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Input filenames: %s, batch shape: %s, side: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+        <span class="identifier">size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"mask", "mask_eyes", "mask_mouth"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">lookup</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cache</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">key</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">lookup</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">key</span> <span class="relational-operator">!=</span> <span class="string-literal">"mask"</span><span class="punctuation">:</span>
+                <span class="keyword">continue</span>
+
+            <span class="keyword">if</span> <span class="identifier">lookup</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">key</span> <span class="relational-operator">==</span> <span class="string-literal">"mask"</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Creating dummy masks. side: %s"</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+                <span class="identifier">masks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones_like</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Obtaining masks for batch. (key: %s side: %s)"</span><span class="punctuation">,</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+
+                <span class="identifier">masks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_mask</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span>
+                                  <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">cache</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+                <span class="identifier">masks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_resize_masks</span><span class="grouping">(</span><span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">masks</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"masks: (key: %s, shape: %s)"</span><span class="punctuation">,</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">masks</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+            <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">masks</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Output batch shape: %s, side: %s"</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">batch</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_get_mask</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">item</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Decompress zipped eye and mouth masks, or return the stored mask
+
+        Parameters
+        ----------
+        item: :class:`lib.align.Mask` or `bytes`
+            Either a stored face mask object or a zipped eye or mouth mask
+        size: int
+            The size of the stored eye or mouth mask for reshaping
+
+        Returns
+        -------
+        class:`numpy.ndarray`
+            The decompressed mask
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">item</span><span class="punctuation">,</span> <span class="identifier">bytes</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">u</span><span class="invalid">f</span><span class="invalid">f</span><span class="invalid">e</span><span class="invalid">r</span><span class="grouping">(</span><span class="identifier">decompress</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"uint8"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">item</span><span class="punctuation">.</span><span class="identifier">mask</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_resize_masks</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">target_size</span><span class="punctuation">,</span> <span class="identifier">masks</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Resize the masks to the target size """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"target size: %s, masks shape: %s"</span><span class="punctuation">,</span> <span class="identifier">target_size</span><span class="punctuation">,</span> <span class="identifier">masks</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="identifier">mask_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">masks</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">target_size</span> <span class="relational-operator">==</span> <span class="identifier">mask_size</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Mask and targets the same size. Not resizing"</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">masks</span>
+        <span class="identifier">interpolator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">INTER_CUBIC</span> <span class="keyword">if</span> <span class="identifier">mask_size</span> <span class="relational-operator">&lt;</span> <span class="identifier">target_size</span> <span class="keyword">else</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">INTER_AREA</span>
+        <span class="identifier">masks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">resize</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">,</span>
+                                     <span class="grouping">(</span><span class="identifier">target_size</span><span class="punctuation">,</span> <span class="identifier">target_size</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="identifier">interpolation</span><span class="arithmetic-assignment">=</span><span class="identifier">interpolator</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">]</span>
+                          <span class="keyword">for</span> <span class="identifier">mask</span> <span class="relational-operator">in</span> <span class="identifier">masks</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Resized masks: %s"</span><span class="punctuation">,</span> <span class="identifier">masks</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">masks</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_closest_match</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">batch_src_points</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Only called if the :attr:`_warp_to_landmarks` is ``True``. Gets the closest
+        matched 68 point landmarks from the opposite training set. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Retrieving closest matched landmarks: (filenames: '%s', src_points: '%s'"</span><span class="punctuation">,</span>
+                     <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">batch_src_points</span><span class="grouping">)</span>
+        <span class="identifier">lm_side</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"a" if side == "b" else "b"</span>
+        <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_FACE_CACHES</span><span class="grouping">[</span><span class="identifier">lm_side</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">aligned_landmarks</span>
+
+        <span class="identifier">closest_matches</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_nearest_landmarks</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">)</span>
+                           <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">filenames</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="none-literal">None</span> <span class="relational-operator">in</span> <span class="identifier">closest_matches</span><span class="punctuation">:</span>
+            <span class="comment"># Resize mismatched training image size landmarks</span>
+            <span class="identifier">sizes</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">side</span><span class="punctuation">:</span> <span class="identifier">cache</span><span class="punctuation">.</span><span class="identifier">crop_size</span> <span class="keyword">for</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">cache</span> <span class="relational-operator">in</span> <span class="identifier">_FACE_CACHES</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span>
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">set</span><span class="grouping">(</span><span class="identifier">sizes</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">scale</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sizes</span><span class="grouping">[</span><span class="identifier">side</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">sizes</span><span class="grouping">[</span><span class="identifier">lm_side</span><span class="grouping">]</span>
+                <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">key</span><span class="punctuation">:</span> <span class="identifier">lms</span> <span class="arithmetic-operator">*</span> <span class="identifier">scale</span> <span class="keyword">for</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">lms</span> <span class="relational-operator">in</span> <span class="identifier">landmarks</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span>
+            <span class="identifier">closest_matches</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_closest_matches</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">batch_src_points</span><span class="punctuation">,</span> <span class="identifier">landmarks</span><span class="grouping">)</span>
+
+        <span class="identifier">batch_dst_points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">landmarks</span><span class="grouping">[</span><span class="identifier">choice</span><span class="grouping">(</span><span class="identifier">fname</span><span class="grouping">)</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">fname</span> <span class="relational-operator">in</span> <span class="identifier">closest_matches</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Returning: (batch_dst_points: %s)"</span><span class="punctuation">,</span> <span class="identifier">batch_dst_points</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">batch_dst_points</span>
+
+    <span class="keyword">def</span> <span class="identifier">_cache_closest_matches</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">batch_src_points</span><span class="punctuation">,</span> <span class="identifier">landmarks</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Cache the nearest landmarks for this batch """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Caching closest matches"</span><span class="grouping">)</span>
+        <span class="identifier">dst_landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">landmarks</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">dst_points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">lm</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">lm</span> <span class="relational-operator">in</span> <span class="identifier">dst_landmarks</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">batch_closest_matches</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">src_points</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">filenames</span><span class="punctuation">,</span> <span class="identifier">batch_src_points</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">closest</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">square</span><span class="grouping">(</span><span class="identifier">src_points</span> <span class="arithmetic-operator">-</span> <span class="identifier">dst_points</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="int-literal">10</span><span class="grouping">]</span>
+            <span class="identifier">closest_matches</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tuple</span><span class="grouping">(</span><span class="identifier">dst_landmarks</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">closest</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_nearest_landmarks</span><span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">closest_matches</span>
+            <span class="identifier">batch_closest_matches</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">closest_matches</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Cached closest matches"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">batch_closest_matches</span>
+
+    </pre>
+  </body>
+</html>

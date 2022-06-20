@@ -1,0 +1,842 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Alignments file functions for reading, writing and manipulating the data stored in a
+serialized alignments file. """</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">from</span> <span class="identifier">datetime</span> <span class="keyword">import</span> <span class="identifier">datetime</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">serializer</span> <span class="keyword">import</span> <span class="identifier">get_serializer</span><span class="punctuation">,</span> <span class="identifier">get_serializer_from_filename</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">FaceswapError</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+<span class="identifier">_VERSION</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">2.2</span>
+
+
+<span class="comment"># VERSION TRACKING</span>
+<span class="comment"># 1.0 - Never really existed. Basically any alignments file prior to version 2.0</span>
+<span class="comment"># 2.0 - Implementation of full head extract. Any alignments version below this will have used</span>
+<span class="comment">#       legacy extract</span>
+<span class="comment"># 2.1 - Alignments data to extracted face PNG header. SHA1 hashes of faces no longer calculated</span>
+<span class="comment">#       or stored in alignments file</span>
+<span class="comment"># 2.2 - Add support for differently centered masks (i.e. not all masks stored as face centering)</span>
+
+<span class="keyword">class</span> <span class="identifier">Alignments</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" The alignments file is a custom serialized ``.fsa`` file that holds information for each
+    frame for a video or series of images.
+
+    Specifically, it holds a list of faces that appear in each frame. Each face contains
+    information detailing their detected bounding box location within the frame, the 68 point
+    facial landmarks and any masks that have been extracted.
+
+    Additionally it can also hold video meta information (timestamp and whether a frame is a
+    key frame.)
+
+    Parameters
+    ----------
+    folder: str
+        The folder that contains the alignments ``.fsa`` file
+    filename: str, optional
+        The filename of the ``.fsa`` alignments file. If not provided then the given folder will be
+        checked for a default alignments file filename. Default: "alignments"
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="string-literal">"alignments"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (folder: '%s', filename: '%s')"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_version</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_VERSION</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_serializer</span><span class="grouping">(</span><span class="string-literal">"compressed"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_location</span><span class="grouping">(</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_load</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_legacy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_alignment</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thumbnails</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Thumbnails</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;&lt; PROPERTIES &gt;&gt; #</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">frames_count</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The number of frames that appear in the alignments :attr:`data`. """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">faces_count</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The total number of faces that appear in the alignments :attr:`data`. """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">file</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" str: The full path to the currently loaded alignments file. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">data</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The loaded alignments :attr:`file` in dictionary form. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">have_alignments_file</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if an alignments file exists at location :attr:`file` otherwise
+        ``False``. """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">hashes_to_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The SHA1 hash of the face mapped to the frame(s) and face index within the frame
+        that the hash corresponds to. The structure of the dictionary is:
+
+        {**SHA1_hash** (`str`): {**filename** (`str`): **face_index** (`int`)}}.
+
+        Notes
+        -----
+        This method is depractated and exists purely for updating legacy hash based alignments
+        to new png header storage in :class:`lib.align.update_legacy_png_header`.
+
+        The first time this property is referenced, the dictionary will be created and cached.
+        Subsequent references will be made to this cached dictionary.
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_frame</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Generating hashes to frame"</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_frame</span><span class="punctuation">.</span><span class="identifier">setdefault</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">[</span><span class="string-literal">"hash"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">frame_name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idx</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_frame</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">hashes_to_alignment</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The SHA1 hash of the face mapped to the alignment for the face that the hash
+        corresponds to. The structure of the dictionary is:
+
+        Notes
+        -----
+        This method is depractated and exists purely for updating legacy hash based alignments
+        to new png header storage in :class:`lib.align.update_legacy_png_header`.
+
+        The first time this property is referenced, the dictionary will be created and cached.
+        Subsequent references will be made to this cached dictionary.
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_alignment</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Generating hashes to alignment"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_alignment</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">face</span><span class="grouping">[</span><span class="string-literal">"hash"</span><span class="grouping">]</span><span class="punctuation">:</span> <span class="identifier">face</span>
+                                         <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span>
+                                         <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">}</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_hashes_to_alignment</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">mask_summary</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The mask type names stored in the alignments :attr:`data` as key with the number
+        of faces which possess the mask type as value. """</span>
+        <span class="identifier">masks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"mask"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                    <span class="identifier">masks</span><span class="grouping">[</span><span class="string-literal">"none"] = masks.get("none"</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+                <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"mask"</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">masks</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">masks</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">key</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="keyword">return</span> <span class="identifier">masks</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">video_meta_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The frame meta data stored in the alignments file. If data does not exist in the
+        alignments file then ``None`` is returned for each Key """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">keyframes</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="identifier">pts_time</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">keyframes</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="string-literal">"video_meta"</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">retval</span>
+            <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"video_meta"</span><span class="grouping">]</span>
+            <span class="identifier">pts_time</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">meta</span><span class="grouping">[</span><span class="string-literal">"pts_time"</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">meta</span><span class="grouping">[</span><span class="string-literal">"keyframe"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">keyframes</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="arithmetic-assignment">=</span><span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span><span class="arithmetic-assignment">=</span><span class="identifier">keyframes</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">thumbnails</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`~lib.align.Thumbnails`: The low resolution thumbnail images that exist
+        within the alignments file """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thumbnails</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">version</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" float: The alignments file version number. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_version</span>
+
+    <span class="comment"># &lt;&lt; INIT FUNCTIONS &gt;&gt; #</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_location</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtains the location of an alignments file.
+
+        If a legacy alignments file is provided/discovered, then the alignments file will be
+        updated to the custom ``.fsa`` format and saved.
+
+        Parameters
+        ----------
+        folder: str
+            The folder that the alignments file is located in
+        filename: str
+            The filename of the alignments file
+
+        Returns
+        -------
+        str
+            The full path to the alignments file
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Getting location: (folder: '%s', filename: '%s')"</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">noext_name</span><span class="punctuation">,</span> <span class="identifier">extension</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">extension</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">".json", ".p", ".pickle", ".yaml", ".yml"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># Reformat legacy alignments file</span>
+            <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_file_format</span><span class="grouping">(</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Updated legacy alignments. New filename: '%s'"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">extension</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">file_extension</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Valid Alignments filename provided: '%s'"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}.{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">noext_name</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">file_extension</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"File extension set from serializer: '%s'"</span><span class="punctuation">,</span>
+                         <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">file_extension</span><span class="grouping">)</span>
+        <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">folder</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">location</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># Test for old format alignments files and reformat if they exist. This will be</span>
+            <span class="comment"># executed if an alignments file has not been explicitly provided therefore it will not</span>
+            <span class="comment"># have been picked up in the extension test</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_test_for_legacy</span><span class="grouping">(</span><span class="identifier">location</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Alignments filepath: '%s'"</span><span class="punctuation">,</span> <span class="identifier">location</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">location</span>
+
+    <span class="comment"># &lt;&lt; I/O &gt;&gt; #</span>
+
+    <span class="keyword">def</span> <span class="identifier">_load</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the alignments data from the serialized alignments :attr:`file`.
+
+        Populates :attr:`_meta` with the alignment file's meta information as well as returning
+        the serialized data.
+
+        Returns
+        -------
+        dict:
+            The loaded alignments data
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loading alignments"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">have_alignments_file</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"Error: Alignments file not found at "</span>
+                                <span class="string-literal">"{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Reading alignments from: '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span><span class="grouping">)</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"__meta__"</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">version</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_version</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span><span class="grouping">[</span><span class="string-literal">"version"</span><span class="grouping">]</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"__data__"</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loaded alignments"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">data</span>
+
+    <span class="keyword">def</span> <span class="identifier">save</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Write the contents of :attr:`data` and :attr:`_meta` to a serialized ``.fsa`` file at
+        the location :attr:`file`. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Saving alignments"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Writing alignments to: '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span><span class="grouping">)</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">__meta__</span><span class="arithmetic-assignment">=</span><span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">version</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_version</span><span class="grouping">)</span><span class="punctuation">,</span>
+                    <span class="identifier">__data__</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Saved alignments"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">backup</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Create a backup copy of the alignments :attr:`file`.
+
+        Creates a copy of the serialized alignments :attr:`file` appending a
+        timestamp onto the end of the file name and storing in the same folder as
+        the original :attr:`file`.
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Backing up alignments"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">isfile</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No alignments to back up"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">now</span> <span class="arithmetic-assignment">=</span> <span class="identifier">datetime</span><span class="punctuation">.</span><span class="identifier">now</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">strftime</span><span class="grouping">(</span><span class="string-literal">"%Y%m%d_%H%M%S"</span><span class="grouping">)</span>
+        <span class="identifier">src</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span>
+        <span class="identifier">split</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">src</span><span class="grouping">)</span>
+        <span class="identifier">dst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">split</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="string-literal">"_"</span> <span class="arithmetic-operator">+</span> <span class="identifier">now</span> <span class="arithmetic-operator">+</span> <span class="identifier">split</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Backing up original alignments to '%s'"</span><span class="punctuation">,</span> <span class="identifier">dst</span><span class="grouping">)</span>
+        <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">rename</span><span class="grouping">(</span><span class="identifier">src</span><span class="punctuation">,</span> <span class="identifier">dst</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Backed up alignments"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">save_video_meta_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Save video meta data to the alignments file.
+
+        If the alignments file does not have an entry for every frame (e.g. if Extract Every N
+        was used) then the frame is added to the alignments file with no faces, so that they video
+        meta data can be stored.
+
+        Parameters
+        ----------
+        pts_time: list
+            A list of presentation timestamps (`float`) in frame index order for every frame in
+            the input video
+        keyframes: list
+            A list of frame indices corresponding to the key frames in the input video
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">pts_time</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pad_leading_frames</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span><span class="grouping">)</span>
+
+        <span class="identifier">sample_filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="identifier">fname</span> <span class="keyword">for</span> <span class="identifier">fname</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">basename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_filename</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">sample_filename</span><span class="punctuation">.</span><span class="identifier">rfind</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"sample filename: %s, base filename: %s"</span><span class="punctuation">,</span> <span class="identifier">sample_filename</span><span class="punctuation">,</span> <span class="identifier">basename</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Saving video meta information to Alignments file"</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">pts</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="arithmetic-assignment">=</span><span class="identifier">pts</span><span class="punctuation">,</span> <span class="identifier">keyframe</span><span class="arithmetic-assignment">=</span><span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">keyframes</span><span class="grouping">)</span>
+            <span class="identifier">key</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}_{:06d}.png"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">basename</span><span class="punctuation">,</span> <span class="identifier">idx</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">key</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">video_meta</span><span class="arithmetic-assignment">=</span><span class="identifier">meta</span><span class="punctuation">,</span> <span class="identifier">faces</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"video_meta"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">meta</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Alignments count: %s, timestamp count: %s"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span>
+                <span class="string-literal">"There is a mismatch between the number of frames found in the video file ({}) "</span>
+                <span class="string-literal">"and the number of frames found in the alignments file ({})."</span>
+                <span class="string-literal">"\nThis can be caused by a number of issues:"</span>
+                <span class="string-literal">"\n  - The video has a Variable Frame Rate and FFMPEG is having a hard time "</span>
+                <span class="string-literal">"calculating the correct number of frames."</span>
+                <span class="string-literal">"\n  - You are working with a Merged Alignments file. This is not supported for "</span>
+                <span class="string-literal">"your current use case."</span>
+                <span class="string-literal">"\nYou should either extract the video to individual frames, re-encode the "</span>
+                <span class="string-literal">"video at a constant frame rate and re-run extraction or work with a dedicated "</span>
+                <span class="string-literal">"alignments file for your requested video."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_pad_leading_frames</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Calculate the number of frames to pad the video by when the first frame is not
+        a key frame.
+
+        A somewhat crude method by obtaining the gaps between existing frames and calculating
+        how many frames should be inserted at the beginning based on the first presentation
+        timestamp.
+
+        Parameters
+        ----------
+         pts_time: list
+            A list of presentation timestamps (`float`) in frame index order for every frame in
+            the input video
+
+        Returns
+        -------
+        tuple
+            The presentation time stamps with extra frames padded to the beginning and the
+            keyframes adjusted to include the new frames
+        """</span>
+        <span class="identifier">start_pts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pts_time</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Video not cut on keyframe. Start pts: %s"</span><span class="punctuation">,</span> <span class="identifier">start_pts</span><span class="grouping">)</span>
+        <span class="identifier">gaps</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">prev_time</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">pts_time</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">prev_time</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">gaps</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">item</span> <span class="arithmetic-operator">-</span> <span class="identifier">prev_time</span><span class="grouping">)</span>
+            <span class="identifier">prev_time</span> <span class="arithmetic-assignment">=</span> <span class="identifier">item</span>
+        <span class="identifier">data_points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">gaps</span><span class="grouping">)</span>
+        <span class="identifier">avg_gap</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">gaps</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">data_points</span>
+        <span class="identifier">frame_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">round</span><span class="grouping">(</span><span class="identifier">start_pts</span> <span class="arithmetic-operator">/</span> <span class="identifier">avg_gap</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">pad_pts</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">avg_gap</span> <span class="arithmetic-operator">*</span> <span class="identifier">i</span> <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">frame_count</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"data_points: %s, avg_gap: %s, frame_count: %s, pad_pts: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">data_points</span><span class="punctuation">,</span> <span class="identifier">avg_gap</span><span class="punctuation">,</span> <span class="identifier">frame_count</span><span class="punctuation">,</span> <span class="identifier">pad_pts</span><span class="grouping">)</span>
+        <span class="identifier">pts_time</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pad_pts</span> <span class="arithmetic-operator">+</span> <span class="identifier">pts_time</span>
+        <span class="identifier">keyframes</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="identifier">frame_count</span> <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">keyframes</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span>
+
+    <span class="comment"># &lt;&lt; VALIDATION &gt;&gt; #</span>
+
+    <span class="keyword">def</span> <span class="identifier">frame_exists</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether a given frame_name exists within the alignments :attr:`data`.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame name to check. This should be the base name of the frame, not the full path
+
+        Returns
+        -------
+        bool
+            ``True`` if the given frame_name exists within the alignments :attr:`data`
+            otherwise ``False``
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">frame_name</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"'%s': %s"</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">frame_has_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether a given frame_name exists within the alignments :attr:`data` and contains
+        at least 1 face.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame name to check. This should be the base name of the frame, not the full path
+
+        Returns
+        -------
+        bool
+            ``True`` if the given frame_name exists within the alignments :attr:`data` and has at
+            least 1 face associated with it, otherwise ``False``
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bool</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"faces"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"'%s': %s"</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">frame_has_multiple_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether a given frame_name exists within the alignments :attr:`data` and contains
+        more than 1 face.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame_name name to check. This should be the base name of the frame, not the full
+            path
+
+        Returns
+        -------
+        bool
+            ``True`` if the given frame_name exists within the alignments :attr:`data` and has more
+            than 1 face associated with it, otherwise ``False``
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">frame_name</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bool</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"faces"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"'%s': %s"</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">mask_is_valid</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">mask_type</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Ensure the given ``mask_type`` is valid for the alignments :attr:`data`.
+
+        Every face in the alignments :attr:`data` must have the given mask type to successfully
+        pass the test.
+
+        Parameters
+        ----------
+        mask_type: str
+            The mask type to check against the current alignments :attr:`data`
+
+        Returns
+        -------
+        bool:
+            ``True`` if all faces in the current alignments possess the given ``mask_type``
+            otherwise ``False``
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">any</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"mask"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span>
+                       <span class="identifier">face</span><span class="grouping">[</span><span class="string-literal">"mask"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">mask_type</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="grouping">)</span>
+                      <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span>
+                      <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="comment"># &lt;&lt; DATA &gt;&gt; #</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_faces_in_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the faces from :attr:`data` associated with a given frame_name.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame name to return faces for. This should be the base name of the frame, not the
+            full path
+
+        Returns
+        -------
+        list
+            The list of face dictionaries that appear within the requested frame_name
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Getting faces for frame_name: '%s'"</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"faces"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_count_faces_in_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return number of faces that appear within :attr:`data` for the given frame_name.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame name to return the count for. This should be the base name of the frame, not
+            the full path
+
+        Returns
+        -------
+        int
+            The number of faces that appear in the given frame_name
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"faces"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="comment"># &lt;&lt; MANIPULATION &gt;&gt; #</span>
+
+    <span class="keyword">def</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">x</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Delete the face for the given frame_name at the given face index from :attr:`data`.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame name to remove the face from. This should be the base name of the frame, not
+            the full path
+        face_index: int
+            The index number of the face within the given frame_name to remove
+
+        Returns
+        -------
+        bool
+            ``True`` if a face was successfully deleted otherwise ``False``
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Deleting face %s for frame_name '%s'"</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span>
+        <span class="identifier">face_index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">face_index</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">face_index</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count_faces_in_frame</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No face to delete: (frame_name: '%s', face_index %s)"</span><span class="punctuation">,</span>
+                         <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="bool-literal">False</span>
+        <span class="keyword">del</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">[</span><span class="identifier">frame_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Deleted face: (frame_name: '%s', face_index %s)"</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">def</span> <span class="identifier">add_face</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a new face for the given frame_name in :attr:`data` and return it's index.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame name to add the face to. This should be the base name of the frame, not the
+            full path
+        face: dict
+            The face information to add to the given frame_name, correctly formatted for storing in
+            :attr:`data`
+
+        Returns
+        -------
+        int
+            The index of the newly added face within :attr:`data` for the given frame_name
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding face to frame_name: '%s'"</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">frame_name</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">[</span><span class="identifier">frame_name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">faces</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">[</span><span class="identifier">frame_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count_faces_in_frame</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Returning new face index: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_face</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update the face for the given frame_name at the given face index in :attr:`data`.
+
+        Parameters
+        ----------
+        frame_name: str
+            The frame name to update the face for. This should be the base name of the frame, not
+            the full path
+        face_index: int
+            The index number of the face within the given frame_name to update
+        face: dict
+            The face information to update to the given frame_name at the given face_index,
+            correctly formatted for storing in :attr:`data`
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Updating face %s for frame_name '%s'"</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">[</span><span class="identifier">frame_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">face</span>
+
+    <span class="keyword">def</span> <span class="identifier">filter_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filter_dict</span><span class="punctuation">,</span> <span class="identifier">filter_out</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Remove faces from :attr:`data` based on a given filter list.
+
+        Parameters
+        ----------
+        filter_dict: dict
+            Dictionary of source filenames as key with a list of face indices to filter as value.
+        filter_out: bool, optional
+            ``True`` if faces should be removed from :attr:`data` when there is a corresponding
+            match in the given filter_dict. ``False`` if faces should be kept in :attr:`data` when
+            there is a corresponding match in the given filter_dict, but removed if there is no
+            match. Default: ``False``
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"filter_dict: %s, filter_out: %s"</span><span class="punctuation">,</span> <span class="identifier">filter_dict</span><span class="punctuation">,</span> <span class="identifier">filter_out</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">source_frame</span><span class="punctuation">,</span> <span class="identifier">frame_data</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">face_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filter_dict</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">source_frame</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">filter_out</span><span class="punctuation">:</span>
+                <span class="identifier">filter_list</span> <span class="arithmetic-assignment">=</span> <span class="identifier">face_indices</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">filter_list</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">idx</span> <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">frame_data</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+                               <span class="keyword">if</span> <span class="identifier">idx</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">face_indices</span><span class="grouping">]</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"frame: '%s', filter_list: %s"</span><span class="punctuation">,</span> <span class="identifier">source_frame</span><span class="punctuation">,</span> <span class="identifier">filter_list</span><span class="grouping">)</span>
+
+            <span class="keyword">for</span> <span class="identifier">face_idx</span> <span class="relational-operator">in</span> <span class="identifier">reversed</span><span class="grouping">(</span><span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">filter_list</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Filtering out face: (filename: %s, index: %s)"</span><span class="punctuation">,</span>
+                               <span class="identifier">source_frame</span><span class="punctuation">,</span> <span class="identifier">face_idx</span><span class="grouping">)</span>
+                <span class="keyword">del</span> <span class="identifier">frame_data</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">face_idx</span><span class="grouping">]</span>
+
+    <span class="comment"># &lt;&lt; GENERATORS &gt;&gt; #</span>
+    <span class="keyword">def</span> <span class="invalid">y</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">d</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Generator to obtain all faces with meta information from :attr:`data`. The results
+        are yielded by frame.
+
+        Notes
+        -----
+        The yielded order is non-deterministic.
+
+        Yields
+        ------
+        frame_name: str
+            The frame name that the face belongs to. This is the base name of the frame, as it
+            appears in :attr:`data`, not the full path
+        faces: list
+            The list of face `dict` objects that exist for this frame
+        face_count: int
+            The number of faces that exist within :attr:`data` for this frame
+        frame_fullname: str
+            The full path (folder and filename) for the yielded frame
+        """</span>
+        <span class="keyword">for</span> <span class="identifier">frame_fullname</span><span class="punctuation">,</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">frame_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">frame_fullname</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">face_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Yielding: (frame: '%s', faces: %s, frame_fullname: '%s')"</span><span class="punctuation">,</span>
+                         <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">face_count</span><span class="punctuation">,</span> <span class="identifier">frame_fullname</span><span class="grouping">)</span>
+            <span class="keyword">yield</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">face_count</span><span class="punctuation">,</span> <span class="identifier">frame_fullname</span>
+
+    <span class="comment"># &lt;&lt; LEGACY FUNCTIONS &gt;&gt; #</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_legacy</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether the alignments are legacy, and if so update them to current alignments
+        format. """</span>
+        <span class="identifier">updated</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_has_legacy_structure</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_legacy_structure</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_has_legacy_landmarksxy</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Updating legacy landmarksXY to landmarks_xy"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_legacy_landmarksxy</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">updated</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_has_legacy_landmarks_list</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Updating legacy landmarks from list to numpy array"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_legacy_landmarks_list</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">updated</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_version</span> <span class="relational-operator">&lt;</span> <span class="float-literal">2.2</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Updating legacy mask centering"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_mask_centering</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">updated</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">if</span> <span class="identifier">updated</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_version</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_VERSION</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;File Format&gt; #</span>
+    <span class="comment"># Serializer is now a compressed pickle custom format. This used to be any number</span>
+    <span class="comment"># of serializers</span>
+    <span class="keyword">def</span> <span class="identifier">_test_for_legacy</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">location</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" For alignments filenames passed in without an extension, test for legacy
+        serialization formats and update to current ``.fsa`` format if any are found.
+
+        Parameters
+        ----------
+        location: str
+            The folder location to check for legacy alignments
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Checking for legacy alignments file formats: '%s'"</span><span class="punctuation">,</span> <span class="identifier">location</span><span class="grouping">)</span>
+        <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">location</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">ext</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">".json", ".p", ".pickle", ".yaml"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">legacy_filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">ext</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">legacy_filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Legacy alignments file exists: '%s'"</span><span class="punctuation">,</span> <span class="identifier">legacy_filename</span><span class="grouping">)</span>
+                <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_file_format</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">legacy_filename</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Legacy alignments file does not exist: '%s'"</span><span class="punctuation">,</span> <span class="identifier">legacy_filename</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_file_format</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Convert old style serialized alignments to new ``.fsa`` format.
+
+        Parameters
+        ----------
+        folder: str
+            The folder that the legacy alignments exist in
+        filename: str
+            The file name of the legacy alignments
+
+        Returns
+        -------
+        str
+            The full path to the newly created ``.fsa`` alignments file
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Reformatting legacy alignments file..."</span><span class="grouping">)</span>
+        <span class="identifier">old_location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">folder</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">new_location</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}.{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">old_location</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                      <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">file_extension</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">old_location</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">new_location</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Using existing updated alignments file found at '%s'. If you do not "</span>
+                            <span class="string-literal">"wish to use this existing file then you should delete or rename it."</span><span class="punctuation">,</span>
+                            <span class="identifier">new_location</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Old location: '%s', New location: '%s'"</span><span class="punctuation">,</span> <span class="identifier">old_location</span><span class="punctuation">,</span> <span class="identifier">new_location</span><span class="grouping">)</span>
+                <span class="identifier">load_serializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_serializer_from_filename</span><span class="grouping">(</span><span class="identifier">old_location</span><span class="grouping">)</span>
+                <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">load_serializer</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">old_location</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="identifier">new_location</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">new_location</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;Structure&gt; #</span>
+    <span class="comment"># Alignments were structured: {frame_name: &lt;list of faces&gt;}. We need to be able to store</span>
+    <span class="comment"># information at the frame level, so new structure is:  {frame_name: {faces: &lt;list of faces&gt;}}</span>
+    <span class="keyword">def</span> <span class="identifier">_has_legacy_structure</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Test whether the alignments file is laid out in the old structure of
+        `{frame_name: [faces]}`
+
+        Returns
+        -------
+        bool
+            ``True`` if the file has legacy structure otherwise ``False``
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">any</span><span class="grouping">(</span><span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">val</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"legacy structure: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_legacy_structure</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update legacy alignments files from the format `{frame_name: [faces}` to the
+        format `{frame_name: {faces: [faces]}`."""</span>
+        <span class="keyword">for</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">faces</span><span class="arithmetic-assignment">=</span><span class="identifier">val</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Updated alignments file structure"</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;landmarks&gt; #</span>
+    <span class="comment"># Landmarks renamed from landmarksXY to landmarks_xy for PEP compliance</span>
+    <span class="keyword">def</span> <span class="identifier">_has_legacy_landmarksxy</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" check for legacy landmarksXY keys.
+
+        Returns
+        -------
+        bool
+            ``True`` if the alignments file contains legacy `landmarksXY` keys otherwise ``False``
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"checking legacy landmarksXY"</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">key</span> <span class="relational-operator">==</span> <span class="string-literal">"landmarksXY"</span>
+                      <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span>
+                      <span class="keyword">for</span> <span class="identifier">alignment</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span>
+                      <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">alignment</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"legacy landmarksXY: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_legacy_landmarksxy</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update legacy `landmarksXY` keys to PEP compliant `landmarks_xy` keys. """</span>
+        <span class="identifier">update_count</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">alignment</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"landmarks_xy"] = alignment.pop("landmarksXY"</span><span class="grouping">)</span>
+                <span class="identifier">update_count</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Updated landmarks_xy: %s"</span><span class="punctuation">,</span> <span class="identifier">update_count</span><span class="grouping">)</span>
+
+    <span class="comment"># Landmarks stored as list instead of numpy array</span>
+    <span class="keyword">def</span> <span class="identifier">_has_legacy_landmarks_list</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" check for legacy landmarks stored as `list` rather than :class:`numpy.ndarray`.
+
+        Returns
+        -------
+        bool
+            ``True`` if not all landmarks are :class:`numpy.ndarray` otherwise ``False``
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"checking legacy landmarks as list"</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="logical-operator">not</span> <span class="identifier">all</span><span class="grouping">(</span><span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">[</span><span class="string-literal">"landmarks_xy"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span>
+                         <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span>
+                         <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_legacy_landmarks_list</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update landmarks stored as `list` to :class:`numpy.ndarray`. """</span>
+        <span class="identifier">update_count</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">alignment</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"landmarks_xy"</span><span class="grouping">]</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">test</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"landmarks_xy"] = np.array(test, dtype="float32"</span><span class="grouping">)</span>
+                    <span class="identifier">update_count</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Updated landmarks_xy: %s"</span><span class="punctuation">,</span> <span class="identifier">update_count</span><span class="grouping">)</span>
+
+    <span class="comment"># Masks not containing the stored_centering parameters. Prior to this implementation all masks</span>
+    <span class="comment"># were stored with face centering</span>
+    <span class="keyword">def</span> <span class="identifier">_update_mask_centering</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">update_count</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">alignment</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">for</span> <span class="identifier">mask</span> <span class="relational-operator">in</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"mask"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">mask</span><span class="grouping">[</span><span class="string-literal">"stored_centering"] = "face"</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Updated legacy mask centering: %s"</span><span class="punctuation">,</span> <span class="identifier">update_count</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Thumbnails</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Thumbnail images stored in the alignments file.
+
+    The thumbnails are stored as low resolution (64px), low quality jpg in the alignments file
+    and are used for the Manual Alignments tool.
+
+    Parameters
+    ----------
+    alignments: :class:'~lib.align.Alignments`
+        The parent alignments class that these thumbs belong to
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (alignments: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments_dict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignments</span><span class="punctuation">.</span><span class="identifier">data</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_list</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments_dict</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">has_thumbnails</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if all faces in the alignments file contain thumbnail images
+        otherwise ``False``. """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">all</span><span class="grouping">(</span><span class="string-literal">"thumb"</span> <span class="relational-operator">in</span> <span class="identifier">face</span>
+                     <span class="keyword">for</span> <span class="identifier">frame</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments_dict</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span>
+                     <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">frame</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_thumbnail_by_index</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain a jpg thumbnail from the given frame index for the given face index
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame index that contains the thumbnail
+        face_index: int
+            The face index within the frame to retrieve the thumbnail for
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The encoded jpg thumbnail
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments_dict</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_list</span><span class="grouping">[</span><span class="identifier">frame_index</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"][face_index]["thumb"</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"frame index: %s, face_index: %s, thumb shape: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">add_thumbnail</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">thumb</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a thumbnail for the given face index for the given frame.
+
+        Parameters
+        ----------
+        frame: str
+            The name of the frame to add the thumbnail for
+        face_index: int
+            The face index within the given frame to add the thumbnail for
+        thumb: :class:`numpy.ndarray`
+            The encoded jpg thumbnail at 64px to add to the alignments file
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"frame: %s, face_index: %s, thumb shape: %s thumb dtype: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">thumb</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">thumb</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments_dict</span><span class="grouping">[</span><span class="identifier">frame</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"][face_index]["thumb"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">thumb</span>
+
+    </pre>
+  </body>
+</html>

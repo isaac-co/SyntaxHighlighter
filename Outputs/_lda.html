@@ -1,0 +1,847 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+
+=============================================================
+Online Latent Dirichlet Allocation with variational inference
+=============================================================
+
+This implementation is modified from Matthew D. Hoffman's onlineldavb code
+Link: https://github.com/blei-lab/onlineldavb
+"""</span>
+
+<span class="comment"># Author: Chyi-Kwei Yau</span>
+<span class="comment"># Author: Matthew D. Hoffman (original onlineldavb implementation)</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">as</span> <span class="identifier">sp</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">gammaln</span><span class="punctuation">,</span> <span class="identifier">logsumexp</span>
+<span class="keyword">from</span> <span class="identifier">joblib</span> <span class="keyword">import</span> <span class="identifier">Parallel</span><span class="punctuation">,</span> <span class="identifier">effective_n_jobs</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="identifier">gen_batches</span><span class="punctuation">,</span> <span class="identifier">gen_even_slices</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_non_negative</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_online_lda_fast</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">mean_change</span><span class="punctuation">,</span> <span class="identifier">_dirichlet_expectation_1d</span><span class="punctuation">,</span>
+                               <span class="identifier">_dirichlet_expectation_2d</span><span class="grouping">)</span>
+
+<span class="identifier">EPS</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">float</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_update_doc_distribution</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">exp_topic_word_distr</span><span class="punctuation">,</span> <span class="identifier">doc_topic_prior</span><span class="punctuation">,</span>
+                             <span class="identifier">max_doc_update_iter</span><span class="punctuation">,</span>
+                             <span class="identifier">mean_change_tol</span><span class="punctuation">,</span> <span class="identifier">cal_sstats</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""E-step: update document-topic distribution.
+
+    Parameters
+    ----------
+    X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        Document word matrix.
+
+    exp_topic_word_distr : ndarray of shape (n_topics, n_features)
+        Exponential value of expectation of log topic word distribution.
+        In the literature, this is `exp(E[log(beta)])`.
+
+    doc_topic_prior : float
+        Prior of document topic distribution `theta`.
+
+    max_doc_update_iter : int
+        Max number of iterations for updating document topic distribution in
+        the E-step.
+
+    mean_change_tol : float
+        Stopping tolerance for updating document topic distribution in E-setp.
+
+    cal_sstats : bool
+        Parameter that indicate to calculate sufficient statistics or not.
+        Set `cal_sstats` to `True` when we need to run M-step.
+
+    random_state : RandomState instance or None
+        Parameter that indicate how to initialize document topic distribution.
+        Set `random_state` to None will initialize document topic distribution
+        to a constant number.
+
+    Returns
+    -------
+    (doc_topic_distr, suff_stats) :
+        `doc_topic_distr` is unnormalized topic distribution for each document.
+        In the literature, this is `gamma`. we can calculate `E[log(theta)]`
+        from it.
+        `suff_stats` is expected sufficient statistics for the M-step.
+            When `cal_sstats == False`, this will be None.
+
+    """</span>
+    <span class="identifier">is_sparse_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+    <span class="identifier">n_topics</span> <span class="arithmetic-assignment">=</span> <span class="identifier">exp_topic_word_distr</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="identifier">random_state</span><span class="punctuation">:</span>
+        <span class="identifier">doc_topic_distr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="grouping">(</span><span class="int-literal">100</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="float-literal">0.01</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_topics</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">doc_topic_distr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_topics</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># In the literature, this is `exp(E[log(theta)])`</span>
+    <span class="identifier">exp_doc_topic</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="identifier">_dirichlet_expectation_2d</span><span class="grouping">(</span><span class="identifier">doc_topic_distr</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># diff on `component_` (only calculate it when `cal_diff` is True)</span>
+    <span class="identifier">suff_stats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">exp_topic_word_distr</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">cal_sstats</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+
+    <span class="keyword">if</span> <span class="identifier">is_sparse_x</span><span class="punctuation">:</span>
+        <span class="identifier">X_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">data</span>
+        <span class="identifier">X_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indices</span>
+        <span class="identifier">X_indptr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indptr</span>
+
+    <span class="keyword">for</span> <span class="identifier">idx_d</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">is_sparse_x</span><span class="punctuation">:</span>
+            <span class="identifier">ids</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_indices</span><span class="grouping">[</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="grouping">]</span><span class="punctuation">:</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="identifier">cnts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_data</span><span class="grouping">[</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="grouping">]</span><span class="punctuation">:</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">ids</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nonzero</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">cnts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="identifier">ids</span><span class="grouping">]</span>
+
+        <span class="identifier">doc_topic_d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">doc_topic_distr</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="comment"># The next one is a copy, since the inner loop overwrites it.</span>
+        <span class="identifier">exp_doc_topic_d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">exp_doc_topic</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">exp_topic_word_d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">exp_topic_word_distr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">ids</span><span class="grouping">]</span>
+
+        <span class="comment"># Iterate between `doc_topic_d` and `norm_phi` until convergence</span>
+        <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">max_doc_update_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">last_d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">doc_topic_d</span>
+
+            <span class="comment"># The optimal phi_{dwk} is proportional to</span>
+            <span class="comment"># exp(E[log(theta_{dk})]) * exp(E[log(beta_{dw})]).</span>
+            <span class="identifier">norm_phi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">exp_doc_topic_d</span><span class="punctuation">,</span> <span class="identifier">exp_topic_word_d</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">EPS</span>
+
+            <span class="identifier">doc_topic_d</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">exp_doc_topic_d</span> <span class="arithmetic-operator">*</span>
+                           <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">cnts</span> <span class="arithmetic-operator">/</span> <span class="identifier">norm_phi</span><span class="punctuation">,</span> <span class="identifier">exp_topic_word_d</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="comment"># Note: adds doc_topic_prior to doc_topic_d, in-place.</span>
+            <span class="identifier">_dirichlet_expectation_1d</span><span class="grouping">(</span><span class="identifier">doc_topic_d</span><span class="punctuation">,</span> <span class="identifier">doc_topic_prior</span><span class="punctuation">,</span>
+                                      <span class="identifier">exp_doc_topic_d</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">mean_change</span><span class="grouping">(</span><span class="identifier">last_d</span><span class="punctuation">,</span> <span class="identifier">doc_topic_d</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">mean_change_tol</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+        <span class="identifier">doc_topic_distr</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">doc_topic_d</span>
+
+        <span class="comment"># Contribution of document d to the expected sufficient</span>
+        <span class="comment"># statistics for the M step.</span>
+        <span class="keyword">if</span> <span class="identifier">cal_sstats</span><span class="punctuation">:</span>
+            <span class="identifier">norm_phi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">exp_doc_topic_d</span><span class="punctuation">,</span> <span class="identifier">exp_topic_word_d</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">EPS</span>
+            <span class="identifier">suff_stats</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">ids</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">outer</span><span class="grouping">(</span><span class="identifier">exp_doc_topic_d</span><span class="punctuation">,</span> <span class="identifier">cnts</span> <span class="arithmetic-operator">/</span> <span class="identifier">norm_phi</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">doc_topic_distr</span><span class="punctuation">,</span> <span class="identifier">suff_stats</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">LatentDirichletAllocation</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Latent Dirichlet Allocation with online variational Bayes algorithm
+
+    .. versionadded:: 0.17
+
+    Read more in the :ref:`User Guide &lt;LatentDirichletAllocation&gt;`.
+
+    Parameters
+    ----------
+    n_components : int, default=10
+        Number of topics.
+
+        .. versionchanged:: 0.19
+            ``n_topics`` was renamed to ``n_components``
+
+    doc_topic_prior : float, default=None
+        Prior of document topic distribution `theta`. If the value is None,
+        defaults to `1 / n_components`.
+        In [1]_, this is called `alpha`.
+
+    topic_word_prior : float, default=None
+        Prior of topic word distribution `beta`. If the value is None, defaults
+        to `1 / n_components`.
+        In [1]_, this is called `eta`.
+
+    learning_method : {'batch', 'online'}, default='batch'
+        Method used to update `_component`. Only used in :meth:`fit` method.
+        In general, if the data size is large, the online update will be much
+        faster than the batch update.
+
+        Valid options::
+
+            'batch': Batch variational Bayes method. Use all training data in
+                each EM update.
+                Old `components_` will be overwritten in each iteration.
+            'online': Online variational Bayes method. In each EM update, use
+                mini-batch of training data to update the ``components_``
+                variable incrementally. The learning rate is controlled by the
+                ``learning_decay`` and the ``learning_offset`` parameters.
+
+        .. versionchanged:: 0.20
+            The default learning method is now ``"batch"``.
+
+    learning_decay : float, default=0.7
+        It is a parameter that control learning rate in the online learning
+        method. The value should be set between (0.5, 1.0] to guarantee
+        asymptotic convergence. When the value is 0.0 and batch_size is
+        ``n_samples``, the update method is same as batch learning. In the
+        literature, this is called kappa.
+
+    learning_offset : float, default=10.
+        A (positive) parameter that downweights early iterations in online
+        learning.  It should be greater than 1.0. In the literature, this is
+        called tau_0.
+
+    max_iter : int, default=10
+        The maximum number of passes over the training data (aka epochs).
+        It only impacts the behavior in the :meth:`fit` method, and not the
+        :meth:`partial_fit` method.
+
+    batch_size : int, default=128
+        Number of documents to use in each EM iteration. Only used in online
+        learning.
+
+    evaluate_every : int, default=-1
+        How often to evaluate perplexity. Only used in `fit` method.
+        set it to 0 or negative number to not evaluate perplexity in
+        training at all. Evaluating perplexity can help you check convergence
+        in training process, but it will also increase total training time.
+        Evaluating perplexity in every iteration might increase training time
+        up to two-fold.
+
+    total_samples : int, default=1e6
+        Total number of documents. Only used in the :meth:`partial_fit` method.
+
+    perp_tol : float, default=1e-1
+        Perplexity tolerance in batch learning. Only used when
+        ``evaluate_every`` is greater than 0.
+
+    mean_change_tol : float, default=1e-3
+        Stopping tolerance for updating document topic distribution in E-step.
+
+    max_doc_update_iter : int, default=100
+        Max number of iterations for updating document topic distribution in
+        the E-step.
+
+    n_jobs : int, default=None
+        The number of jobs to use in the E-step.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    verbose : int, default=0
+        Verbosity level.
+
+    random_state : int, RandomState instance or None, default=None
+        Pass an int for reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        Variational parameters for topic word distribution. Since the complete
+        conditional for topic word distribution is a Dirichlet,
+        ``components_[i, j]`` can be viewed as pseudocount that represents the
+        number of times word `j` was assigned to topic `i`.
+        It can also be viewed as distribution over the words for each topic
+        after normalization:
+        ``model.components_ / model.components_.sum(axis=1)[:, np.newaxis]``.
+
+    exp_dirichlet_component_ : ndarray of shape (n_components, n_features)
+        Exponential value of expectation of log topic word distribution.
+        In the literature, this is `exp(E[log(beta)])`.
+
+    n_batch_iter_ : int
+        Number of iterations of the EM step.
+
+    n_iter_ : int
+        Number of passes over the dataset.
+
+    bound_ : float
+        Final perplexity score on training set.
+
+    doc_topic_prior_ : float
+        Prior of document topic distribution `theta`. If the value is None,
+        it is `1 / n_components`.
+
+    random_state_ : RandomState instance
+        RandomState instance that is generated either from a seed, the random
+        number generator or by `np.random`.
+
+    topic_word_prior_ : float
+        Prior of topic word distribution `beta`. If the value is None, it is
+        `1 / n_components`.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.decomposition import LatentDirichletAllocation
+    &gt;&gt;&gt; from sklearn.datasets import make_multilabel_classification
+    &gt;&gt;&gt; # This produces a feature matrix of token counts, similar to what
+    &gt;&gt;&gt; # CountVectorizer would produce on text.
+    &gt;&gt;&gt; X, _ = make_multilabel_classification(random_state=0)
+    &gt;&gt;&gt; lda = LatentDirichletAllocation(n_components=5,
+    ...     random_state=0)
+    &gt;&gt;&gt; lda.fit(X)
+    LatentDirichletAllocation(...)
+    &gt;&gt;&gt; # get topics for some given samples:
+    &gt;&gt;&gt; lda.transform(X[-2:])
+    array([[0.00360392, 0.25499205, 0.0036211 , 0.64236448, 0.09541846],
+           [0.15297572, 0.00362644, 0.44412786, 0.39568399, 0.003586  ]])
+
+    References
+    ----------
+    .. [1] "Online Learning for Latent Dirichlet Allocation", Matthew D.
+        Hoffman, David M. Blei, Francis Bach, 2010
+
+    [2] "Stochastic Variational Inference", Matthew D. Hoffman, David M. Blei,
+        Chong Wang, John Paisley, 2013
+
+    [3] Matthew D. Hoffman's onlineldavb code. Link:
+        https://github.com/blei-lab/onlineldavb
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">doc_topic_prior</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">topic_word_prior</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">learning_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'batch'</span><span class="punctuation">,</span>
+                 <span class="identifier">learning_decay</span><span class="arithmetic-assignment">=</span><span class="float-literal">.7</span><span class="punctuation">,</span> <span class="identifier">learning_offset</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span>
+                 <span class="identifier">batch_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">128</span><span class="punctuation">,</span> <span class="identifier">evaluate_every</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">total_samples</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e6</span><span class="punctuation">,</span>
+                 <span class="identifier">perp_tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-1</span><span class="punctuation">,</span> <span class="identifier">mean_change_tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-3</span><span class="punctuation">,</span> <span class="identifier">max_doc_update_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                 <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">doc_topic_prior</span> <span class="arithmetic-assignment">=</span> <span class="identifier">doc_topic_prior</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior</span> <span class="arithmetic-assignment">=</span> <span class="identifier">topic_word_prior</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">learning_method</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_decay</span> <span class="arithmetic-assignment">=</span> <span class="identifier">learning_decay</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_offset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">learning_offset</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">batch_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">evaluate_every</span> <span class="arithmetic-assignment">=</span> <span class="identifier">evaluate_every</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">total_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">total_samples</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">perp_tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">perp_tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_change_tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mean_change_tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_doc_update_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_doc_update_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_params</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Check model parameters."""</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid 'n_components' parameter: %r"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">total_samples</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid 'total_samples' parameter: %r"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">total_samples</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_offset</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid 'learning_offset' parameter: %r"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_offset</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_method</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"batch", "online"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid 'learning_method' parameter: %r"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_method</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_init_latent_vars</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Initialize latent variables."""</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_batch_iter_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">doc_topic_prior</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">doc_topic_prior_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">doc_topic_prior_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">doc_topic_prior</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior</span>
+
+        <span class="identifier">init_gamma</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">100</span><span class="punctuation">.</span>
+        <span class="identifier">init_var</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">init_gamma</span>
+        <span class="comment"># In the literature, this is called `lambda`</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state_</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="grouping">(</span>
+            <span class="identifier">init_gamma</span><span class="punctuation">,</span> <span class="identifier">init_var</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># In the literature, this is `exp(E[log(beta)])`</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">exp_dirichlet_component_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span>
+            <span class="identifier">_dirichlet_expectation_2d</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_e_step</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">cal_sstats</span><span class="punctuation">,</span> <span class="identifier">random_init</span><span class="punctuation">,</span> <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""E-step in EM update.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        cal_sstats : bool
+            Parameter that indicate whether to calculate sufficient statistics
+            or not. Set ``cal_sstats`` to True when we need to run M-step.
+
+        random_init : bool
+            Parameter that indicate whether to initialize document topic
+            distribution randomly in the E-step. Set it to True in training
+            steps.
+
+        parallel : joblib.Parallel, default=None
+            Pre-initialized instance of joblib.Parallel.
+
+        Returns
+        -------
+        (doc_topic_distr, suff_stats) :
+            `doc_topic_distr` is unnormalized topic distribution for each
+            document. In the literature, this is called `gamma`.
+            `suff_stats` is expected sufficient statistics for the M-step.
+            When `cal_sstats == False`, it will be None.
+
+        """</span>
+
+        <span class="comment"># Run e-step in parallel</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state_</span> <span class="keyword">if</span> <span class="identifier">random_init</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+
+        <span class="comment"># TODO: make Parallel._effective_n_jobs public instead?</span>
+        <span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">effective_n_jobs</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">parallel</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">parallel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span>
+                                                           <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">results</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parallel</span><span class="grouping">(</span>
+            <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span><span class="grouping">(</span><span class="identifier">_update_doc_distribution</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_slice</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                              <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">exp_dirichlet_component_</span><span class="punctuation">,</span>
+                                              <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">doc_topic_prior_</span><span class="punctuation">,</span>
+                                              <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_doc_update_iter</span><span class="punctuation">,</span>
+                                              <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_change_tol</span><span class="punctuation">,</span> <span class="identifier">cal_sstats</span><span class="punctuation">,</span>
+                                              <span class="identifier">random_state</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">idx_slice</span> <span class="relational-operator">in</span> <span class="identifier">gen_even_slices</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># merge result</span>
+        <span class="identifier">doc_topics</span><span class="punctuation">,</span> <span class="identifier">sstats_list</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">results</span><span class="grouping">)</span>
+        <span class="identifier">doc_topic_distr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="identifier">doc_topics</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">cal_sstats</span><span class="punctuation">:</span>
+            <span class="comment"># This step finishes computing the sufficient statistics for the</span>
+            <span class="comment"># M-step.</span>
+            <span class="identifier">suff_stats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">sstats</span> <span class="relational-operator">in</span> <span class="identifier">sstats_list</span><span class="punctuation">:</span>
+                <span class="identifier">suff_stats</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">sstats</span>
+            <span class="identifier">suff_stats</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">exp_dirichlet_component_</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">suff_stats</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">doc_topic_distr</span><span class="punctuation">,</span> <span class="identifier">suff_stats</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_em_step</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">total_samples</span><span class="punctuation">,</span> <span class="identifier">batch_update</span><span class="punctuation">,</span> <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""EM update for 1 iteration.
+
+        update `_component` by batch VB or online VB.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        total_samples : int
+            Total number of documents. It is only used when
+            batch_update is `False`.
+
+        batch_update : bool
+            Parameter that controls updating method.
+            `True` for batch learning, `False` for online learning.
+
+        parallel : joblib.Parallel, default=None
+            Pre-initialized instance of joblib.Parallel
+
+        Returns
+        -------
+        doc_topic_distr : ndarray of shape (n_samples, n_components)
+            Unnormalized document topic distribution.
+        """</span>
+
+        <span class="comment"># E-step</span>
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">suff_stats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_e_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">cal_sstats</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">random_init</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                     <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="identifier">parallel</span><span class="grouping">)</span>
+
+        <span class="comment"># M-step</span>
+        <span class="keyword">if</span> <span class="identifier">batch_update</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior_</span> <span class="arithmetic-operator">+</span> <span class="identifier">suff_stats</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># online update</span>
+            <span class="comment"># In the literature, the weight is `rho`</span>
+            <span class="identifier">weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_offset</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_batch_iter_</span><span class="punctuation">,</span>
+                              <span class="arithmetic-operator">-</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_decay</span><span class="grouping">)</span>
+            <span class="identifier">doc_ratio</span> <span class="arithmetic-assignment">=</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">total_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">*=</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">weight</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span><span class="identifier">weight</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior_</span>
+                                           <span class="arithmetic-operator">+</span> <span class="identifier">doc_ratio</span> <span class="arithmetic-operator">*</span> <span class="identifier">suff_stats</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># update `component_` related variables</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">exp_dirichlet_component_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span>
+            <span class="identifier">_dirichlet_expectation_2d</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_batch_iter_</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+        <span class="keyword">return</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'requires_positive_X'</span><span class="punctuation">:</span> <span class="bool-literal">True</span><span class="grouping">}</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_non_neg_array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset_n_features</span><span class="punctuation">,</span> <span class="identifier">whom</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""check X format
+
+        check X format and make sure no negative value in X.
+
+        Parameters
+        ----------
+        X :  array-like or sparse matrix
+
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="identifier">reset_n_features</span><span class="punctuation">,</span>
+                                <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="grouping">)</span>
+        <span class="identifier">check_non_negative</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">whom</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">X</span>
+
+    <span class="keyword">def</span> <span class="identifier">partial_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Online VB with Mini-Batch update.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        y : Ignored
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_params</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">first_time</span> <span class="arithmetic-assignment">=</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">'components_'</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_non_neg_array</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset_n_features</span><span class="arithmetic-assignment">=</span><span class="identifier">first_time</span><span class="punctuation">,</span>
+            <span class="identifier">whom</span><span class="arithmetic-assignment">=</span><span class="string-literal">"LatentDirichletAllocation.partial_fit"</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">batch_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">batch_size</span>
+
+        <span class="comment"># initialize parameters or check</span>
+        <span class="keyword">if</span> <span class="identifier">first_time</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_init_latent_vars</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_features</span> <span class="relational-operator">!=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"The provided data has %d dimensions while "</span>
+                <span class="string-literal">"the model was trained with feature size %d."</span> <span class="arithmetic-operator">%</span>
+                <span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">effective_n_jobs</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="keyword">with</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                      <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">parallel</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">idx_slice</span> <span class="relational-operator">in</span> <span class="identifier">gen_batches</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">batch_size</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_em_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_slice</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span>
+                              <span class="identifier">total_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">total_samples</span><span class="punctuation">,</span>
+                              <span class="identifier">batch_update</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                              <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="identifier">parallel</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Learn model for the data X with variational Bayes method.
+
+        When `learning_method` is 'online', use mini-batch update.
+        Otherwise, use batch update.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        y : Ignored
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_params</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_non_neg_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset_n_features</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                      <span class="identifier">whom</span><span class="arithmetic-assignment">=</span><span class="string-literal">"LatentDirichletAllocation.fit"</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span>
+        <span class="identifier">evaluate_every</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">evaluate_every</span>
+        <span class="identifier">learning_method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_method</span>
+
+        <span class="identifier">batch_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">batch_size</span>
+
+        <span class="comment"># initialize parameters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_init_latent_vars</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span>
+        <span class="comment"># change to perplexity later</span>
+        <span class="identifier">last_bound</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">effective_n_jobs</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="keyword">with</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                      <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">parallel</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">learning_method</span> <span class="relational-operator">==</span> <span class="string-literal">'online'</span><span class="punctuation">:</span>
+                    <span class="keyword">for</span> <span class="identifier">idx_slice</span> <span class="relational-operator">in</span> <span class="identifier">gen_batches</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">batch_size</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_em_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_slice</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">total_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">n_samples</span><span class="punctuation">,</span>
+                                      <span class="identifier">batch_update</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="identifier">parallel</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="comment"># batch update</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_em_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">total_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">n_samples</span><span class="punctuation">,</span>
+                                  <span class="identifier">batch_update</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="identifier">parallel</span><span class="grouping">)</span>
+
+                <span class="comment"># check perplexity</span>
+                <span class="keyword">if</span> <span class="identifier">evaluate_every</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span> <span class="logical-operator">and</span> <span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">%</span> <span class="identifier">evaluate_every</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                    <span class="identifier">doc_topics_distr</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_e_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">cal_sstats</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                                       <span class="identifier">random_init</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                                       <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="identifier">parallel</span><span class="grouping">)</span>
+                    <span class="identifier">bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_perplexity_precomp_distr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">doc_topics_distr</span><span class="punctuation">,</span>
+                                                           <span class="identifier">sub_sampling</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+                    <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="punctuation">:</span>
+                        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'iteration: %d of max_iter: %d, perplexity: %.4f'</span>
+                              <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">bound</span><span class="grouping">)</span><span class="grouping">)</span>
+
+                    <span class="keyword">if</span> <span class="identifier">last_bound</span> <span class="logical-operator">and</span> <span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">last_bound</span> <span class="arithmetic-operator">-</span> <span class="identifier">bound</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">perp_tol</span><span class="punctuation">:</span>
+                        <span class="keyword">break</span>
+                    <span class="identifier">last_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bound</span>
+
+                <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="punctuation">:</span>
+                    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'iteration: %d of max_iter: %d'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+        <span class="comment"># calculate final perplexity value on train set</span>
+        <span class="identifier">doc_topics_distr</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_e_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">cal_sstats</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                           <span class="identifier">random_init</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                           <span class="identifier">parallel</span><span class="arithmetic-assignment">=</span><span class="identifier">parallel</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bound_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_perplexity_precomp_distr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">doc_topics_distr</span><span class="punctuation">,</span>
+                                                     <span class="identifier">sub_sampling</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">_unnormalized_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Transform data X according to fitted model.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        Returns
+        -------
+        doc_topic_distr : ndarray of shape (n_samples, n_components)
+            Document topic distribution for X.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="comment"># make sure feature size is the same in fitted model and in X</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_non_neg_array</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset_n_features</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">whom</span><span class="arithmetic-assignment">=</span><span class="string-literal">"LatentDirichletAllocation.transform"</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="keyword">if</span> <span class="identifier">n_features</span> <span class="relational-operator">!=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"The provided data has %d dimensions while "</span>
+                <span class="string-literal">"the model was trained with feature size %d."</span> <span class="arithmetic-operator">%</span>
+                <span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">doc_topic_distr</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_e_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">cal_sstats</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                          <span class="identifier">random_init</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">doc_topic_distr</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Transform data X according to the fitted model.
+
+           .. versionchanged:: 0.18
+              *doc_topic_distr* is now normalized
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        Returns
+        -------
+        doc_topic_distr : ndarray of shape (n_samples, n_components)
+            Document topic distribution for X.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_non_neg_array</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset_n_features</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+            <span class="identifier">whom</span><span class="arithmetic-assignment">=</span><span class="string-literal">"LatentDirichletAllocation.transform"</span><span class="grouping">)</span>
+        <span class="identifier">doc_topic_distr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_unnormalized_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">doc_topic_distr</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">doc_topic_distr</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">doc_topic_distr</span>
+
+    <span class="keyword">def</span> <span class="identifier">_approx_bound</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">doc_topic_distr</span><span class="punctuation">,</span> <span class="identifier">sub_sampling</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Estimate the variational bound.
+
+        Estimate the variational bound over "all documents" using only the
+        documents passed in as X. Since log-likelihood of each word cannot
+        be computed directly, we use this bound to estimate it.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        doc_topic_distr : ndarray of shape (n_samples, n_components)
+            Document topic distribution. In the literature, this is called
+            gamma.
+
+        sub_sampling : bool, default=False
+            Compensate for subsampling of documents.
+            It is used in calculate bound in online learning.
+
+        Returns
+        -------
+        score : float
+
+        """</span>
+
+        <span class="keyword">def</span> <span class="identifier">_loglikelihood</span><span class="grouping">(</span><span class="identifier">prior</span><span class="punctuation">,</span> <span class="identifier">distr</span><span class="punctuation">,</span> <span class="identifier">dirichlet_distr</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># calculate log-likelihood</span>
+            <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">prior</span> <span class="arithmetic-operator">-</span> <span class="identifier">distr</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">dirichlet_distr</span><span class="grouping">)</span>
+            <span class="identifier">score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">gammaln</span><span class="grouping">(</span><span class="identifier">distr</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">gammaln</span><span class="grouping">(</span><span class="identifier">prior</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">gammaln</span><span class="grouping">(</span><span class="identifier">prior</span> <span class="arithmetic-operator">*</span> <span class="identifier">size</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">gammaln</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">distr</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">score</span>
+
+        <span class="identifier">is_sparse_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">doc_topic_distr</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+        <span class="identifier">dirichlet_doc_topic</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_dirichlet_expectation_2d</span><span class="grouping">(</span><span class="identifier">doc_topic_distr</span><span class="grouping">)</span>
+        <span class="identifier">dirichlet_component_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_dirichlet_expectation_2d</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="grouping">)</span>
+        <span class="identifier">doc_topic_prior</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">doc_topic_prior_</span>
+        <span class="identifier">topic_word_prior</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">topic_word_prior_</span>
+
+        <span class="keyword">if</span> <span class="identifier">is_sparse_x</span><span class="punctuation">:</span>
+            <span class="identifier">X_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">data</span>
+            <span class="identifier">X_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indices</span>
+            <span class="identifier">X_indptr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indptr</span>
+
+        <span class="comment"># E[log p(docs | theta, beta)]</span>
+        <span class="keyword">for</span> <span class="identifier">idx_d</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">is_sparse_x</span><span class="punctuation">:</span>
+                <span class="identifier">ids</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_indices</span><span class="grouping">[</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="grouping">]</span><span class="punctuation">:</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>
+                <span class="identifier">cnts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_data</span><span class="grouping">[</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="grouping">]</span><span class="punctuation">:</span><span class="identifier">X_indptr</span><span class="grouping">[</span><span class="identifier">idx_d</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">ids</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nonzero</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                <span class="identifier">cnts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="identifier">ids</span><span class="grouping">]</span>
+            <span class="identifier">temp</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">dirichlet_doc_topic</span><span class="grouping">[</span><span class="identifier">idx_d</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+                    <span class="arithmetic-operator">+</span> <span class="identifier">dirichlet_component_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">ids</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">norm_phi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logsumexp</span><span class="grouping">(</span><span class="identifier">temp</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+            <span class="identifier">score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">cnts</span><span class="punctuation">,</span> <span class="identifier">norm_phi</span><span class="grouping">)</span>
+
+        <span class="comment"># compute E[log p(theta | alpha) - log q(theta | gamma)]</span>
+        <span class="identifier">score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">_loglikelihood</span><span class="grouping">(</span><span class="identifier">doc_topic_prior</span><span class="punctuation">,</span> <span class="identifier">doc_topic_distr</span><span class="punctuation">,</span>
+                                <span class="identifier">dirichlet_doc_topic</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span>
+
+        <span class="comment"># Compensate for the subsampling of the population of documents</span>
+        <span class="keyword">if</span> <span class="identifier">sub_sampling</span><span class="punctuation">:</span>
+            <span class="identifier">doc_ratio</span> <span class="arithmetic-assignment">=</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">total_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_samples</span>
+            <span class="identifier">score</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">doc_ratio</span>
+
+        <span class="comment"># E[log p(beta | eta) - log q (beta | lambda)]</span>
+        <span class="identifier">score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">_loglikelihood</span><span class="grouping">(</span><span class="identifier">topic_word_prior</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">,</span>
+                                <span class="identifier">dirichlet_component_</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">score</span>
+
+    <span class="keyword">def</span> <span class="identifier">score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Calculate approximate log-likelihood as score.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        y : Ignored
+
+        Returns
+        -------
+        score : float
+            Use approximate bound as score.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_non_neg_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset_n_features</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                      <span class="identifier">whom</span><span class="arithmetic-assignment">=</span><span class="string-literal">"LatentDirichletAllocation.score"</span><span class="grouping">)</span>
+
+        <span class="identifier">doc_topic_distr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_unnormalized_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_approx_bound</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">doc_topic_distr</span><span class="punctuation">,</span> <span class="identifier">sub_sampling</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">score</span>
+
+    <span class="keyword">def</span> <span class="identifier">_perplexity_precomp_distr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">doc_topic_distr</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                  <span class="identifier">sub_sampling</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Calculate approximate perplexity for data X with ability to accept
+        precomputed doc_topic_distr
+
+        Perplexity is defined as exp(-1. * log-likelihood per word)
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        doc_topic_distr : ndarray of shape (n_samples, n_components), \
+                default=None
+            Document topic distribution.
+            If it is None, it will be generated by applying transform on X.
+
+        Returns
+        -------
+        score : float
+            Perplexity score.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_non_neg_array</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset_n_features</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">whom</span><span class="arithmetic-assignment">=</span><span class="string-literal">"LatentDirichletAllocation.perplexity"</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">doc_topic_distr</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">doc_topic_distr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_unnormalized_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">doc_topic_distr</span><span class="punctuation">.</span><span class="identifier">shape</span>
+            <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">!=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Number of samples in X and doc_topic_distr"</span>
+                                 <span class="string-literal">" do not match."</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">n_components</span> <span class="relational-operator">!=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Number of topics does not match."</span><span class="grouping">)</span>
+
+        <span class="identifier">current_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_approx_bound</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">doc_topic_distr</span><span class="punctuation">,</span> <span class="identifier">sub_sampling</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">sub_sampling</span><span class="punctuation">:</span>
+            <span class="identifier">word_cnt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">float</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">total_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">current_samples</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">word_cnt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">perword_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bound</span> <span class="arithmetic-operator">/</span> <span class="identifier">word_cnt</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="float-literal">-1.0</span> <span class="arithmetic-operator">*</span> <span class="identifier">perword_bound</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">perplexity</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">sub_sampling</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Calculate approximate perplexity for data X.
+
+        Perplexity is defined as exp(-1. * log-likelihood per word)
+
+        .. versionchanged:: 0.19
+           *doc_topic_distr* argument has been deprecated and is ignored
+           because user no longer has access to unnormalized distribution
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Document word matrix.
+
+        sub_sampling : bool
+            Do sub-sampling or not.
+
+        Returns
+        -------
+        score : float
+            Perplexity score.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_perplexity_precomp_distr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">sub_sampling</span><span class="arithmetic-assignment">=</span><span class="identifier">sub_sampling</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

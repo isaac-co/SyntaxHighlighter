@@ -1,0 +1,352 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Solvers for Ridge and LogisticRegression using SAG algorithm"""</span>
+
+<span class="comment"># Authors: Tom Dupre la Tour &lt;tom.dupre-la-tour@m4x.org&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">make_dataset</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_sag_fast</span> <span class="keyword">import</span> <span class="identifier">sag32</span><span class="punctuation">,</span> <span class="identifier">sag64</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">row_norms</span>
+
+
+<span class="keyword">def</span> <span class="identifier">get_auto_step_size</span><span class="grouping">(</span><span class="identifier">max_squared_sum</span><span class="punctuation">,</span> <span class="identifier">alpha_scaled</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="punctuation">,</span>
+                       <span class="identifier">n_samples</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                       <span class="identifier">is_saga</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute automatic step size for SAG solver.
+
+    The step size is set to 1 / (alpha_scaled + L + fit_intercept) where L is
+    the max sum of squares for over all samples.
+
+    Parameters
+    ----------
+    max_squared_sum : float
+        Maximum squared sum of X over samples.
+
+    alpha_scaled : float
+        Constant that multiplies the regularization term, scaled by
+        1. / n_samples, the number of samples.
+
+    loss : {'log', 'squared', 'multinomial'}
+        The loss function used in SAG solver.
+
+    fit_intercept : bool
+        Specifies if a constant (a.k.a. bias or intercept) will be
+        added to the decision function.
+
+    n_samples : int, default=None
+        Number of rows in X. Useful if is_saga=True.
+
+    is_saga : bool, default=False
+        Whether to return step size for the SAGA algorithm or the SAG
+        algorithm.
+
+    Returns
+    -------
+    step_size : float
+        Step size used in SAG solver.
+
+    References
+    ----------
+    Schmidt, M., Roux, N. L., & Bach, F. (2013).
+    Minimizing finite sums with the stochastic average gradient
+    https://hal.inria.fr/hal-00860051/document
+
+    Defazio, A., Bach F. & Lacoste-Julien S. (2014).
+    SAGA: A Fast Incremental Gradient Method With Support
+    for Non-Strongly Convex Composite Objectives
+    https://arxiv.org/abs/1407.0202
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">loss</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'log', 'multinomial'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">L</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="float-literal">0.25</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">max_squared_sum</span> <span class="arithmetic-operator">+</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">fit_intercept</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">alpha_scaled</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">loss</span> <span class="relational-operator">==</span> <span class="string-literal">'squared'</span><span class="punctuation">:</span>
+        <span class="comment"># inverse Lipschitz constant for squared loss</span>
+        <span class="identifier">L</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_squared_sum</span> <span class="arithmetic-operator">+</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">fit_intercept</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">alpha_scaled</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unknown loss function for SAG solver, got %s "</span>
+                         <span class="string-literal">"instead of 'log' or 'squared'"</span> <span class="arithmetic-operator">%</span> <span class="identifier">loss</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">is_saga</span><span class="punctuation">:</span>
+        <span class="comment"># SAGA theoretical step size is 1/3L or 1 / (2 * (L + mu n))</span>
+        <span class="comment"># See Defazio et al. 2014</span>
+        <span class="identifier">mun</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_scaled</span><span class="punctuation">,</span> <span class="identifier">L</span><span class="grouping">)</span>
+        <span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">L</span> <span class="arithmetic-operator">+</span> <span class="identifier">mun</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># SAG theoretical step size is 1/16L but it is recommended to use 1 / L</span>
+        <span class="comment"># see http://www.birs.ca//workshops//2014/14w5003/files/schmidt.pdf,</span>
+        <span class="comment"># slide 65</span>
+        <span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">L</span>
+    <span class="keyword">return</span> <span class="identifier">step</span>
+
+
+<span class="keyword">def</span> <span class="identifier">sag_solver</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="arithmetic-assignment">=</span><span class="string-literal">'log'</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">beta</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">.</span><span class="punctuation">,</span>
+               <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">1000</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.001</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+               <span class="identifier">check_input</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">max_squared_sum</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+               <span class="identifier">warm_start_mem</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+               <span class="identifier">is_saga</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""SAG solver for Ridge and LogisticRegression.
+
+    SAG stands for Stochastic Average Gradient: the gradient of the loss is
+    estimated each sample at a time and the model is updated along the way with
+    a constant learning rate.
+
+    IMPORTANT NOTE: 'sag' solver converges faster on columns that are on the
+    same scale. You can normalize the data by using
+    sklearn.preprocessing.StandardScaler on your data before passing it to the
+    fit method.
+
+    This implementation works with data represented as dense numpy arrays or
+    sparse scipy arrays of floating point values for the features. It will
+    fit the data according to squared loss or log loss.
+
+    The regularizer is a penalty added to the loss function that shrinks model
+    parameters towards the zero vector using the squared euclidean norm L2.
+
+    .. versionadded:: 0.17
+
+    Parameters
+    ----------
+    X : {array-like, sparse matrix} of shape (n_samples, n_features)
+        Training data.
+
+    y : ndarray of shape (n_samples,)
+        Target values. With loss='multinomial', y must be label encoded
+        (see preprocessing.LabelEncoder).
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Weights applied to individual samples (1. for unweighted).
+
+    loss : {'log', 'squared', 'multinomial'}, default='log'
+        Loss function that will be optimized:
+        -'log' is the binary logistic loss, as used in LogisticRegression.
+        -'squared' is the squared loss, as used in Ridge.
+        -'multinomial' is the multinomial logistic loss, as used in
+         LogisticRegression.
+
+        .. versionadded:: 0.18
+           *loss='multinomial'*
+
+    alpha : float, default=1.
+        L2 regularization term in the objective function
+        ``(0.5 * alpha * || W ||_F^2)``.
+
+    beta : float, default=0.
+        L1 regularization term in the objective function
+        ``(beta * || W ||_1)``. Only applied if ``is_saga`` is set to True.
+
+    max_iter : int, default=1000
+        The max number of passes over the training data if the stopping
+        criteria is not reached.
+
+    tol : double, default=0.001
+        The stopping criteria for the weights. The iterations will stop when
+        max(change in weights) / max(weights) &lt; tol.
+
+    verbose : int, default=0
+        The verbosity level.
+
+    random_state : int, RandomState instance or None, default=None
+        Used when shuffling the data. Pass an int for reproducible output
+        across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    check_input : bool, default=True
+        If False, the input arrays X and y will not be checked.
+
+    max_squared_sum : float, default=None
+        Maximum squared sum of X over samples. If None, it will be computed,
+        going through all the samples. The value should be precomputed
+        to speed up cross validation.
+
+    warm_start_mem : dict, default=None
+        The initialization parameters used for warm starting. Warm starting is
+        currently used in LogisticRegression but not in Ridge.
+        It contains:
+            - 'coef': the weight vector, with the intercept in last line
+                if the intercept is fitted.
+            - 'gradient_memory': the scalar gradient for all seen samples.
+            - 'sum_gradient': the sum of gradient over all seen samples,
+                for each feature.
+            - 'intercept_sum_gradient': the sum of gradient over all seen
+                samples, for the intercept.
+            - 'seen': array of boolean describing the seen samples.
+            - 'num_seen': the number of seen samples.
+
+    is_saga : bool, default=False
+        Whether to use the SAGA algorithm or the SAG algorithm. SAGA behaves
+        better in the first epochs, and allow for l1 regularisation.
+
+    Returns
+    -------
+    coef_ : ndarray of shape (n_features,)
+        Weight vector.
+
+    n_iter_ : int
+        The number of full pass on all samples.
+
+    warm_start_mem : dict
+        Contains a 'coef' key with the fitted result, and possibly the
+        fitted intercept at the end of the array. Contains also other keys
+        used for warm starting.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn import linear_model
+    &gt;&gt;&gt; n_samples, n_features = 10, 5
+    &gt;&gt;&gt; rng = np.random.RandomState(0)
+    &gt;&gt;&gt; X = rng.randn(n_samples, n_features)
+    &gt;&gt;&gt; y = rng.randn(n_samples)
+    &gt;&gt;&gt; clf = linear_model.Ridge(solver='sag')
+    &gt;&gt;&gt; clf.fit(X, y)
+    Ridge(solver='sag')
+
+    &gt;&gt;&gt; X = np.array([[-1, -1], [-2, -1], [1, 1], [2, 1]])
+    &gt;&gt;&gt; y = np.array([1, 1, 2, 2])
+    &gt;&gt;&gt; clf = linear_model.LogisticRegression(
+    ...     solver='sag', multi_class='multinomial')
+    &gt;&gt;&gt; clf.fit(X, y)
+    LogisticRegression(multi_class='multinomial', solver='sag')
+
+    References
+    ----------
+    Schmidt, M., Roux, N. L., & Bach, F. (2013).
+    Minimizing finite sums with the stochastic average gradient
+    https://hal.inria.fr/hal-00860051/document
+
+    Defazio, A., Bach F. & Lacoste-Julien S. (2014).
+    SAGA: A Fast Incremental Gradient Method With Support
+    for Non-Strongly Convex Composite Objectives
+    https://arxiv.org/abs/1407.0202
+
+    See Also
+    --------
+    Ridge, SGDRegressor, ElasticNet, Lasso, SVR,
+    LogisticRegression, SGDClassifier, LinearSVC, Perceptron
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">warm_start_mem</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">warm_start_mem</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+    <span class="comment"># Ridge default max_iter is None</span>
+    <span class="keyword">if</span> <span class="identifier">max_iter</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1000</span>
+
+    <span class="keyword">if</span> <span class="identifier">check_input</span><span class="punctuation">:</span>
+        <span class="identifier">_dtype</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">_dtype</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr', order='C'</span><span class="grouping">)</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">_dtype</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="comment"># As in SGD, the alpha is scaled by n_samples.</span>
+    <span class="identifier">alpha_scaled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_samples</span>
+    <span class="identifier">beta_scaled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">beta</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_samples</span>
+
+    <span class="comment"># if loss == 'multinomial', y should be label encoded.</span>
+    <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">loss</span> <span class="relational-operator">==</span> <span class="string-literal">'multinomial'</span> <span class="keyword">else</span> <span class="int-literal">1</span>
+
+    <span class="comment"># initialization</span>
+    <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="string-literal">'coef'</span> <span class="relational-operator">in</span> <span class="identifier">warm_start_mem</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">coef_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start_mem</span><span class="grouping">[</span><span class="string-literal">'coef'</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># assume fit_intercept is False</span>
+        <span class="identifier">coef_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span>
+                             <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+
+    <span class="comment"># coef_init contains possibly the intercept_init at the end.</span>
+    <span class="comment"># Note that Ridge centers the data before fitting, so fit_intercept=False.</span>
+    <span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef_init</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+        <span class="identifier">intercept_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef_init</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">coef_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef_init</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">intercept_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_classes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="string-literal">'intercept_sum_gradient'</span> <span class="relational-operator">in</span> <span class="identifier">warm_start_mem</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">intercept_sum_gradient</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start_mem</span><span class="grouping">[</span><span class="string-literal">'intercept_sum_gradient'</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">intercept_sum_gradient</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_classes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="string-literal">'gradient_memory'</span> <span class="relational-operator">in</span> <span class="identifier">warm_start_mem</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">gradient_memory_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start_mem</span><span class="grouping">[</span><span class="string-literal">'gradient_memory'</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">gradient_memory_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                        <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="string-literal">'sum_gradient'</span> <span class="relational-operator">in</span> <span class="identifier">warm_start_mem</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">sum_gradient_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start_mem</span><span class="grouping">[</span><span class="string-literal">'sum_gradient'</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">sum_gradient_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="string-literal">'seen'</span> <span class="relational-operator">in</span> <span class="identifier">warm_start_mem</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">seen_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start_mem</span><span class="grouping">[</span><span class="string-literal">'seen'</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">seen_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int32</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="string-literal">'num_seen'</span> <span class="relational-operator">in</span> <span class="identifier">warm_start_mem</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">num_seen_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start_mem</span><span class="grouping">[</span><span class="string-literal">'num_seen'</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">num_seen_init</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="identifier">dataset</span><span class="punctuation">,</span> <span class="identifier">intercept_decay</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_dataset</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">max_squared_sum</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">max_squared_sum</span> <span class="arithmetic-assignment">=</span> <span class="identifier">row_norms</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">squared</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">step_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_auto_step_size</span><span class="grouping">(</span><span class="identifier">max_squared_sum</span><span class="punctuation">,</span> <span class="identifier">alpha_scaled</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">,</span>
+                                   <span class="identifier">fit_intercept</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">n_samples</span><span class="punctuation">,</span>
+                                   <span class="identifier">is_saga</span><span class="arithmetic-assignment">=</span><span class="identifier">is_saga</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">step_size</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_scaled</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ZeroDivisionError</span><span class="grouping">(</span><span class="string-literal">"Current sag implementation does not handle "</span>
+                                <span class="string-literal">"the case step_size * alpha_scaled == 1"</span><span class="grouping">)</span>
+
+    <span class="identifier">sag</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sag64</span> <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="relational-operator">==</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span> <span class="keyword">else</span> <span class="identifier">sag32</span>
+    <span class="identifier">num_seen</span><span class="punctuation">,</span> <span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sag</span><span class="grouping">(</span><span class="identifier">dataset</span><span class="punctuation">,</span> <span class="identifier">coef_init</span><span class="punctuation">,</span>
+                            <span class="identifier">intercept_init</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span>
+                            <span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="punctuation">,</span>
+                            <span class="identifier">max_iter</span><span class="punctuation">,</span>
+                            <span class="identifier">loss</span><span class="punctuation">,</span>
+                            <span class="identifier">step_size</span><span class="punctuation">,</span> <span class="identifier">alpha_scaled</span><span class="punctuation">,</span>
+                            <span class="identifier">beta_scaled</span><span class="punctuation">,</span>
+                            <span class="identifier">sum_gradient_init</span><span class="punctuation">,</span>
+                            <span class="identifier">gradient_memory_init</span><span class="punctuation">,</span>
+                            <span class="identifier">seen_init</span><span class="punctuation">,</span>
+                            <span class="identifier">num_seen_init</span><span class="punctuation">,</span>
+                            <span class="identifier">fit_intercept</span><span class="punctuation">,</span>
+                            <span class="identifier">intercept_sum_gradient</span><span class="punctuation">,</span>
+                            <span class="identifier">intercept_decay</span><span class="punctuation">,</span>
+                            <span class="identifier">is_saga</span><span class="punctuation">,</span>
+                            <span class="identifier">verbose</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">n_iter_</span> <span class="relational-operator">==</span> <span class="identifier">max_iter</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"The max_iter was reached which means "</span>
+                      <span class="string-literal">"the coef_ did not converge"</span><span class="punctuation">,</span> <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+        <span class="identifier">coef_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">coef_init</span><span class="punctuation">,</span> <span class="identifier">intercept_init</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">warm_start_mem</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">'coef': coef_init, 'sum_gradient'</span><span class="punctuation">:</span> <span class="identifier">sum_gradient_init</span><span class="punctuation">,</span>
+                      <span class="string-literal">'intercept_sum_gradient'</span><span class="punctuation">:</span> <span class="identifier">intercept_sum_gradient</span><span class="punctuation">,</span>
+                      <span class="string-literal">'gradient_memory'</span><span class="punctuation">:</span> <span class="identifier">gradient_memory_init</span><span class="punctuation">,</span>
+                      <span class="string-literal">'seen': seen_init, 'num_seen'</span><span class="punctuation">:</span> <span class="identifier">num_seen</span><span class="grouping">}</span>
+
+    <span class="keyword">if</span> <span class="identifier">loss</span> <span class="relational-operator">==</span> <span class="string-literal">'multinomial'</span><span class="punctuation">:</span>
+        <span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef_init</span><span class="punctuation">.</span><span class="identifier">T</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef_init</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="keyword">return</span> <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">n_iter_</span><span class="punctuation">,</span> <span class="identifier">warm_start_mem</span>
+
+    </pre>
+  </body>
+</html>

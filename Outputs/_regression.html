@@ -1,0 +1,981 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Metrics to assess performance on regression task.
+
+Functions named as ``*_score`` return a scalar value to maximize: the higher
+the better.
+
+Function named as ``*_error`` or ``*_loss`` return a scalar value to minimize:
+the lower the better.
+"""</span>
+
+<span class="comment"># Authors: Alexandre Gramfort &lt;alexandre.gramfort@inria.fr&gt;</span>
+<span class="comment">#          Mathieu Blondel &lt;mathieu@mblondel.org&gt;</span>
+<span class="comment">#          Olivier Grisel &lt;olivier.grisel@ensta.org&gt;</span>
+<span class="comment">#          Arnaud Joly &lt;a.joly@ulg.ac.be&gt;</span>
+<span class="comment">#          Jochen Wersdorfer &lt;jochen@wersdoerfer.de&gt;</span>
+<span class="comment">#          Lars Buitinck</span>
+<span class="comment">#          Joel Nothman &lt;joel.nothman@gmail.com&gt;</span>
+<span class="comment">#          Karan Desai &lt;karandesai281196@gmail.com&gt;</span>
+<span class="comment">#          Noel Dawe &lt;noel@dawe.me&gt;</span>
+<span class="comment">#          Manoj Kumar &lt;manojkumarsivaraj334@gmail.com&gt;</span>
+<span class="comment">#          Michael Eickenberg &lt;michael.eickenberg@gmail.com&gt;</span>
+<span class="comment">#          Konstantin Shmelkov &lt;konstantin.shmelkov@polytechnique.edu&gt;</span>
+<span class="comment">#          Christian Lorentzen &lt;lorentzen.ch@googlemail.com&gt;</span>
+<span class="comment">#          Ashutosh Hathidara &lt;ashutoshhathidara98@gmail.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">_loss</span><span class="punctuation">.</span><span class="identifier">glm_distribution</span> <span class="keyword">import</span> <span class="identifier">TweedieDistribution</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">check_array</span><span class="punctuation">,</span> <span class="identifier">check_consistent_length</span><span class="punctuation">,</span>
+                                <span class="identifier">_num_samples</span><span class="grouping">)</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">column_or_1d</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">stats</span> <span class="keyword">import</span> <span class="identifier">_weighted_percentile</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">UndefinedMetricWarning</span>
+
+
+<span class="identifier">__ALL__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+    <span class="string-literal">"max_error"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_absolute_error"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_squared_error"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_squared_log_error"</span><span class="punctuation">,</span>
+    <span class="string-literal">"median_absolute_error"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_absolute_percentage_error"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_pinball_loss"</span><span class="punctuation">,</span>
+    <span class="string-literal">"r2_score"</span><span class="punctuation">,</span>
+    <span class="string-literal">"explained_variance_score"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_tweedie_deviance"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_poisson_deviance"</span><span class="punctuation">,</span>
+    <span class="string-literal">"mean_gamma_deviance"</span><span class="punctuation">,</span>
+<span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"numeric"</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Check that y_true and y_pred belong to the same regression task.
+
+    Parameters
+    ----------
+    y_true : array-like
+
+    y_pred : array-like
+
+    multioutput : array-like or string in ['raw_values', uniform_average',
+        'variance_weighted'] or None
+        None is accepted due to backward compatibility of r2_score().
+
+    Returns
+    -------
+    type_true : one of {'continuous', continuous-multioutput'}
+        The type of the true target data, as output by
+        'utils.multiclass.type_of_target'.
+
+    y_true : array-like of shape (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples, n_outputs)
+        Estimated target values.
+
+    multioutput : array-like of shape (n_outputs) or string in ['raw_values',
+        uniform_average', 'variance_weighted'] or None
+        Custom output weights if ``multioutput`` is array-like or
+        just the corresponding argument if ``multioutput`` is a
+        correct keyword.
+
+    dtype : str or list, default="numeric"
+        the dtype argument passed to check_array.
+    """</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_pred</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_pred</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">y_pred</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"y_true and y_pred have different number of output "</span>
+                         <span class="string-literal">"({0}!={1})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">n_outputs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">allowed_multioutput_str</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">'raw_values', 'uniform_average'</span><span class="punctuation">,</span>
+                               <span class="string-literal">'variance_weighted'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">allowed_multioutput_str</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Allowed 'multioutput' string values are {}. "</span>
+                             <span class="string-literal">"You provided multioutput={!r}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                                 <span class="identifier">allowed_multioutput_str</span><span class="punctuation">,</span>
+                                 <span class="identifier">multioutput</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">n_outputs</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Custom weights are useful only in "</span>
+                             <span class="string-literal">"multi-output cases."</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">n_outputs</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="grouping">(</span><span class="string-literal">"There must be equally many custom weights "</span>
+                              <span class="string-literal">"(%d) as outputs (%d)."</span><span class="grouping">)</span> <span class="arithmetic-operator">%</span>
+                             <span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">n_outputs</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'continuous' if n_outputs == 1 else 'continuous-multioutput'</span>
+
+    <span class="keyword">return</span> <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_absolute_error</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                        <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                        <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">'uniform_average'</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean absolute error regression loss.
+
+    Read more in the :ref:`User Guide &lt;mean_absolute_error&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    multioutput : {'raw_values', 'uniform_average'}  or array-like of shape \
+            (n_outputs,), default='uniform_average'
+        Defines aggregating of multiple output values.
+        Array-like value defines weights used to average errors.
+
+        'raw_values' :
+            Returns a full set of errors in case of multioutput input.
+
+        'uniform_average' :
+            Errors of all outputs are averaged with uniform weight.
+
+
+    Returns
+    -------
+    loss : float or ndarray of floats
+        If multioutput is 'raw_values', then mean absolute error is returned
+        for each output separately.
+        If multioutput is 'uniform_average' or an ndarray of weights, then the
+        weighted average of all output errors is returned.
+
+        MAE output is non-negative floating point. The best value is 0.0.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_absolute_error
+    &gt;&gt;&gt; y_true = [3, -0.5, 2, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 0.0, 2, 8]
+    &gt;&gt;&gt; mean_absolute_error(y_true, y_pred)
+    0.5
+    &gt;&gt;&gt; y_true = [[0.5, 1], [-1, 1], [7, -6]]
+    &gt;&gt;&gt; y_pred = [[0, 2], [-1, 2], [8, -5]]
+    &gt;&gt;&gt; mean_absolute_error(y_true, y_pred)
+    0.75
+    &gt;&gt;&gt; mean_absolute_error(y_true, y_pred, multioutput='raw_values')
+    array([0.5, 1. ])
+    &gt;&gt;&gt; mean_absolute_error(y_true, y_pred, multioutput=[0.3, 0.7])
+    0.85...
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">output_errors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_pred</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">,</span>
+                               <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'raw_values'</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">output_errors</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'uniform_average'</span><span class="punctuation">:</span>
+            <span class="comment"># pass None as weights to np.average: uniform mean</span>
+            <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">output_errors</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">multioutput</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_pinball_loss</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                      <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                      <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="punctuation">,</span>
+                      <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">'uniform_average'</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Pinball loss for quantile regression.
+
+    Read more in the :ref:`User Guide &lt;pinball_loss&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    alpha: double, slope of the pinball loss, default=0.5,
+        this loss is equivalent to :ref:`mean_absolute_error` when `alpha=0.5`,
+        `alpha=0.95` is minimized by estimators of the 95th percentile.
+
+    multioutput : {'raw_values', 'uniform_average'}  or array-like of shape \
+            (n_outputs,), default='uniform_average'
+        Defines aggregating of multiple output values.
+        Array-like value defines weights used to average errors.
+
+        'raw_values' :
+            Returns a full set of errors in case of multioutput input.
+
+        'uniform_average' :
+            Errors of all outputs are averaged with uniform weight.
+    Returns
+    -------
+    loss : float or ndarray of floats
+        If multioutput is 'raw_values', then mean absolute error is returned
+        for each output separately.
+        If multioutput is 'uniform_average' or an ndarray of weights, then the
+        weighted average of all output errors is returned.
+
+        The pinball loss output is a non-negative floating point. The best
+        value is 0.0.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_pinball_loss
+    &gt;&gt;&gt; y_true = [1, 2, 3]
+    &gt;&gt;&gt; mean_pinball_loss(y_true, [0, 2, 3], alpha=0.1)
+    0.03...
+    &gt;&gt;&gt; mean_pinball_loss(y_true, [1, 2, 4], alpha=0.1)
+    0.3...
+    &gt;&gt;&gt; mean_pinball_loss(y_true, [0, 2, 3], alpha=0.9)
+    0.3...
+    &gt;&gt;&gt; mean_pinball_loss(y_true, [1, 2, 4], alpha=0.9)
+    0.03...
+    &gt;&gt;&gt; mean_pinball_loss(y_true, y_true, alpha=0.1)
+    0.0
+    &gt;&gt;&gt; mean_pinball_loss(y_true, y_true, alpha=0.9)
+    0.0
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">diff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span>
+    <span class="identifier">sign</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">diff</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">diff</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span> <span class="arithmetic-operator">*</span> <span class="identifier">sign</span> <span class="arithmetic-operator">*</span> <span class="identifier">diff</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">alpha</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">sign</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">diff</span>
+    <span class="identifier">output_errors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'raw_values'</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">output_errors</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'uniform_average'</span><span class="punctuation">:</span>
+            <span class="comment"># pass None as weights to np.average: uniform mean</span>
+            <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"multioutput is expected to be 'raw_values' "</span>
+                             <span class="string-literal">"or 'uniform_average' but we got %r"</span>
+                             <span class="string-literal">" instead."</span> <span class="arithmetic-operator">%</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">output_errors</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">multioutput</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_absolute_percentage_error</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span>
+                                   <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                   <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">'uniform_average'</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean absolute percentage error regression loss.
+
+    Note here that we do not represent the output as a percentage in range
+    [0, 100]. Instead, we represent it in range [0, 1/eps]. Read more in the
+    :ref:`User Guide &lt;mean_absolute_percentage_error&gt;`.
+
+    .. versionadded:: 0.24
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    multioutput : {'raw_values', 'uniform_average'} or array-like
+        Defines aggregating of multiple output values.
+        Array-like value defines weights used to average errors.
+        If input is list then the shape must be (n_outputs,).
+
+        'raw_values' :
+            Returns a full set of errors in case of multioutput input.
+
+        'uniform_average' :
+            Errors of all outputs are averaged with uniform weight.
+
+    Returns
+    -------
+    loss : float or ndarray of floats in the range [0, 1/eps]
+        If multioutput is 'raw_values', then mean absolute percentage error
+        is returned for each output separately.
+        If multioutput is 'uniform_average' or an ndarray of weights, then the
+        weighted average of all output errors is returned.
+
+        MAPE output is non-negative floating point. The best value is 0.0.
+        But note the fact that bad predictions can lead to arbitarily large
+        MAPE values, especially if some y_true values are very close to zero.
+        Note that we return a large value instead of `inf` when y_true is zero.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_absolute_percentage_error
+    &gt;&gt;&gt; y_true = [3, -0.5, 2, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 0.0, 2, 8]
+    &gt;&gt;&gt; mean_absolute_percentage_error(y_true, y_pred)
+    0.3273...
+    &gt;&gt;&gt; y_true = [[0.5, 1], [-1, 1], [7, -6]]
+    &gt;&gt;&gt; y_pred = [[0, 2], [-1, 2], [8, -5]]
+    &gt;&gt;&gt; mean_absolute_percentage_error(y_true, y_pred)
+    0.5515...
+    &gt;&gt;&gt; mean_absolute_percentage_error(y_true, y_pred, multioutput=[0.3, 0.7])
+    0.6198...
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">epsilon</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+    <span class="identifier">mape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_pred</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">epsilon</span><span class="grouping">)</span>
+    <span class="identifier">output_errors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">mape</span><span class="punctuation">,</span>
+                               <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'raw_values'</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">output_errors</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'uniform_average'</span><span class="punctuation">:</span>
+            <span class="comment"># pass None as weights to np.average: uniform mean</span>
+            <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">output_errors</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">multioutput</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_squared_error</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                       <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                       <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">'uniform_average'</span><span class="punctuation">,</span> <span class="identifier">squared</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean squared error regression loss.
+
+    Read more in the :ref:`User Guide &lt;mean_squared_error&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    multioutput : {'raw_values', 'uniform_average'} or array-like of shape \
+            (n_outputs,), default='uniform_average'
+        Defines aggregating of multiple output values.
+        Array-like value defines weights used to average errors.
+
+        'raw_values' :
+            Returns a full set of errors in case of multioutput input.
+
+        'uniform_average' :
+            Errors of all outputs are averaged with uniform weight.
+
+    squared : bool, default=True
+        If True returns MSE value, if False returns RMSE value.
+
+    Returns
+    -------
+    loss : float or ndarray of floats
+        A non-negative floating point value (the best value is 0.0), or an
+        array of floating point values, one for each individual target.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_squared_error
+    &gt;&gt;&gt; y_true = [3, -0.5, 2, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 0.0, 2, 8]
+    &gt;&gt;&gt; mean_squared_error(y_true, y_pred)
+    0.375
+    &gt;&gt;&gt; y_true = [3, -0.5, 2, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 0.0, 2, 8]
+    &gt;&gt;&gt; mean_squared_error(y_true, y_pred, squared=False)
+    0.612...
+    &gt;&gt;&gt; y_true = [[0.5, 1],[-1, 1],[7, -6]]
+    &gt;&gt;&gt; y_pred = [[0, 2],[-1, 2],[8, -5]]
+    &gt;&gt;&gt; mean_squared_error(y_true, y_pred)
+    0.708...
+    &gt;&gt;&gt; mean_squared_error(y_true, y_pred, squared=False)
+    0.822...
+    &gt;&gt;&gt; mean_squared_error(y_true, y_pred, multioutput='raw_values')
+    array([0.41666667, 1.        ])
+    &gt;&gt;&gt; mean_squared_error(y_true, y_pred, multioutput=[0.3, 0.7])
+    0.825...
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">output_errors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+                               <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">squared</span><span class="punctuation">:</span>
+        <span class="identifier">output_errors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">output_errors</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'raw_values'</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">output_errors</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'uniform_average'</span><span class="punctuation">:</span>
+            <span class="comment"># pass None as weights to np.average: uniform mean</span>
+            <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">output_errors</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">multioutput</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_squared_log_error</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                           <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                           <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">'uniform_average'</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean squared logarithmic error regression loss.
+
+    Read more in the :ref:`User Guide &lt;mean_squared_log_error&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    multioutput : {'raw_values', 'uniform_average'} or array-like of shape \
+            (n_outputs,), default='uniform_average'
+
+        Defines aggregating of multiple output values.
+        Array-like value defines weights used to average errors.
+
+        'raw_values' :
+            Returns a full set of errors when the input is of multioutput
+            format.
+
+        'uniform_average' :
+            Errors of all outputs are averaged with uniform weight.
+
+    Returns
+    -------
+    loss : float or ndarray of floats
+        A non-negative floating point value (the best value is 0.0), or an
+        array of floating point values, one for each individual target.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_squared_log_error
+    &gt;&gt;&gt; y_true = [3, 5, 2.5, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 5, 4, 8]
+    &gt;&gt;&gt; mean_squared_log_error(y_true, y_pred)
+    0.039...
+    &gt;&gt;&gt; y_true = [[0.5, 1], [1, 2], [7, 6]]
+    &gt;&gt;&gt; y_pred = [[0.5, 2], [1, 2.5], [8, 8]]
+    &gt;&gt;&gt; mean_squared_log_error(y_true, y_pred)
+    0.044...
+    &gt;&gt;&gt; mean_squared_log_error(y_true, y_pred, multioutput='raw_values')
+    array([0.00462428, 0.08377444])
+    &gt;&gt;&gt; mean_squared_log_error(y_true, y_pred, multioutput=[0.3, 0.7])
+    0.060...
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">y_true</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">y_pred</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Mean Squared Logarithmic Error cannot be used when "</span>
+                         <span class="string-literal">"targets contain negative values."</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">mean_squared_error</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log1p</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log1p</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span>
+                              <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="identifier">multioutput</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">'uniform_average'</span><span class="punctuation">,</span>
+                          <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Median absolute error regression loss.
+
+    Median absolute error output is non-negative floating point. The best value
+    is 0.0. Read more in the :ref:`User Guide &lt;median_absolute_error&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape = (n_samples) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape = (n_samples) or (n_samples, n_outputs)
+        Estimated target values.
+
+    multioutput : {'raw_values', 'uniform_average'} or array-like of shape \
+            (n_outputs,), default='uniform_average'
+        Defines aggregating of multiple output values. Array-like value defines
+        weights used to average errors.
+
+        'raw_values' :
+            Returns a full set of errors in case of multioutput input.
+
+        'uniform_average' :
+            Errors of all outputs are averaged with uniform weight.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+        .. versionadded:: 0.24
+
+    Returns
+    -------
+    loss : float or ndarray of floats
+        If multioutput is 'raw_values', then mean absolute error is returned
+        for each output separately.
+        If multioutput is 'uniform_average' or an ndarray of weights, then the
+        weighted average of all output errors is returned.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import median_absolute_error
+    &gt;&gt;&gt; y_true = [3, -0.5, 2, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 0.0, 2, 8]
+    &gt;&gt;&gt; median_absolute_error(y_true, y_pred)
+    0.5
+    &gt;&gt;&gt; y_true = [[0.5, 1], [-1, 1], [7, -6]]
+    &gt;&gt;&gt; y_pred = [[0, 2], [-1, 2], [8, -5]]
+    &gt;&gt;&gt; median_absolute_error(y_true, y_pred)
+    0.75
+    &gt;&gt;&gt; median_absolute_error(y_true, y_pred, multioutput='raw_values')
+    array([0.5, 1. ])
+    &gt;&gt;&gt; median_absolute_error(y_true, y_pred, multioutput=[0.3, 0.7])
+    0.85
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">output_errors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_pred</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+        <span class="identifier">output_errors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_weighted_percentile</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_pred</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                             <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'raw_values'</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">output_errors</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'uniform_average'</span><span class="punctuation">:</span>
+            <span class="comment"># pass None as weights to np.average: uniform mean</span>
+            <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">output_errors</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">multioutput</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">explained_variance_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                             <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                             <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">'uniform_average'</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Explained variance regression score function.
+
+    Best possible score is 1.0, lower values are worse.
+
+    Read more in the :ref:`User Guide &lt;explained_variance_score&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    multioutput : {'raw_values', 'uniform_average', 'variance_weighted'} or \
+            array-like of shape (n_outputs,), default='uniform_average'
+        Defines aggregating of multiple output scores.
+        Array-like value defines weights used to average scores.
+
+        'raw_values' :
+            Returns a full set of scores in case of multioutput input.
+
+        'uniform_average' :
+            Scores of all outputs are averaged with uniform weight.
+
+        'variance_weighted' :
+            Scores of all outputs are averaged, weighted by the variances
+            of each individual output.
+
+    Returns
+    -------
+    score : float or ndarray of floats
+        The explained variance or ndarray if 'multioutput' is 'raw_values'.
+
+    Notes
+    -----
+    This is not a symmetric function.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import explained_variance_score
+    &gt;&gt;&gt; y_true = [3, -0.5, 2, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 0.0, 2, 8]
+    &gt;&gt;&gt; explained_variance_score(y_true, y_pred)
+    0.957...
+    &gt;&gt;&gt; y_true = [[0.5, 1], [-1, 1], [7, -6]]
+    &gt;&gt;&gt; y_pred = [[0, 2], [-1, 2], [8, -5]]
+    &gt;&gt;&gt; explained_variance_score(y_true, y_pred, multioutput='uniform_average')
+    0.983...
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="identifier">y_diff_avg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="identifier">numerator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_diff_avg</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span>
+                           <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+    <span class="identifier">y_true_avg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="identifier">denominator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true_avg</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span>
+                             <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+    <span class="identifier">nonzero_numerator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">numerator</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span>
+    <span class="identifier">nonzero_denominator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">denominator</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span>
+    <span class="identifier">valid_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nonzero_numerator</span> <span class="bitwise-operator">&</span> <span class="identifier">nonzero_denominator</span>
+    <span class="identifier">output_scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="identifier">output_scores</span><span class="grouping">[</span><span class="identifier">valid_score</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="identifier">numerator</span><span class="grouping">[</span><span class="identifier">valid_score</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span>
+                                      <span class="identifier">denominator</span><span class="grouping">[</span><span class="identifier">valid_score</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">output_scores</span><span class="grouping">[</span><span class="identifier">nonzero_numerator</span> <span class="bitwise-operator">&</span> <span class="bitwise-operator">~</span><span class="identifier">nonzero_denominator</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'raw_values'</span><span class="punctuation">:</span>
+            <span class="comment"># return scores individually</span>
+            <span class="keyword">return</span> <span class="identifier">output_scores</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'uniform_average'</span><span class="punctuation">:</span>
+            <span class="comment"># passing to np.average() None as weights results is uniform mean</span>
+            <span class="identifier">avg_weights</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'variance_weighted'</span><span class="punctuation">:</span>
+            <span class="identifier">avg_weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">denominator</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">avg_weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">multioutput</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">output_scores</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">avg_weights</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">r2_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+             <span class="identifier">multioutput</span><span class="arithmetic-assignment">=</span><span class="string-literal">"uniform_average"</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""":math:`R^2` (coefficient of determination) regression score function.
+
+    Best possible score is 1.0 and it can be negative (because the
+    model can be arbitrarily worse). A constant model that always
+    predicts the expected value of y, disregarding the input features,
+    would get a :math:`R^2` score of 0.0.
+
+    Read more in the :ref:`User Guide &lt;r2_score&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,) or (n_samples, n_outputs)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    multioutput : {'raw_values', 'uniform_average', 'variance_weighted'}, \
+            array-like of shape (n_outputs,) or None, default='uniform_average'
+
+        Defines aggregating of multiple output scores.
+        Array-like value defines weights used to average scores.
+        Default is "uniform_average".
+
+        'raw_values' :
+            Returns a full set of scores in case of multioutput input.
+
+        'uniform_average' :
+            Scores of all outputs are averaged with uniform weight.
+
+        'variance_weighted' :
+            Scores of all outputs are averaged, weighted by the variances
+            of each individual output.
+
+        .. versionchanged:: 0.19
+            Default value of multioutput is 'uniform_average'.
+
+    Returns
+    -------
+    z : float or ndarray of floats
+        The :math:`R^2` score or ndarray of scores if 'multioutput' is
+        'raw_values'.
+
+    Notes
+    -----
+    This is not a symmetric function.
+
+    Unlike most other scores, :math:`R^2` score may be negative (it need not
+    actually be the square of a quantity R).
+
+    This metric is not well-defined for single samples and will return a NaN
+    value if n_samples is less than two.
+
+    References
+    ----------
+    .. [1] `Wikipedia entry on the Coefficient of determination
+            &lt;https://en.wikipedia.org/wiki/Coefficient_of_determination&gt;`_
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import r2_score
+    &gt;&gt;&gt; y_true = [3, -0.5, 2, 7]
+    &gt;&gt;&gt; y_pred = [2.5, 0.0, 2, 8]
+    &gt;&gt;&gt; r2_score(y_true, y_pred)
+    0.948...
+    &gt;&gt;&gt; y_true = [[0.5, 1], [-1, 1], [7, -6]]
+    &gt;&gt;&gt; y_pred = [[0, 2], [-1, 2], [8, -5]]
+    &gt;&gt;&gt; r2_score(y_true, y_pred,
+    ...          multioutput='variance_weighted')
+    0.938...
+    &gt;&gt;&gt; y_true = [1, 2, 3]
+    &gt;&gt;&gt; y_pred = [1, 2, 3]
+    &gt;&gt;&gt; r2_score(y_true, y_pred)
+    1.0
+    &gt;&gt;&gt; y_true = [1, 2, 3]
+    &gt;&gt;&gt; y_pred = [2, 2, 2]
+    &gt;&gt;&gt; r2_score(y_true, y_pred)
+    0.0
+    &gt;&gt;&gt; y_true = [1, 2, 3]
+    &gt;&gt;&gt; y_pred = [3, 2, 1]
+    &gt;&gt;&gt; r2_score(y_true, y_pred)
+    -3.0
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">multioutput</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">_num_samples</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"R^2 score is not well-defined with less than two samples."</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">,</span> <span class="identifier">UndefinedMetricWarning</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">float</span><span class="grouping">(</span><span class="string-literal">'nan'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+        <span class="identifier">weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">weight</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+
+    <span class="identifier">numerator</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">weight</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+                                                      <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+    <span class="identifier">denominator</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">weight</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+                                                          <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+    <span class="identifier">nonzero_denominator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">denominator</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span>
+    <span class="identifier">nonzero_numerator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">numerator</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span>
+    <span class="identifier">valid_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nonzero_denominator</span> <span class="bitwise-operator">&</span> <span class="identifier">nonzero_numerator</span>
+    <span class="identifier">output_scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">output_scores</span><span class="grouping">[</span><span class="identifier">valid_score</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="identifier">numerator</span><span class="grouping">[</span><span class="identifier">valid_score</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span>
+                                      <span class="identifier">denominator</span><span class="grouping">[</span><span class="identifier">valid_score</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="comment"># arbitrary set to zero to avoid -inf scores, having a constant</span>
+    <span class="comment"># y_true is not interesting for scoring a regression anyway</span>
+    <span class="identifier">output_scores</span><span class="grouping">[</span><span class="identifier">nonzero_numerator</span> <span class="bitwise-operator">&</span> <span class="bitwise-operator">~</span><span class="identifier">nonzero_denominator</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">multioutput</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'raw_values'</span><span class="punctuation">:</span>
+            <span class="comment"># return scores individually</span>
+            <span class="keyword">return</span> <span class="identifier">output_scores</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'uniform_average'</span><span class="punctuation">:</span>
+            <span class="comment"># passing None as weights results is uniform mean</span>
+            <span class="identifier">avg_weights</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="keyword">elif</span> <span class="identifier">multioutput</span> <span class="relational-operator">==</span> <span class="string-literal">'variance_weighted'</span><span class="punctuation">:</span>
+            <span class="identifier">avg_weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">denominator</span>
+            <span class="comment"># avoid fail on constant y or one-element arrays</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">nonzero_denominator</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">nonzero_numerator</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">return</span> <span class="float-literal">1.0</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="keyword">return</span> <span class="float-literal">0.0</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">avg_weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">multioutput</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">output_scores</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">avg_weights</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">max_error</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    max_error metric calculates the maximum residual error.
+
+    Read more in the :ref:`User Guide &lt;max_error&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,)
+        Estimated target values.
+
+    Returns
+    -------
+    max_error : float
+        A positive floating point value (the best value is 0.0).
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import max_error
+    &gt;&gt;&gt; y_true = [3, 2, 7, 1]
+    &gt;&gt;&gt; y_pred = [4, 2, 7, 1]
+    &gt;&gt;&gt; max_error(y_true, y_pred)
+    1
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">'continuous-multioutput'</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Multioutput not supported in max_error"</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_tweedie_deviance</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean Tweedie deviance regression loss.
+
+    Read more in the :ref:`User Guide &lt;mean_tweedie_deviance&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        Ground truth (correct) target values.
+
+    y_pred : array-like of shape (n_samples,)
+        Estimated target values.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    power : float, default=0
+        Tweedie power parameter. Either power &lt;= 0 or power &gt;= 1.
+
+        The higher `p` the less weight is given to extreme
+        deviations between true and predicted targets.
+
+        - power &lt; 0: Extreme stable distribution. Requires: y_pred &gt; 0.
+        - power = 0 : Normal distribution, output corresponds to
+          mean_squared_error. y_true and y_pred can be any real numbers.
+        - power = 1 : Poisson distribution. Requires: y_true &gt;= 0 and
+          y_pred &gt; 0.
+        - 1 &lt; p &lt; 2 : Compound Poisson distribution. Requires: y_true &gt;= 0
+          and y_pred &gt; 0.
+        - power = 2 : Gamma distribution. Requires: y_true &gt; 0 and y_pred &gt; 0.
+        - power = 3 : Inverse Gaussian distribution. Requires: y_true &gt; 0
+          and y_pred &gt; 0.
+        - otherwise : Positive stable distribution. Requires: y_true &gt; 0
+          and y_pred &gt; 0.
+
+    Returns
+    -------
+    loss : float
+        A non-negative floating point value (the best value is 0.0).
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_tweedie_deviance
+    &gt;&gt;&gt; y_true = [2, 0, 1, 4]
+    &gt;&gt;&gt; y_pred = [0.5, 0.5, 2., 2.]
+    &gt;&gt;&gt; mean_tweedie_deviance(y_true, y_pred, power=1)
+    1.4260...
+    """</span>
+    <span class="identifier">y_type</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_reg_targets</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">'continuous-multioutput'</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Multioutput not supported in mean_tweedie_deviance"</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+
+    <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">TweedieDistribution</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="identifier">power</span><span class="grouping">)</span>
+    <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dist</span><span class="punctuation">.</span><span class="identifier">unit_deviance</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">check_input</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">dev</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_poisson_deviance</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean Poisson deviance regression loss.
+
+    Poisson deviance is equivalent to the Tweedie deviance with
+    the power parameter `power=1`.
+
+    Read more in the :ref:`User Guide &lt;mean_tweedie_deviance&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        Ground truth (correct) target values. Requires y_true &gt;= 0.
+
+    y_pred : array-like of shape (n_samples,)
+        Estimated target values. Requires y_pred &gt; 0.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    loss : float
+        A non-negative floating point value (the best value is 0.0).
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_poisson_deviance
+    &gt;&gt;&gt; y_true = [2, 0, 1, 4]
+    &gt;&gt;&gt; y_pred = [0.5, 0.5, 2., 2.]
+    &gt;&gt;&gt; mean_poisson_deviance(y_true, y_pred)
+    1.4260...
+    """</span>
+    <span class="keyword">return</span> <span class="identifier">mean_tweedie_deviance</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span>
+    <span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mean_gamma_deviance</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mean Gamma deviance regression loss.
+
+    Gamma deviance is equivalent to the Tweedie deviance with
+    the power parameter `power=2`. It is invariant to scaling of
+    the target variable, and measures relative errors.
+
+    Read more in the :ref:`User Guide &lt;mean_tweedie_deviance&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        Ground truth (correct) target values. Requires y_true &gt; 0.
+
+    y_pred : array-like of shape (n_samples,)
+        Estimated target values. Requires y_pred &gt; 0.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    loss : float
+        A non-negative floating point value (the best value is 0.0).
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import mean_gamma_deviance
+    &gt;&gt;&gt; y_true = [2, 0.5, 1, 4]
+    &gt;&gt;&gt; y_pred = [0.5, 0.5, 2., 2.]
+    &gt;&gt;&gt; mean_gamma_deviance(y_true, y_pred)
+    1.0568...
+    """</span>
+    <span class="keyword">return</span> <span class="identifier">mean_tweedie_deviance</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span>
+    <span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

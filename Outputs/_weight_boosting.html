@@ -1,0 +1,1184 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Weight Boosting.
+
+This module contains weight boosting estimators for both classification and
+regression.
+
+The module structure is the following:
+
+- The `BaseWeightBoosting` base class implements a common ``fit`` method
+  for all the estimators in the module. Regression and classification
+  only differ from each other in the loss function that is optimized.
+
+- :class:`~sklearn.ensemble.AdaBoostClassifier` implements adaptive boosting
+  (AdaBoost-SAMME) for classification problems.
+
+- :class:`~sklearn.ensemble.AdaBoostRegressor` implements adaptive boosting
+  (AdaBoost.R2) for regression problems.
+"""</span>
+
+<span class="comment"># Authors: Noel Dawe &lt;noel@dawe.me&gt;</span>
+<span class="comment">#          Gilles Louppe &lt;g.louppe@gmail.com&gt;</span>
+<span class="comment">#          Hamzeh Alsalhi &lt;ha258@cornell.edu&gt;</span>
+<span class="comment">#          Arnaud Joly &lt;arnaud.v.joly@gmail.com&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">ABCMeta</span><span class="punctuation">,</span> <span class="identifier">abstractmethod</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">xlogy</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">BaseEnsemble</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">is_classifier</span><span class="punctuation">,</span> <span class="identifier">is_regressor</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">tree</span> <span class="keyword">import</span> <span class="identifier">DecisionTreeClassifier</span><span class="punctuation">,</span> <span class="identifier">DecisionTreeRegressor</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="identifier">_safe_indexing</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">softmax</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">stable_cumsum</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">accuracy_score</span><span class="punctuation">,</span> <span class="identifier">r2_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">has_fit_parameter</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_num_samples</span>
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+    <span class="string-literal">'AdaBoostClassifier'</span><span class="punctuation">,</span>
+    <span class="string-literal">'AdaBoostRegressor'</span><span class="punctuation">,</span>
+<span class="grouping">]</span>
+
+
+<span class="keyword">class</span> <span class="identifier">BaseWeightBoosting</span><span class="grouping">(</span><span class="identifier">BaseEnsemble</span><span class="punctuation">,</span> <span class="identifier">metaclass</span><span class="arithmetic-assignment">=</span><span class="identifier">ABCMeta</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Base class for AdaBoost estimators.
+
+    Warning: This class should not be used directly. Use derived classes
+    instead.
+    """</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">base_estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                 <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="int-literal">50</span><span class="punctuation">,</span>
+                 <span class="identifier">estimator_params</span><span class="arithmetic-assignment">=</span><span class="identifier">tuple</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                 <span class="identifier">learning_rate</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">base_estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">base_estimator</span><span class="punctuation">,</span>
+            <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="identifier">n_estimators</span><span class="punctuation">,</span>
+            <span class="identifier">estimator_params</span><span class="arithmetic-assignment">=</span><span class="identifier">estimator_params</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_rate</span> <span class="arithmetic-assignment">=</span> <span class="identifier">learning_rate</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Only called to validate X in non-fit methods, therefore reset=False</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csr', 'csc'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">allow_nd</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Build a boosted classifier/regressor from the training set (X, y).
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        y : array-like of shape (n_samples,)
+            The target values (class labels in classification, real numbers in
+            regression).
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights. If None, the sample weights are initialized to
+            1 / n_samples.
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="comment"># Check parameters</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_rate</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"learning_rate must be greater than zero"</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span>
+                                   <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csr', 'csc'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                   <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                   <span class="identifier">allow_nd</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                   <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                   <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">sample_weight</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">sample_weight</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"sample_weight cannot contain negative weights"</span><span class="grouping">)</span>
+
+        <span class="comment"># Check parameters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_estimator</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="comment"># Clear any previous fit results</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_estimators</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_errors_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_estimators</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+
+        <span class="comment"># Initializion of the random number instance that will be used to</span>
+        <span class="comment"># generate a seed at each iteration</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">iboost</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_estimators</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># Boosting step</span>
+            <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">estimator_weight</span><span class="punctuation">,</span> <span class="identifier">estimator_error</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_boost</span><span class="grouping">(</span>
+                <span class="identifier">iboost</span><span class="punctuation">,</span>
+                <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span>
+                <span class="identifier">sample_weight</span><span class="punctuation">,</span>
+                <span class="identifier">random_state</span><span class="grouping">)</span>
+
+            <span class="comment"># Early termination</span>
+            <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span><span class="grouping">[</span><span class="identifier">iboost</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator_weight</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_errors_</span><span class="grouping">[</span><span class="identifier">iboost</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator_error</span>
+
+            <span class="comment"># Stop if error is zero</span>
+            <span class="keyword">if</span> <span class="identifier">estimator_error</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+
+            <span class="identifier">sample_weight_sum</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+            <span class="comment"># Stop if the sum of sample weights has become non-positive</span>
+            <span class="keyword">if</span> <span class="identifier">sample_weight_sum</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+
+            <span class="keyword">if</span> <span class="identifier">iboost</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_estimators</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="comment"># Normalize</span>
+                <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">sample_weight_sum</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_boost</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">iboost</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Implement a single boost.
+
+        Warning: This method needs to be overridden by subclasses.
+
+        Parameters
+        ----------
+        iboost : int
+            The index of the current boost iteration.
+
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        y : array-like of shape (n_samples,)
+            The target values (class labels).
+
+        sample_weight : array-like of shape (n_samples,)
+            The current sample weights.
+
+        random_state : RandomState
+            The current random number generator
+
+        Returns
+        -------
+        sample_weight : array-like of shape (n_samples,) or None
+            The reweighted sample weights.
+            If None then boosting has terminated early.
+
+        estimator_weight : float
+            The weight for the current boost.
+            If None then boosting has terminated early.
+
+        error : float
+            The classification error for the current boost.
+            If None then boosting has terminated early.
+        """</span>
+        <span class="keyword">pass</span>
+
+    <span class="keyword">def</span> <span class="identifier">staged_score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return staged scores for X, y.
+
+        This generator method yields the ensemble score after each iteration of
+        boosting and therefore allows monitoring, such as to determine the
+        score on a test set after each boost.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        y : array-like of shape (n_samples,)
+            Labels for X.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights.
+
+        Yields
+        ------
+        z : float
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">y_pred</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">staged_predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">is_classifier</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">yield</span> <span class="identifier">accuracy_score</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">yield</span> <span class="identifier">r2_score</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">feature_importances_</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""The impurity-based feature importances.
+
+        The higher, the more important the feature.
+        The importance of a feature is computed as the (normalized)
+        total reduction of the criterion brought by that feature.  It is also
+        known as the Gini importance.
+
+        Warning: impurity-based feature importances can be misleading for
+        high cardinality features (many unique values). See
+        :func:`sklearn.inspection.permutation_importance` as an alternative.
+
+        Returns
+        -------
+        feature_importances_ : ndarray of shape (n_features,)
+            The feature importances.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Estimator not fitted, "</span>
+                             <span class="string-literal">"call `fit` before `feature_importances_`."</span><span class="grouping">)</span>
+
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">norm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">weight</span> <span class="arithmetic-operator">*</span> <span class="identifier">clf</span><span class="punctuation">.</span><span class="identifier">feature_importances_</span> <span class="keyword">for</span> <span class="identifier">weight</span><span class="punctuation">,</span> <span class="identifier">clf</span>
+                    <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="arithmetic-operator">/</span> <span class="identifier">norm</span><span class="grouping">)</span>
+
+        <span class="keyword">except</span> <span class="identifier">AttributeError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">AttributeError</span><span class="grouping">(</span>
+                <span class="string-literal">"Unable to compute feature importances "</span>
+                <span class="string-literal">"since base_estimator does not have a "</span>
+                <span class="string-literal">"feature_importances_ attribute"</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_samme_proba</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Calculate algorithm 4, step 2, equation c) of Zhu et al [1].
+
+    References
+    ----------
+    .. [1] J. Zhu, H. Zou, S. Rosset, T. Hastie, "Multi-class AdaBoost", 2009.
+
+    """</span>
+    <span class="identifier">proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="comment"># Displace zero probabilities so the log is defined.</span>
+    <span class="comment"># Also fix negative elements which may occur with</span>
+    <span class="comment"># negative sample weights.</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">proba</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">proba</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">proba</span><span class="grouping">)</span>
+    <span class="identifier">log_proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">proba</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">n_classes</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">log_proba</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_classes</span><span class="grouping">)</span>
+                              <span class="arithmetic-operator">*</span> <span class="identifier">log_proba</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">AdaBoostClassifier</span><span class="grouping">(</span><span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span><span class="punctuation">,</span> <span class="identifier">BaseWeightBoosting</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""An AdaBoost classifier.
+
+    An AdaBoost [1] classifier is a meta-estimator that begins by fitting a
+    classifier on the original dataset and then fits additional copies of the
+    classifier on the same dataset but where the weights of incorrectly
+    classified instances are adjusted such that subsequent classifiers focus
+    more on difficult cases.
+
+    This class implements the algorithm known as AdaBoost-SAMME [2].
+
+    Read more in the :ref:`User Guide &lt;adaboost&gt;`.
+
+    .. versionadded:: 0.14
+
+    Parameters
+    ----------
+    base_estimator : object, default=None
+        The base estimator from which the boosted ensemble is built.
+        Support for sample weighting is required, as well as proper
+        ``classes_`` and ``n_classes_`` attributes. If ``None``, then
+        the base estimator is :class:`~sklearn.tree.DecisionTreeClassifier`
+        initialized with `max_depth=1`.
+
+    n_estimators : int, default=50
+        The maximum number of estimators at which boosting is terminated.
+        In case of perfect fit, the learning procedure is stopped early.
+
+    learning_rate : float, default=1.
+        Weight applied to each classifier at each boosting iteration. A higher
+        learning rate increases the contribution of each classifier. There is
+        a trade-off between the `learning_rate` and `n_estimators` parameters.
+
+    algorithm : {'SAMME', 'SAMME.R'}, default='SAMME.R'
+        If 'SAMME.R' then use the SAMME.R real boosting algorithm.
+        ``base_estimator`` must support calculation of class probabilities.
+        If 'SAMME' then use the SAMME discrete boosting algorithm.
+        The SAMME.R algorithm typically converges faster than SAMME,
+        achieving a lower test error with fewer boosting iterations.
+
+    random_state : int, RandomState instance or None, default=None
+        Controls the random seed given at each `base_estimator` at each
+        boosting iteration.
+        Thus, it is only used when `base_estimator` exposes a `random_state`.
+        Pass an int for reproducible output across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    base_estimator_ : estimator
+        The base estimator from which the ensemble is grown.
+
+    estimators_ : list of classifiers
+        The collection of fitted sub-estimators.
+
+    classes_ : ndarray of shape (n_classes,)
+        The classes labels.
+
+    n_classes_ : int
+        The number of classes.
+
+    estimator_weights_ : ndarray of floats
+        Weights for each estimator in the boosted ensemble.
+
+    estimator_errors_ : ndarray of floats
+        Classification error for each estimator in the boosted
+        ensemble.
+
+    feature_importances_ : ndarray of shape (n_features,)
+        The impurity-based feature importances if supported by the
+        ``base_estimator`` (when based on decision trees).
+
+        Warning: impurity-based feature importances can be misleading for
+        high cardinality features (many unique values). See
+        :func:`sklearn.inspection.permutation_importance` as an alternative.
+
+    See Also
+    --------
+    AdaBoostRegressor : An AdaBoost regressor that begins by fitting a
+        regressor on the original dataset and then fits additional copies of
+        the regressor on the same dataset but where the weights of instances
+        are adjusted according to the error of the current prediction.
+
+    GradientBoostingClassifier : GB builds an additive model in a forward
+        stage-wise fashion. Regression trees are fit on the negative gradient
+        of the binomial or multinomial deviance loss function. Binary
+        classification is a special case where only a single regression tree is
+        induced.
+
+    sklearn.tree.DecisionTreeClassifier : A non-parametric supervised learning
+        method used for classification.
+        Creates a model that predicts the value of a target variable by
+        learning simple decision rules inferred from the data features.
+
+    References
+    ----------
+    .. [1] Y. Freund, R. Schapire, "A Decision-Theoretic Generalization of
+           on-Line Learning and an Application to Boosting", 1995.
+
+    .. [2] J. Zhu, H. Zou, S. Rosset, T. Hastie, "Multi-class AdaBoost", 2009.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.ensemble import AdaBoostClassifier
+    &gt;&gt;&gt; from sklearn.datasets import make_classification
+    &gt;&gt;&gt; X, y = make_classification(n_samples=1000, n_features=4,
+    ...                            n_informative=2, n_redundant=0,
+    ...                            random_state=0, shuffle=False)
+    &gt;&gt;&gt; clf = AdaBoostClassifier(n_estimators=100, random_state=0)
+    &gt;&gt;&gt; clf.fit(X, y)
+    AdaBoostClassifier(n_estimators=100, random_state=0)
+    &gt;&gt;&gt; clf.predict([[0, 0, 0, 0]])
+    array([1])
+    &gt;&gt;&gt; clf.score(X, y)
+    0.983...
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">base_estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                 <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="int-literal">50</span><span class="punctuation">,</span>
+                 <span class="identifier">learning_rate</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span>
+                 <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="string-literal">'SAMME.R'</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">base_estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">base_estimator</span><span class="punctuation">,</span>
+            <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="identifier">n_estimators</span><span class="punctuation">,</span>
+            <span class="identifier">learning_rate</span><span class="arithmetic-assignment">=</span><span class="identifier">learning_rate</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">algorithm</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Build a boosted classifier from the training set (X, y).
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        y : array-like of shape (n_samples,)
+            The target values (class labels).
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights. If None, the sample weights are initialized to
+            ``1 / n_samples``.
+
+        Returns
+        -------
+        self : object
+            Fitted estimator.
+        """</span>
+        <span class="comment"># Check that algorithm is supported</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'SAMME', 'SAMME.R'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"algorithm %s is not supported"</span> <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span><span class="grouping">)</span>
+
+        <span class="comment"># Fit</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_validate_estimator</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Check the estimator and set the base_estimator_ attribute."""</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_validate_estimator</span><span class="grouping">(</span>
+            <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="identifier">DecisionTreeClassifier</span><span class="grouping">(</span><span class="identifier">max_depth</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment">#  SAMME-R requires predict_proba-enabled base estimators</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="relational-operator">==</span> <span class="string-literal">'SAMME.R'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">,</span> <span class="string-literal">'predict_proba'</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span>
+                    <span class="string-literal">"AdaBoostClassifier with algorithm='SAMME.R' requires "</span>
+                    <span class="string-literal">"that the weak learner supports the calculation of class "</span>
+                    <span class="string-literal">"probabilities with a predict_proba method.\n"</span>
+                    <span class="string-literal">"Please change the base estimator or set "</span>
+                    <span class="string-literal">"algorithm='SAMME' instead."</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">has_fit_parameter</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">,</span> <span class="string-literal">"sample_weight"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"%s doesn't support sample_weight."</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_boost</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">iboost</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Implement a single boost.
+
+        Perform a single boost according to the real multi-class SAMME.R
+        algorithm or to the discrete SAMME algorithm and return the updated
+        sample weights.
+
+        Parameters
+        ----------
+        iboost : int
+            The index of the current boost iteration.
+
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples.
+
+        y : array-like of shape (n_samples,)
+            The target values (class labels).
+
+        sample_weight : array-like of shape (n_samples,)
+            The current sample weights.
+
+        random_state : RandomState instance
+            The RandomState instance used if the base estimator accepts a
+            `random_state` attribute.
+
+        Returns
+        -------
+        sample_weight : array-like of shape (n_samples,) or None
+            The reweighted sample weights.
+            If None then boosting has terminated early.
+
+        estimator_weight : float
+            The weight for the current boost.
+            If None then boosting has terminated early.
+
+        estimator_error : float
+            The classification error for the current boost.
+            If None then boosting has terminated early.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="relational-operator">==</span> <span class="string-literal">'SAMME.R'</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_boost_real</span><span class="grouping">(</span><span class="identifier">iboost</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># elif self.algorithm == "SAMME":</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_boost_discrete</span><span class="grouping">(</span><span class="identifier">iboost</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span>
+                                        <span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_boost_real</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">iboost</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Implement a single boost using the SAMME.R real algorithm."""</span>
+        <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_make_estimator</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="identifier">y_predict_proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">iboost</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">'classes_'</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+
+        <span class="identifier">y_predict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">y_predict_proba</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="comment"># Instances incorrectly classified</span>
+        <span class="identifier">incorrect</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_predict</span> <span class="relational-operator">!=</span> <span class="identifier">y</span>
+
+        <span class="comment"># Error fraction</span>
+        <span class="identifier">estimator_error</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">incorrect</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Stop if classification is perfect</span>
+        <span class="keyword">if</span> <span class="identifier">estimator_error</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+        <span class="comment"># Construct y coding as described in Zhu et al [2]:</span>
+        <span class="comment">#</span>
+        <span class="comment">#    y_k = 1 if c == k else -1 / (K - 1)</span>
+        <span class="comment">#</span>
+        <span class="comment"># where K == n_classes_ and c, k in [0, K) are indices along the second</span>
+        <span class="comment"># axis of the y coding with c being the index corresponding to the true</span>
+        <span class="comment"># class label.</span>
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span>
+        <span class="identifier">y_codes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">n_classes</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">y_coding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_codes</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="relational-operator">==</span> <span class="identifier">y</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="comment"># Displace zero probabilities so the log is defined.</span>
+        <span class="comment"># Also fix negative elements which may occur with</span>
+        <span class="comment"># negative sample weights.</span>
+        <span class="identifier">proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_predict_proba</span>  <span class="comment"># alias for readability</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">proba</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">proba</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">proba</span><span class="grouping">)</span>
+
+        <span class="comment"># Boost weight using multi-class AdaBoost SAMME.R alg</span>
+        <span class="identifier">estimator_weight</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_rate</span>
+                            <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_classes</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_classes</span><span class="grouping">)</span>
+                            <span class="arithmetic-operator">*</span> <span class="identifier">xlogy</span><span class="grouping">(</span><span class="identifier">y_coding</span><span class="punctuation">,</span> <span class="identifier">y_predict_proba</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Only boost the weights if it will fit again</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">iboost</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_estimators</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="comment"># Only boost positive weights</span>
+            <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="identifier">estimator_weight</span> <span class="arithmetic-operator">*</span>
+                                    <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">sample_weight</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">)</span> <span class="bitwise-operator">|</span>
+                                     <span class="grouping">(</span><span class="identifier">estimator_weight</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">estimator_error</span>
+
+    <span class="keyword">def</span> <span class="identifier">_boost_discrete</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">iboost</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Implement a single boost using the SAMME discrete algorithm."""</span>
+        <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_make_estimator</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="identifier">y_predict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">iboost</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">'classes_'</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+
+        <span class="comment"># Instances incorrectly classified</span>
+        <span class="identifier">incorrect</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_predict</span> <span class="relational-operator">!=</span> <span class="identifier">y</span>
+
+        <span class="comment"># Error fraction</span>
+        <span class="identifier">estimator_error</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">incorrect</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Stop if classification is perfect</span>
+        <span class="keyword">if</span> <span class="identifier">estimator_error</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span>
+
+        <span class="comment"># Stop if the error is at least as bad as random guessing</span>
+        <span class="keyword">if</span> <span class="identifier">estimator_error</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_classes</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'BaseClassifier in AdaBoostClassifier '</span>
+                                 <span class="string-literal">'ensemble is worse than random, ensemble '</span>
+                                 <span class="string-literal">'can not be fit.'</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span>
+
+        <span class="comment"># Boost weight using multi-class AdaBoost SAMME alg</span>
+        <span class="identifier">estimator_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_rate</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="identifier">estimator_error</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">estimator_error</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">n_classes</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Only boost the weights if I will fit again</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">iboost</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_estimators</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="comment"># Only boost positive weights</span>
+            <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="identifier">estimator_weight</span> <span class="arithmetic-operator">*</span> <span class="identifier">incorrect</span> <span class="arithmetic-operator">*</span>
+                                    <span class="grouping">(</span><span class="identifier">sample_weight</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">estimator_weight</span><span class="punctuation">,</span> <span class="identifier">estimator_error</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict classes for X.
+
+        The predicted class of an input sample is computed as the weighted mean
+        prediction of the classifiers in the ensemble.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples,)
+            The predicted classes.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">pred</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">pred</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">staged_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return staged predictions for X.
+
+        The predicted class of an input sample is computed as the weighted mean
+        prediction of the classifiers in the ensemble.
+
+        This generator method yields the ensemble prediction after each
+        iteration of boosting and therefore allows monitoring, such as to
+        determine the prediction on a test set after each boost.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Yields
+        ------
+        y : generator of ndarray of shape (n_samples,)
+            The predicted classes.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">pred</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">staged_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">yield</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">pred</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">pred</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">staged_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">yield</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span>
+                    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">pred</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute the decision function of ``X``.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Returns
+        -------
+        score : ndarray of shape of (n_samples, k)
+            The decision function of the input samples. The order of
+            outputs is the same of that of the :term:`classes_` attribute.
+            Binary classification is a special cases with ``k == 1``,
+            otherwise ``k==n_classes``. For binary classification,
+            values closer to -1 or 1 mean more like the first or second
+            class in ``classes_``, respectively.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="relational-operator">==</span> <span class="string-literal">'SAMME.R'</span><span class="punctuation">:</span>
+            <span class="comment"># The weights are all 1. for SAMME.R</span>
+            <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">_samme_proba</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+                       <span class="keyword">for</span> <span class="identifier">estimator</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># self.algorithm == "SAMME"</span>
+            <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span> <span class="arithmetic-operator">*</span> <span class="identifier">w</span>
+                       <span class="keyword">for</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">w</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="punctuation">,</span>
+                                               <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">pred</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="identifier">pred</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">*=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+            <span class="keyword">return</span> <span class="identifier">pred</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">pred</span>
+
+    <span class="keyword">def</span> <span class="identifier">staged_decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute decision function of ``X`` for each boosting iteration.
+
+        This method allows monitoring (i.e. determine error on testing set)
+        after each boosting iteration.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Yields
+        ------
+        score : generator of ndarray of shape (n_samples, k)
+            The decision function of the input samples. The order of
+            outputs is the same of that of the :term:`classes_` attribute.
+            Binary classification is a special cases with ``k == 1``,
+            otherwise ``k==n_classes``. For binary classification,
+            values closer to -1 or 1 mean more like the first or second
+            class in ``classes_``, respectively.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">norm</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+        <span class="keyword">for</span> <span class="identifier">weight</span><span class="punctuation">,</span> <span class="identifier">estimator</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span><span class="punctuation">,</span>
+                                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">norm</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">weight</span>
+
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">algorithm</span> <span class="relational-operator">==</span> <span class="string-literal">'SAMME.R'</span><span class="punctuation">:</span>
+                <span class="comment"># The weights are all 1. for SAMME.R</span>
+                <span class="identifier">current_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_samme_proba</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># elif self.algorithm == "SAMME":</span>
+                <span class="identifier">current_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+                <span class="identifier">current_pred</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">current_pred</span> <span class="relational-operator">==</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span> <span class="arithmetic-operator">*</span> <span class="identifier">weight</span>
+
+            <span class="keyword">if</span> <span class="identifier">pred</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">current_pred</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">pred</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">current_pred</span>
+
+            <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+                <span class="identifier">tmp_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">pred</span><span class="grouping">)</span>
+                <span class="identifier">tmp_pred</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">*=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+                <span class="keyword">yield</span> <span class="grouping">(</span><span class="identifier">tmp_pred</span> <span class="arithmetic-operator">/</span> <span class="identifier">norm</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">yield</span> <span class="identifier">pred</span> <span class="arithmetic-operator">/</span> <span class="identifier">norm</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_compute_proba_from_decision</span><span class="grouping">(</span><span class="identifier">decision</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute probabilities from the decision function.
+
+        This is based eq. (4) of [1] where:
+            p(y=c|X) = exp((1 / K-1) f_c(X)) / sum_k(exp((1 / K-1) f_k(X)))
+                     = softmax((1 / K-1) * f(X))
+
+        References
+        ----------
+        .. [1] J. Zhu, H. Zou, S. Rosset, T. Hastie, "Multi-class AdaBoost",
+               2009.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="identifier">decision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="identifier">decision</span><span class="punctuation">,</span> <span class="identifier">decision</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">decision</span> <span class="arithmetic-assignment">/=</span> <span class="grouping">(</span><span class="identifier">n_classes</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">softmax</span><span class="grouping">(</span><span class="identifier">decision</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict class probabilities for X.
+
+        The predicted class probabilities of an input sample is computed as
+        the weighted mean predicted class probabilities of the classifiers
+        in the ensemble.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Returns
+        -------
+        p : ndarray of shape (n_samples, n_classes)
+            The class probabilities of the input samples. The order of
+            outputs is the same of that of the :term:`classes_` attribute.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">_num_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">decision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_compute_proba_from_decision</span><span class="grouping">(</span><span class="identifier">decision</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">staged_predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict class probabilities for X.
+
+        The predicted class probabilities of an input sample is computed as
+        the weighted mean predicted class probabilities of the classifiers
+        in the ensemble.
+
+        This generator method yields the ensemble predicted class probabilities
+        after each iteration of boosting and therefore allows monitoring, such
+        as to determine the predicted class probabilities on a test set after
+        each boost.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Yields
+        -------
+        p : generator of ndarray of shape (n_samples,)
+            The class probabilities of the input samples. The order of
+            outputs is the same of that of the :term:`classes_` attribute.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span>
+
+        <span class="keyword">for</span> <span class="identifier">decision</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">staged_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">yield</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_compute_proba_from_decision</span><span class="grouping">(</span><span class="identifier">decision</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_log_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict class log-probabilities for X.
+
+        The predicted class log-probabilities of an input sample is computed as
+        the weighted mean predicted class log-probabilities of the classifiers
+        in the ensemble.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Returns
+        -------
+        p : ndarray of shape (n_samples, n_classes)
+            The class probabilities of the input samples. The order of
+            outputs is the same of that of the :term:`classes_` attribute.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">AdaBoostRegressor</span><span class="grouping">(</span><span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseWeightBoosting</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""An AdaBoost regressor.
+
+    An AdaBoost [1] regressor is a meta-estimator that begins by fitting a
+    regressor on the original dataset and then fits additional copies of the
+    regressor on the same dataset but where the weights of instances are
+    adjusted according to the error of the current prediction. As such,
+    subsequent regressors focus more on difficult cases.
+
+    This class implements the algorithm known as AdaBoost.R2 [2].
+
+    Read more in the :ref:`User Guide &lt;adaboost&gt;`.
+
+    .. versionadded:: 0.14
+
+    Parameters
+    ----------
+    base_estimator : object, default=None
+        The base estimator from which the boosted ensemble is built.
+        If ``None``, then the base estimator is
+        :class:`~sklearn.tree.DecisionTreeRegressor` initialized with
+        `max_depth=3`.
+
+    n_estimators : int, default=50
+        The maximum number of estimators at which boosting is terminated.
+        In case of perfect fit, the learning procedure is stopped early.
+
+    learning_rate : float, default=1.
+        Weight applied to each classifier at each boosting iteration. A higher
+        learning rate increases the contribution of each classifier. There is
+        a trade-off between the `learning_rate` and `n_estimators` parameters.
+
+    loss : {'linear', 'square', 'exponential'}, default='linear'
+        The loss function to use when updating the weights after each
+        boosting iteration.
+
+    random_state : int, RandomState instance or None, default=None
+        Controls the random seed given at each `base_estimator` at each
+        boosting iteration.
+        Thus, it is only used when `base_estimator` exposes a `random_state`.
+        In addition, it controls the bootstrap of the weights used to train the
+        `base_estimator` at each boosting iteration.
+        Pass an int for reproducible output across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    base_estimator_ : estimator
+        The base estimator from which the ensemble is grown.
+
+    estimators_ : list of classifiers
+        The collection of fitted sub-estimators.
+
+    estimator_weights_ : ndarray of floats
+        Weights for each estimator in the boosted ensemble.
+
+    estimator_errors_ : ndarray of floats
+        Regression error for each estimator in the boosted ensemble.
+
+    feature_importances_ : ndarray of shape (n_features,)
+        The impurity-based feature importances if supported by the
+        ``base_estimator`` (when based on decision trees).
+
+        Warning: impurity-based feature importances can be misleading for
+        high cardinality features (many unique values). See
+        :func:`sklearn.inspection.permutation_importance` as an alternative.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.ensemble import AdaBoostRegressor
+    &gt;&gt;&gt; from sklearn.datasets import make_regression
+    &gt;&gt;&gt; X, y = make_regression(n_features=4, n_informative=2,
+    ...                        random_state=0, shuffle=False)
+    &gt;&gt;&gt; regr = AdaBoostRegressor(random_state=0, n_estimators=100)
+    &gt;&gt;&gt; regr.fit(X, y)
+    AdaBoostRegressor(n_estimators=100, random_state=0)
+    &gt;&gt;&gt; regr.predict([[0, 0, 0, 0]])
+    array([4.7972...])
+    &gt;&gt;&gt; regr.score(X, y)
+    0.9771...
+
+    See Also
+    --------
+    AdaBoostClassifier, GradientBoostingRegressor,
+    sklearn.tree.DecisionTreeRegressor
+
+    References
+    ----------
+    .. [1] Y. Freund, R. Schapire, "A Decision-Theoretic Generalization of
+           on-Line Learning and an Application to Boosting", 1995.
+
+    .. [2] H. Drucker, "Improving Regressors using Boosting Techniques", 1997.
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">base_estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                 <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="int-literal">50</span><span class="punctuation">,</span>
+                 <span class="identifier">learning_rate</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span>
+                 <span class="identifier">loss</span><span class="arithmetic-assignment">=</span><span class="string-literal">'linear'</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">base_estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">base_estimator</span><span class="punctuation">,</span>
+            <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="identifier">n_estimators</span><span class="punctuation">,</span>
+            <span class="identifier">learning_rate</span><span class="arithmetic-assignment">=</span><span class="identifier">learning_rate</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">loss</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Build a boosted regressor from the training set (X, y).
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        y : array-like of shape (n_samples,)
+            The target values (real numbers).
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights. If None, the sample weights are initialized to
+            1 / n_samples.
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="comment"># Check loss</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">loss</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'linear', 'square', 'exponential'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"loss must be 'linear', 'square', or 'exponential'"</span><span class="grouping">)</span>
+
+        <span class="comment"># Fit</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_validate_estimator</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Check the estimator and set the base_estimator_ attribute."""</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_validate_estimator</span><span class="grouping">(</span>
+            <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="identifier">DecisionTreeRegressor</span><span class="grouping">(</span><span class="identifier">max_depth</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_boost</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">iboost</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Implement a single boost for regression
+
+        Perform a single boost according to the AdaBoost.R2 algorithm and
+        return the updated sample weights.
+
+        Parameters
+        ----------
+        iboost : int
+            The index of the current boost iteration.
+
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples.
+
+        y : array-like of shape (n_samples,)
+            The target values (class labels in classification, real numbers in
+            regression).
+
+        sample_weight : array-like of shape (n_samples,)
+            The current sample weights.
+
+        random_state : RandomState
+            The RandomState instance used if the base estimator accepts a
+            `random_state` attribute.
+            Controls also the bootstrap of the weights used to train the weak
+            learner.
+            replacement.
+
+        Returns
+        -------
+        sample_weight : array-like of shape (n_samples,) or None
+            The reweighted sample weights.
+            If None then boosting has terminated early.
+
+        estimator_weight : float
+            The weight for the current boost.
+            If None then boosting has terminated early.
+
+        estimator_error : float
+            The regression error for the current boost.
+            If None then boosting has terminated early.
+        """</span>
+        <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_make_estimator</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="comment"># Weighted sampling of the training set with replacement</span>
+        <span class="identifier">bootstrap_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">choice</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">_num_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">_num_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">replace</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span>
+        <span class="grouping">)</span>
+
+        <span class="comment"># Fit on the bootstrapped sample and obtain a prediction</span>
+        <span class="comment"># for all samples in the training set</span>
+        <span class="identifier">X_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">bootstrap_idx</span><span class="grouping">)</span>
+        <span class="identifier">y_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">bootstrap_idx</span><span class="grouping">)</span>
+        <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_</span><span class="punctuation">,</span> <span class="identifier">y_</span><span class="grouping">)</span>
+        <span class="identifier">y_predict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">error_vect</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_predict</span> <span class="arithmetic-operator">-</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">sample_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+        <span class="identifier">masked_sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">sample_mask</span><span class="grouping">]</span>
+        <span class="identifier">masked_error_vector</span> <span class="arithmetic-assignment">=</span> <span class="identifier">error_vect</span><span class="grouping">[</span><span class="identifier">sample_mask</span><span class="grouping">]</span>
+
+        <span class="identifier">error_max</span> <span class="arithmetic-assignment">=</span> <span class="identifier">masked_error_vector</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">error_max</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">masked_error_vector</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">error_max</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">loss</span> <span class="relational-operator">==</span> <span class="string-literal">'square'</span><span class="punctuation">:</span>
+            <span class="identifier">masked_error_vector</span> <span class="arithmetic-assignment">**=</span> <span class="int-literal">2</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">loss</span> <span class="relational-operator">==</span> <span class="string-literal">'exponential'</span><span class="punctuation">:</span>
+            <span class="identifier">masked_error_vector</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="identifier">masked_error_vector</span><span class="grouping">)</span>
+
+        <span class="comment"># Calculate the average loss</span>
+        <span class="identifier">estimator_error</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">masked_sample_weight</span> <span class="arithmetic-operator">*</span> <span class="identifier">masked_error_vector</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">estimator_error</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="comment"># Stop if fit is perfect</span>
+            <span class="keyword">return</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+        <span class="keyword">elif</span> <span class="identifier">estimator_error</span> <span class="relational-operator">&gt;=</span> <span class="float-literal">0.5</span><span class="punctuation">:</span>
+            <span class="comment"># Discard current estimator only if it isn't the only one</span>
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span>
+
+        <span class="identifier">beta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator_error</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="identifier">estimator_error</span><span class="grouping">)</span>
+
+        <span class="comment"># Boost weight using AdaBoost.R2 alg</span>
+        <span class="identifier">estimator_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_rate</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">beta</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">iboost</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_estimators</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">sample_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span>
+                <span class="identifier">beta</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="identifier">masked_error_vector</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learning_rate</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">estimator_weight</span><span class="punctuation">,</span> <span class="identifier">estimator_error</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_median_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">limit</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Evaluate predictions of all estimators</span>
+        <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span>
+            <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">est</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">limit</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+        <span class="comment"># Sort the predictions</span>
+        <span class="identifier">sorted_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">predictions</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+        <span class="comment"># Find index of median prediction for each sample</span>
+        <span class="identifier">weight_cdf</span> <span class="arithmetic-assignment">=</span> <span class="identifier">stable_cumsum</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_weights_</span><span class="grouping">[</span><span class="identifier">sorted_idx</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">median_or_above</span> <span class="arithmetic-assignment">=</span> <span class="identifier">weight_cdf</span> <span class="relational-operator">&gt;=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">weight_cdf</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="identifier">median_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_or_above</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+        <span class="identifier">median_estimators</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted_idx</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">_num_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">median_idx</span><span class="grouping">]</span>
+
+        <span class="comment"># Return median predictions</span>
+        <span class="keyword">return</span> <span class="identifier">predictions</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">_num_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">median_estimators</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict regression value for X.
+
+        The predicted regression value of an input sample is computed
+        as the weighted median prediction of the classifiers in the ensemble.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples. Sparse matrix can be CSC, CSR, COO,
+            DOK, or LIL. COO, DOK, and LIL are converted to CSR.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples,)
+            The predicted regression values.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_median_predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">staged_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return staged predictions for X.
+
+        The predicted regression value of an input sample is computed
+        as the weighted median prediction of the classifiers in the ensemble.
+
+        This generator method yields the ensemble prediction after each
+        iteration of boosting and therefore allows monitoring, such as to
+        determine the prediction on a test set after each boost.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples.
+
+        Yields
+        -------
+        y : generator of ndarray of shape (n_samples,)
+            The predicted regression values.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">yield</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_median_predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">limit</span><span class="arithmetic-assignment">=</span><span class="identifier">i</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

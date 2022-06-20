@@ -1,0 +1,483 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Affinity Propagation clustering algorithm."""</span>
+
+<span class="comment"># Author: Alexandre Gramfort alexandre.gramfort@inria.fr</span>
+<span class="comment">#        Gael Varoquaux gael.varoquaux@normalesup.org</span>
+
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">ClusterMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="punctuation">,</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">deprecation</span> <span class="keyword">import</span> <span class="identifier">deprecated</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">euclidean_distances</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">pairwise_distances_argmin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">_config</span> <span class="keyword">import</span> <span class="identifier">config_context</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_equal_similarities_and_preferences</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">preference</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">def</span> <span class="identifier">all_equal_preferences</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">preference</span> <span class="relational-operator">==</span> <span class="identifier">preference</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">all_equal_similarities</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Create mask to ignore diagonal of S</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">fill_diagonal</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">S</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">flat</span> <span class="relational-operator">==</span> <span class="identifier">S</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">all_equal_preferences</span><span class="grouping">(</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">all_equal_similarities</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">affinity_propagation</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">preference</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">convergence_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">15</span><span class="punctuation">,</span>
+                         <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">200</span><span class="punctuation">,</span> <span class="identifier">damping</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                         <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Perform Affinity Propagation Clustering of data.
+
+    Read more in the :ref:`User Guide &lt;affinity_propagation&gt;`.
+
+    Parameters
+    ----------
+
+    S : array-like of shape (n_samples, n_samples)
+        Matrix of similarities between points.
+
+    preference : array-like of shape (n_samples,) or float, default=None
+        Preferences for each point - points with larger values of
+        preferences are more likely to be chosen as exemplars. The number of
+        exemplars, i.e. of clusters, is influenced by the input preferences
+        value. If the preferences are not passed as arguments, they will be
+        set to the median of the input similarities (resulting in a moderate
+        number of clusters). For a smaller amount of clusters, this can be set
+        to the minimum value of the similarities.
+
+    convergence_iter : int, default=15
+        Number of iterations with no change in the number
+        of estimated clusters that stops the convergence.
+
+    max_iter : int, default=200
+        Maximum number of iterations
+
+    damping : float, default=0.5
+        Damping factor between 0.5 and 1.
+
+    copy : bool, default=True
+        If copy is False, the affinity matrix is modified inplace by the
+        algorithm, for memory efficiency.
+
+    verbose : bool, default=False
+        The verbosity level.
+
+    return_n_iter : bool, default=False
+        Whether or not to return the number of iterations.
+
+    random_state : int, RandomState instance or None, default=None
+        Pseudo-random number generator to control the starting state.
+        Use an int for reproducible results across function calls.
+        See the :term:`Glossary &lt;random_state&gt;`.
+
+        .. versionadded:: 0.23
+            this parameter was previously hardcoded as 0.
+
+    Returns
+    -------
+
+    cluster_centers_indices : ndarray of shape (n_clusters,)
+        Index of clusters centers.
+
+    labels : ndarray of shape (n_samples,)
+        Cluster labels for each point.
+
+    n_iter : int
+        Number of iterations run. Returned only if `return_n_iter` is
+        set to True.
+
+    Notes
+    -----
+    For an example, see :ref:`examples/cluster/plot_affinity_propagation.py
+    &lt;sphx_glr_auto_examples_cluster_plot_affinity_propagation.py&gt;`.
+
+    When the algorithm does not converge, it returns an empty array as
+    ``cluster_center_indices`` and ``-1`` as label for each training sample.
+
+    When all training samples have equal similarities and equal preferences,
+    the assignment of cluster centers and labels depends on the preference.
+    If the preference is smaller than the similarities, a single cluster center
+    and label ``0`` for every sample will be returned. Otherwise, every
+    training sample becomes its own cluster center and is assigned a unique
+    label.
+
+    References
+    ----------
+    Brendan J. Frey and Delbert Dueck, "Clustering by Passing Messages
+    Between Data Points", Science Feb. 2007
+    """</span>
+    <span class="identifier">S</span> <span class="arithmetic-assignment">=</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">copy</span><span class="grouping">)</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"S must be a square array (shape=%s)"</span> <span class="arithmetic-operator">%</span> <span class="identifier">repr</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">preference</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">preference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="identifier">S</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">damping</span> <span class="relational-operator">&lt;</span> <span class="float-literal">0.5</span> <span class="logical-operator">or</span> <span class="identifier">damping</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'damping must be &gt;= 0.5 and &lt; 1'</span><span class="grouping">)</span>
+
+    <span class="identifier">preference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">preference</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="relational-operator">==</span> <span class="int-literal">1</span> <span class="logical-operator">or</span>
+            <span class="identifier">_equal_similarities_and_preferences</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">preference</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># It makes no sense to run the algorithm in this case, so return 1 or</span>
+        <span class="comment"># n_samples clusters, depending on preferences</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"All samples have mutually equal similarities. "</span>
+                      <span class="string-literal">"Returning arbitrary cluster center(s)."</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">preference</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&gt;=</span> <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+                    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span>
+                    <span class="keyword">else</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+                    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span>
+                    <span class="keyword">else</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="comment"># Place preference on the diagonal of S</span>
+    <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">preference</span>
+
+    <span class="identifier">A</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">R</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>  <span class="comment"># Initialize messages</span>
+    <span class="comment"># Intermediate results</span>
+    <span class="identifier">tmp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Remove degeneracies</span>
+    <span class="identifier">S</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span> <span class="arithmetic-operator">*</span> <span class="identifier">S</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tiny</span> <span class="arithmetic-operator">*</span> <span class="int-literal">100</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span>
+          <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">randn</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Execute parallel affinity propagation updates</span>
+    <span class="identifier">e</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">convergence_iter</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">ind</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+
+    <span class="keyword">for</span> <span class="identifier">it</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># tmp = A + S; compute responsibilities</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">add</span><span class="grouping">(</span><span class="identifier">A</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">tmp</span><span class="grouping">)</span>
+        <span class="identifier">I</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">tmp</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">Y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tmp</span><span class="grouping">[</span><span class="identifier">ind</span><span class="punctuation">,</span> <span class="identifier">I</span><span class="grouping">]</span>  <span class="comment"># np.max(A + S, axis=1)</span>
+        <span class="identifier">tmp</span><span class="grouping">[</span><span class="identifier">ind</span><span class="punctuation">,</span> <span class="identifier">I</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+        <span class="identifier">Y2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">tmp</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+        <span class="comment"># tmp = Rnew</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">subtract</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Y</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">tmp</span><span class="grouping">)</span>
+        <span class="identifier">tmp</span><span class="grouping">[</span><span class="identifier">ind</span><span class="punctuation">,</span> <span class="identifier">I</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">S</span><span class="grouping">[</span><span class="identifier">ind</span><span class="punctuation">,</span> <span class="identifier">I</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">Y2</span>
+
+        <span class="comment"># Damping</span>
+        <span class="identifier">tmp</span> <span class="arithmetic-assignment">*=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">damping</span>
+        <span class="identifier">R</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">damping</span>
+        <span class="identifier">R</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">tmp</span>
+
+        <span class="comment"># tmp = Rp; compute availabilities</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="identifier">R</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">tmp</span><span class="grouping">)</span>
+        <span class="identifier">tmp</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">R</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="comment"># tmp = -Anew</span>
+        <span class="identifier">tmp</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">tmp</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">dA</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">tmp</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">tmp</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="punctuation">,</span> <span class="identifier">tmp</span><span class="grouping">)</span>
+        <span class="identifier">tmp</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dA</span>
+
+        <span class="comment"># Damping</span>
+        <span class="identifier">tmp</span> <span class="arithmetic-assignment">*=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">damping</span>
+        <span class="identifier">A</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">damping</span>
+        <span class="identifier">A</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">tmp</span>
+
+        <span class="comment"># Check for convergence</span>
+        <span class="identifier">E</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">A</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">R</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+        <span class="identifier">e</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">it</span> <span class="arithmetic-operator">%</span> <span class="identifier">convergence_iter</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">E</span>
+        <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">E</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">it</span> <span class="relational-operator">&gt;=</span> <span class="identifier">convergence_iter</span><span class="punctuation">:</span>
+            <span class="identifier">se</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">e</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">unconverged</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">se</span> <span class="relational-operator">==</span> <span class="identifier">convergence_iter</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">se</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+                           <span class="relational-operator">!=</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="grouping">(</span><span class="logical-operator">not</span> <span class="identifier">unconverged</span> <span class="logical-operator">and</span> <span class="grouping">(</span><span class="identifier">K</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">it</span> <span class="relational-operator">==</span> <span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">never_converged</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+                <span class="keyword">if</span> <span class="identifier">verbose</span><span class="punctuation">:</span>
+                    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Converged after %d iterations."</span> <span class="arithmetic-operator">%</span> <span class="identifier">it</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">never_converged</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">if</span> <span class="identifier">verbose</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Did not converge"</span><span class="grouping">)</span>
+
+    <span class="identifier">I</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">E</span><span class="grouping">)</span>
+    <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">I</span><span class="punctuation">.</span><span class="identifier">size</span>  <span class="comment"># Identify exemplars</span>
+
+    <span class="keyword">if</span> <span class="identifier">K</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">never_converged</span><span class="punctuation">:</span>
+        <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">S</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">I</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">c</span><span class="grouping">[</span><span class="identifier">I</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">K</span><span class="grouping">)</span>  <span class="comment"># Identify clusters</span>
+        <span class="comment"># Refine the final set of exemplars and clusters and return results</span>
+        <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">K</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">c</span> <span class="relational-operator">==</span> <span class="identifier">k</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">j</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">S</span><span class="grouping">[</span><span class="identifier">ii</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">ii</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">I</span><span class="grouping">[</span><span class="identifier">k</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ii</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span>
+
+        <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">S</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">I</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">c</span><span class="grouping">[</span><span class="identifier">I</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">K</span><span class="grouping">)</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">I</span><span class="grouping">[</span><span class="identifier">c</span><span class="grouping">]</span>
+        <span class="comment"># Reduce labels to a sorted, gapless, list</span>
+        <span class="identifier">cluster_centers_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">cluster_centers_indices</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Affinity propagation did not converge, this model "</span>
+                      <span class="string-literal">"will not have any cluster centers."</span><span class="punctuation">,</span> <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">cluster_centers_indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">cluster_centers_indices</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">it</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">cluster_centers_indices</span><span class="punctuation">,</span> <span class="identifier">labels</span>
+
+
+<span class="comment">###############################################################################</span>
+
+<span class="keyword">class</span> <span class="identifier">AffinityPropagation</span><span class="grouping">(</span><span class="identifier">ClusterMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Perform Affinity Propagation Clustering of data.
+
+    Read more in the :ref:`User Guide &lt;affinity_propagation&gt;`.
+
+    Parameters
+    ----------
+    damping : float, default=0.5
+        Damping factor (between 0.5 and 1) is the extent to
+        which the current value is maintained relative to
+        incoming values (weighted 1 - damping). This in order
+        to avoid numerical oscillations when updating these
+        values (messages).
+
+    max_iter : int, default=200
+        Maximum number of iterations.
+
+    convergence_iter : int, default=15
+        Number of iterations with no change in the number
+        of estimated clusters that stops the convergence.
+
+    copy : bool, default=True
+        Make a copy of input data.
+
+    preference : array-like of shape (n_samples,) or float, default=None
+        Preferences for each point - points with larger values of
+        preferences are more likely to be chosen as exemplars. The number
+        of exemplars, ie of clusters, is influenced by the input
+        preferences value. If the preferences are not passed as arguments,
+        they will be set to the median of the input similarities.
+
+    affinity : {'euclidean', 'precomputed'}, default='euclidean'
+        Which affinity to use. At the moment 'precomputed' and
+        ``euclidean`` are supported. 'euclidean' uses the
+        negative squared euclidean distance between points.
+
+    verbose : bool, default=False
+        Whether to be verbose.
+
+    random_state : int, RandomState instance or None, default=None
+        Pseudo-random number generator to control the starting state.
+        Use an int for reproducible results across function calls.
+        See the :term:`Glossary &lt;random_state&gt;`.
+
+        .. versionadded:: 0.23
+            this parameter was previously hardcoded as 0.
+
+    Attributes
+    ----------
+    cluster_centers_indices_ : ndarray of shape (n_clusters,)
+        Indices of cluster centers.
+
+    cluster_centers_ : ndarray of shape (n_clusters, n_features)
+        Cluster centers (if affinity != ``precomputed``).
+
+    labels_ : ndarray of shape (n_samples,)
+        Labels of each point.
+
+    affinity_matrix_ : ndarray of shape (n_samples, n_samples)
+        Stores the affinity matrix used in ``fit``.
+
+    n_iter_ : int
+        Number of iterations taken to converge.
+
+    Notes
+    -----
+    For an example, see :ref:`examples/cluster/plot_affinity_propagation.py
+    &lt;sphx_glr_auto_examples_cluster_plot_affinity_propagation.py&gt;`.
+
+    The algorithmic complexity of affinity propagation is quadratic
+    in the number of points.
+
+    When ``fit`` does not converge, ``cluster_centers_`` becomes an empty
+    array and all training samples will be labelled as ``-1``. In addition,
+    ``predict`` will then label every sample as ``-1``.
+
+    When all training samples have equal similarities and equal preferences,
+    the assignment of cluster centers and labels depends on the preference.
+    If the preference is smaller than the similarities, ``fit`` will result in
+    a single cluster center and label ``0`` for every sample. Otherwise, every
+    training sample becomes its own cluster center and is assigned a unique
+    label.
+
+    References
+    ----------
+
+    Brendan J. Frey and Delbert Dueck, "Clustering by Passing Messages
+    Between Data Points", Science Feb. 2007
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import AffinityPropagation
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[1, 2], [1, 4], [1, 0],
+    ...               [4, 2], [4, 4], [4, 0]])
+    &gt;&gt;&gt; clustering = AffinityPropagation(random_state=5).fit(X)
+    &gt;&gt;&gt; clustering
+    AffinityPropagation(random_state=5)
+    &gt;&gt;&gt; clustering.labels_
+    array([0, 0, 0, 1, 1, 1])
+    &gt;&gt;&gt; clustering.predict([[0, 0], [4, 4]])
+    array([0, 1])
+    &gt;&gt;&gt; clustering.cluster_centers_
+    array([[1, 2],
+           [4, 2]])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">damping</span><span class="arithmetic-assignment">=</span><span class="float-literal">.5</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">200</span><span class="punctuation">,</span> <span class="identifier">convergence_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">15</span><span class="punctuation">,</span>
+                 <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">preference</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="string-literal">'euclidean'</span><span class="punctuation">,</span>
+                 <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">damping</span> <span class="arithmetic-assignment">=</span> <span class="identifier">damping</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">convergence_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">convergence_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">preference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">preference</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">affinity</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="comment"># TODO: Remove in 1.1</span>
+    <span class="comment"># mypy error: Decorated property not supported</span>
+    <span class="punctuation">@</span><span class="identifier">deprecated</span><span class="grouping">(</span><span class="string-literal">"Attribute _pairwise was deprecated in "</span>  <span class="comment"># type: ignore</span>
+                <span class="string-literal">"version 0.24 and will be removed in 1.1 (renaming of 0.26)."</span><span class="grouping">)</span>
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_pairwise</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">"precomputed"</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'pairwise': self.affinity == 'precomputed'</span><span class="grouping">}</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the clustering from features, or affinity matrix.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features), or \
+                array-like of shape (n_samples, n_samples)
+            Training instances to cluster, or similarities / affinities between
+            instances if ``affinity='precomputed'``. If a sparse feature matrix
+            is provided, it will be converted into a sparse ``csr_matrix``.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        self
+
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">"precomputed"</span><span class="punctuation">:</span>
+            <span class="identifier">accept_sparse</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">accept_sparse</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'csr'</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="identifier">accept_sparse</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">"precomputed"</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">"euclidean"</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">euclidean_distances</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">squared</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Affinity must be 'precomputed' or "</span>
+                             <span class="string-literal">"'euclidean'. Got %s instead"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_centers_indices_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labels_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+            <span class="identifier">affinity_propagation</span><span class="grouping">(</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span><span class="punctuation">,</span> <span class="identifier">preference</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">preference</span><span class="punctuation">,</span>
+                <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                <span class="identifier">convergence_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">convergence_iter</span><span class="punctuation">,</span> <span class="identifier">damping</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">damping</span><span class="punctuation">,</span>
+                <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">!=</span> <span class="string-literal">"precomputed"</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_centers_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_centers_indices_</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict the closest cluster each sample in X belongs to.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            New data to predict. If a sparse matrix is provided, it will be
+            converted into a sparse ``csr_matrix``.
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+            Cluster labels.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">"cluster_centers_"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Predict method is not supported when "</span>
+                             <span class="string-literal">"affinity='precomputed'."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_centers_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">with</span> <span class="identifier">config_context</span><span class="grouping">(</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">pairwise_distances_argmin</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cluster_centers_</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"This model does not have any cluster centers "</span>
+                          <span class="string-literal">"because affinity propagation did not converge. "</span>
+                          <span class="string-literal">"Labeling every sample as '-1'."</span><span class="punctuation">,</span> <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the clustering from features or affinity matrix, and return
+        cluster labels.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features), or \
+                array-like of shape (n_samples, n_samples)
+            Training instances to cluster, or similarities / affinities between
+            instances if ``affinity='precomputed'``. If a sparse feature matrix
+            is provided, it will be converted into a sparse ``csr_matrix``.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+            Cluster labels.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit_predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

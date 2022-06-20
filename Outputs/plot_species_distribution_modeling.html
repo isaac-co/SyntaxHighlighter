@@ -1,0 +1,240 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+=============================
+Species distribution modeling
+=============================
+
+Modeling species' geographic distributions is an important
+problem in conservation biology. In this example we
+model the geographic distribution of two south american
+mammals given past observations and 14 environmental
+variables. Since we have only positive examples (there are
+no unsuccessful observations), we cast this problem as a
+density estimation problem and use the :class:`~sklearn.svm.OneClassSVM`
+as our modeling tool. The dataset is provided by Phillips et. al. (2006).
+If available, the example uses
+`basemap &lt;https://matplotlib.org/basemap/&gt;`_
+to plot the coast lines and national boundaries of South America.
+
+The two species are:
+
+ - `"Bradypus variegatus"
+   &lt;http://www.iucnredlist.org/details/3038/0&gt;`_ ,
+   the Brown-throated Sloth.
+
+ - `"Microryzomys minutus"
+   &lt;http://www.iucnredlist.org/details/13408/0&gt;`_ ,
+   also known as the Forest Small Rice Rat, a rodent that lives in Peru,
+   Colombia, Ecuador, Peru, and Venezuela.
+
+References
+----------
+
+ * `"Maximum entropy modeling of species geographic distributions"
+   &lt;http://rob.schapire.net/papers/ecolmod.pdf&gt;`_
+   S. J. Phillips, R. P. Anderson, R. E. Schapire - Ecological Modelling,
+   190:231-259, 2006.
+"""</span>
+
+<span class="comment"># Authors: Peter Prettenhofer &lt;peter.prettenhofer@gmail.com&gt;</span>
+<span class="comment">#          Jake Vanderplas &lt;vanderplas@astro.washington.edu&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">time</span> <span class="keyword">import</span> <span class="identifier">time</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">Bunch</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">datasets</span> <span class="keyword">import</span> <span class="identifier">fetch_species_distributions</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span> <span class="keyword">import</span> <span class="identifier">svm</span><span class="punctuation">,</span> <span class="identifier">metrics</span>
+
+<span class="comment"># if basemap is available, we'll use it.</span>
+<span class="comment"># otherwise, we'll improvise later...</span>
+<span class="keyword">try</span><span class="punctuation">:</span>
+    <span class="keyword">from</span> <span class="identifier">mpl_toolkits</span><span class="punctuation">.</span><span class="identifier">basemap</span> <span class="keyword">import</span> <span class="identifier">Basemap</span>
+    <span class="identifier">basemap</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+<span class="keyword">except</span> <span class="invalid">I</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">E</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">r</span><span class="punctuation">:</span>
+    <span class="identifier">basemap</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">__doc__</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">construct_grids</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Construct the map grid from the batch object
+
+    Parameters
+    ----------
+    batch : Batch object
+        The object returned by :func:`fetch_species_distributions`
+
+    Returns
+    -------
+    (xgrid, ygrid) : 1-D arrays
+        The grid corresponding to the values in batch.coverages
+    """</span>
+    <span class="comment"># x,y coordinates for corner cells</span>
+    <span class="identifier">xmin</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">x_left_lower_corner</span> <span class="arithmetic-operator">+</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span>
+    <span class="identifier">xmax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">xmin</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">Nx</span> <span class="arithmetic-operator">*</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+    <span class="identifier">ymin</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">y_left_lower_corner</span> <span class="arithmetic-operator">+</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span>
+    <span class="identifier">ymax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ymin</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">Ny</span> <span class="arithmetic-operator">*</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+
+    <span class="comment"># x coordinates of the grid cells</span>
+    <span class="identifier">xgrid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">xmin</span><span class="punctuation">,</span> <span class="identifier">xmax</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+    <span class="comment"># y coordinates of the grid cells</span>
+    <span class="identifier">ygrid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">ymin</span><span class="punctuation">,</span> <span class="identifier">ymax</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">ygrid</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">create_species_bunch</span><span class="grouping">(</span><span class="identifier">species_name</span><span class="punctuation">,</span> <span class="identifier">train</span><span class="punctuation">,</span> <span class="identifier">test</span><span class="punctuation">,</span> <span class="identifier">coverages</span><span class="punctuation">,</span> <span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">ygrid</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Create a bunch with information about a particular organism
+
+    This will use the test/train record arrays to extract the
+    data specific to the given species name.
+    """</span>
+    <span class="identifier">bunch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Bunch</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">' '</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">species_name</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="int-literal">2</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">species_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">species_name</span><span class="punctuation">.</span><span class="identifier">encode</span><span class="grouping">(</span><span class="string-literal">'ascii'</span><span class="grouping">)</span>
+    <span class="identifier">points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">test</span><span class="arithmetic-assignment">=</span><span class="identifier">test</span><span class="punctuation">,</span> <span class="identifier">train</span><span class="arithmetic-assignment">=</span><span class="identifier">train</span><span class="grouping">)</span>
+
+    <span class="keyword">for</span> <span class="identifier">label</span><span class="punctuation">,</span> <span class="identifier">pts</span> <span class="relational-operator">in</span> <span class="identifier">points</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># choose points associated with the desired species</span>
+        <span class="identifier">pts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pts</span><span class="grouping">[</span><span class="identifier">pts</span><span class="grouping">[</span><span class="string-literal">'species'</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">species_name</span><span class="grouping">]</span>
+        <span class="identifier">bunch</span><span class="grouping">[</span><span class="string-literal">'pts_%s'</span> <span class="arithmetic-operator">%</span> <span class="identifier">label</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pts</span>
+
+        <span class="comment"># determine coverage values for each of the training & testing points</span>
+        <span class="identifier">ix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">pts</span><span class="grouping">[</span><span class="string-literal">'dd long'</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">iy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">ygrid</span><span class="punctuation">,</span> <span class="identifier">pts</span><span class="grouping">[</span><span class="string-literal">'dd lat'</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">bunch</span><span class="grouping">[</span><span class="string-literal">'cov_%s'</span> <span class="arithmetic-operator">%</span> <span class="identifier">label</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coverages</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">iy</span><span class="punctuation">,</span> <span class="identifier">ix</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+    <span class="keyword">return</span> <span class="identifier">bunch</span>
+
+
+<span class="keyword">def</span> <span class="identifier">plot_species_distribution</span><span class="grouping">(</span><span class="identifier">species</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="string-literal">"bradypus_variegatus_0"</span><span class="punctuation">,</span>
+                                       <span class="string-literal">"microryzomys_minutus_0"</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Plot the species distribution.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">species</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Note: when more than two species are provided,"</span>
+              <span class="string-literal">" only the first two will be used"</span><span class="grouping">)</span>
+
+    <span class="identifier">t0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># Load the compressed data</span>
+    <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fetch_species_distributions</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># Set up the data grid</span>
+    <span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">ygrid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">construct_grids</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span>
+
+    <span class="comment"># The grid in x,y coordinates</span>
+    <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">Y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">meshgrid</span><span class="grouping">(</span><span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">ygrid</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="comment"># create a bunch for each species</span>
+    <span class="identifier">BV_bunch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">create_species_bunch</span><span class="grouping">(</span><span class="identifier">species</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                    <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">train</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">test</span><span class="punctuation">,</span>
+                                    <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">coverages</span><span class="punctuation">,</span> <span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">ygrid</span><span class="grouping">)</span>
+    <span class="identifier">MM_bunch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">create_species_bunch</span><span class="grouping">(</span><span class="identifier">species</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                    <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">train</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">test</span><span class="punctuation">,</span>
+                                    <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">coverages</span><span class="punctuation">,</span> <span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">ygrid</span><span class="grouping">)</span>
+
+    <span class="comment"># background points (grid coordinates) for evaluation</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">random</span><span class="punctuation">.</span><span class="identifier">seed</span><span class="grouping">(</span><span class="int-literal">13</span><span class="grouping">)</span>
+    <span class="identifier">background_points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">c_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">random</span><span class="punctuation">.</span><span class="identifier">randint</span><span class="grouping">(</span><span class="identifier">low</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">high</span><span class="arithmetic-assignment">=</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">Ny</span><span class="punctuation">,</span>
+                                                <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">10000</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">random</span><span class="punctuation">.</span><span class="identifier">randint</span><span class="grouping">(</span><span class="identifier">low</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">high</span><span class="arithmetic-assignment">=</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">Nx</span><span class="punctuation">,</span>
+                                                <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">10000</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+    <span class="comment"># We'll make use of the fact that coverages[6] has measurements at all</span>
+    <span class="comment"># land points.  This will help us decide between land and water.</span>
+    <span class="identifier">land_reference</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">coverages</span><span class="grouping">[</span><span class="int-literal">6</span><span class="grouping">]</span>
+
+    <span class="comment"># Fit, predict, and plot for each species.</span>
+    <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">species</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">BV_bunch</span><span class="punctuation">,</span> <span class="identifier">MM_bunch</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"_"</span> <span class="arithmetic-operator">*</span> <span class="int-literal">80</span><span class="grouping">)</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Modeling distribution of species '%s'"</span> <span class="arithmetic-operator">%</span> <span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">name</span><span class="grouping">)</span>
+
+        <span class="comment"># Standardize features</span>
+        <span class="identifier">mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">cov_train</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">std</span> <span class="arithmetic-assignment">=</span> <span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">cov_train</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">train_cover_std</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">cov_train</span> <span class="arithmetic-operator">-</span> <span class="identifier">mean</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">std</span>
+
+        <span class="comment"># Fit OneClassSVM</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">" - fit OneClassSVM ... "</span><span class="punctuation">,</span> <span class="identifier">end</span><span class="arithmetic-assignment">=</span><span class="string-literal">''</span><span class="grouping">)</span>
+        <span class="identifier">clf</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svm</span><span class="punctuation">.</span><span class="identifier">OneClassSVM</span><span class="grouping">(</span><span class="identifier">nu</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.1</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="string-literal">"rbf"</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+        <span class="identifier">clf</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">train_cover_std</span><span class="grouping">)</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"done."</span><span class="grouping">)</span>
+
+        <span class="comment"># Plot map of South America</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplot</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">basemap</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">" - plot coastlines using basemap"</span><span class="grouping">)</span>
+            <span class="identifier">m</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Basemap</span><span class="grouping">(</span><span class="identifier">projection</span><span class="arithmetic-assignment">=</span><span class="string-literal">'cyl'</span><span class="punctuation">,</span> <span class="identifier">llcrnrlat</span><span class="arithmetic-assignment">=</span><span class="identifier">Y</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                        <span class="identifier">urcrnrlat</span><span class="arithmetic-assignment">=</span><span class="identifier">Y</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">llcrnrlon</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                        <span class="identifier">urcrnrlon</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">resolution</span><span class="arithmetic-assignment">=</span><span class="string-literal">'c'</span><span class="grouping">)</span>
+            <span class="identifier">m</span><span class="punctuation">.</span><span class="identifier">drawcoastlines</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">m</span><span class="punctuation">.</span><span class="identifier">drawcountries</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">" - plot coastlines from coverage"</span><span class="grouping">)</span>
+            <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">contour</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">Y</span><span class="punctuation">,</span> <span class="identifier">land_reference</span><span class="punctuation">,</span>
+                        <span class="identifier">levels</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">9998</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">colors</span><span class="arithmetic-assignment">=</span><span class="string-literal">"k"</span><span class="punctuation">,</span>
+                        <span class="identifier">linestyles</span><span class="arithmetic-assignment">=</span><span class="string-literal">"solid"</span><span class="grouping">)</span>
+            <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xticks</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">yticks</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">" - predict species distribution"</span><span class="grouping">)</span>
+
+        <span class="comment"># Predict species distribution using the training data</span>
+        <span class="identifier">Z</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">Ny</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">Nx</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+
+        <span class="comment"># We'll predict only for the land points.</span>
+        <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">land_reference</span> <span class="relational-operator">&gt;</span> <span class="arithmetic-operator">-</span><span class="int-literal">9999</span><span class="grouping">)</span>
+        <span class="identifier">coverages_land</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">coverages</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+        <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clf</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">coverages_land</span> <span class="arithmetic-operator">-</span> <span class="identifier">mean</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">std</span><span class="grouping">)</span>
+        <span class="identifier">Z</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">pred</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">Z</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pred</span>
+
+        <span class="identifier">levels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linspace</span><span class="grouping">(</span><span class="identifier">Z</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">Z</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">25</span><span class="grouping">)</span>
+        <span class="identifier">Z</span><span class="grouping">[</span><span class="identifier">land_reference</span> <span class="relational-operator">==</span> <span class="arithmetic-operator">-</span><span class="int-literal">9999</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">9999</span>
+
+        <span class="comment"># plot contours of the prediction</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">contourf</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">Y</span><span class="punctuation">,</span> <span class="identifier">Z</span><span class="punctuation">,</span> <span class="identifier">levels</span><span class="arithmetic-assignment">=</span><span class="identifier">levels</span><span class="punctuation">,</span> <span class="identifier">cmap</span><span class="arithmetic-assignment">=</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">cm</span><span class="punctuation">.</span><span class="identifier">Reds</span><span class="grouping">)</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">colorbar</span><span class="grouping">(</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="string-literal">'%.2f'</span><span class="grouping">)</span>
+
+        <span class="comment"># scatter training/testing points</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">pts_train</span><span class="grouping">[</span><span class="string-literal">'dd long'], species.pts_train['dd lat'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">s</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">c</span><span class="arithmetic-assignment">=</span><span class="string-literal">'black'</span><span class="punctuation">,</span>
+                    <span class="identifier">marker</span><span class="arithmetic-assignment">=</span><span class="string-literal">'^', label='train'</span><span class="grouping">)</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">pts_test</span><span class="grouping">[</span><span class="string-literal">'dd long'], species.pts_test['dd lat'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">s</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">c</span><span class="arithmetic-assignment">=</span><span class="string-literal">'black'</span><span class="punctuation">,</span>
+                    <span class="identifier">marker</span><span class="arithmetic-assignment">=</span><span class="string-literal">'x', label='test'</span><span class="grouping">)</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">legend</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">name</span><span class="grouping">)</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">(</span><span class="string-literal">'equal'</span><span class="grouping">)</span>
+
+        <span class="comment"># Compute AUC with regards to background points</span>
+        <span class="identifier">pred_background</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Z</span><span class="grouping">[</span><span class="identifier">background_points</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">background_points</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="identifier">pred_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clf</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">species</span><span class="punctuation">.</span><span class="identifier">cov_test</span> <span class="arithmetic-operator">-</span> <span class="identifier">mean</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">std</span><span class="grouping">)</span>
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="identifier">pred_test</span><span class="punctuation">,</span> <span class="identifier">pred_background</span><span class="grouping">]</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">pred_test</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">pred_background</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">fpr</span><span class="punctuation">,</span> <span class="identifier">tpr</span><span class="punctuation">,</span> <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">roc_curve</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">scores</span><span class="grouping">)</span>
+        <span class="identifier">roc_auc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">auc</span><span class="grouping">(</span><span class="identifier">fpr</span><span class="punctuation">,</span> <span class="identifier">tpr</span><span class="grouping">)</span>
+        <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">text</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">35</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">70</span><span class="punctuation">,</span> <span class="string-literal">"AUC: %.3f" % roc_auc, ha="right"</span><span class="grouping">)</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"\n Area under the ROC curve : %f"</span> <span class="arithmetic-operator">%</span> <span class="identifier">roc_auc</span><span class="grouping">)</span>
+
+    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"\ntime elapsed: %.2fs"</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">t0</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="identifier">plot_species_distribution</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">show</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

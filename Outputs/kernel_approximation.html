@@ -1,0 +1,846 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+The :mod:`sklearn.kernel_approximation` module implements several
+approximate kernel feature maps based on Fourier transforms and Count Sketches.
+"""</span>
+
+<span class="comment"># Author: Andreas Mueller &lt;amueller@ais.uni-bonn.de&gt;</span>
+<span class="comment">#         Daniel Lopez-Sanchez (TensorSketch) &lt;lope@usal.es&gt;</span>
+
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">as</span> <span class="identifier">sp</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">svd</span>
+<span class="keyword">try</span><span class="punctuation">:</span>
+    <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">fft</span> <span class="keyword">import</span> <span class="identifier">fft</span><span class="punctuation">,</span> <span class="invalid">i</span><span class="invalid">f</span><span class="invalid">f</span><span class="invalid">t</span>
+<span class="keyword">except</span> <span class="invalid">I</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">E</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">r</span><span class="punctuation">:</span>   <span class="comment"># scipy &lt; 1.4</span>
+    <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">fftpack</span> <span class="keyword">import</span> <span class="identifier">fft</span><span class="punctuation">,</span> <span class="invalid">i</span><span class="invalid">f</span><span class="invalid">f</span><span class="invalid">t</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">safe_sparse_dot</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">pairwise_kernels</span><span class="punctuation">,</span> <span class="identifier">KERNEL_PARAMS</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_non_negative</span>
+
+
+<span class="keyword">class</span> <span class="identifier">PolynomialCountSketch</span><span class="grouping">(</span><span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Polynomial kernel approximation via Tensor Sketch.
+
+    Implements Tensor Sketch, which approximates the feature map
+    of the polynomial kernel::
+
+        K(X, Y) = (gamma * &lt;X, Y&gt; + coef0)^degree
+
+    by efficiently computing a Count Sketch of the outer product of a
+    vector with itself using Fast Fourier Transforms (FFT). Read more in the
+    :ref:`User Guide &lt;polynomial_kernel_approx&gt;`.
+
+    .. versionadded:: 0.24
+
+    Parameters
+    ----------
+    gamma : float, default=1.0
+        Parameter of the polynomial kernel whose feature map
+        will be approximated.
+
+    degree : int, default=2
+        Degree of the polynomial kernel whose feature map
+        will be approximated.
+
+    coef0 : int, default=0
+        Constant term of the polynomial kernel whose feature map
+        will be approximated.
+
+    n_components : int, default=100
+        Dimensionality of the output feature space. Usually, n_components
+        should be greater than the number of features in input samples in
+        order to achieve good performance. The optimal score / run time
+        balance is typically achieved around n_components = 10 * n_features,
+        but this depends on the specific dataset being used.
+
+    random_state : int, RandomState instance, default=None
+        Determines random number generation for indexHash and bitHash
+        initialization. Pass an int for reproducible results across multiple
+        function calls. See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    indexHash_ : ndarray of shape (degree, n_features), dtype=int64
+        Array of indexes in range [0, n_components) used to represent
+        the 2-wise independent hash functions for Count Sketch computation.
+
+    bitHash_ : ndarray of shape (degree, n_features), dtype=float32
+        Array with random entries in {+1, -1}, used to represent
+        the 2-wise independent hash functions for Count Sketch computation.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.kernel_approximation import PolynomialCountSketch
+    &gt;&gt;&gt; from sklearn.linear_model import SGDClassifier
+    &gt;&gt;&gt; X = [[0, 0], [1, 1], [1, 0], [0, 1]]
+    &gt;&gt;&gt; y = [0, 0, 1, 1]
+    &gt;&gt;&gt; ps = PolynomialCountSketch(degree=3, random_state=1)
+    &gt;&gt;&gt; X_features = ps.fit_transform(X)
+    &gt;&gt;&gt; clf = SGDClassifier(max_iter=10, tol=1e-3)
+    &gt;&gt;&gt; clf.fit(X_features, y)
+    SGDClassifier(max_iter=10)
+    &gt;&gt;&gt; clf.score(X_features, y)
+    1.0
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">degree</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">coef0</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gamma</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">degree</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model with X.
+
+        Initializes the internal variables. The method needs no information
+        about the distribution of data, so we only care about n_features in X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Training data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        self : object
+            Returns the transformer.
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"degree={self.degree} should be &gt;=1."</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">"csc"</span><span class="grouping">)</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">n_features</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">indexHash_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">randint</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">high</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="punctuation">,</span>
+                                               <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bitHash_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">choice</span><span class="grouping">(</span><span class="identifier">a</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                            <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Generate the feature map approximation for X.
+
+        Parameters
+        ----------
+        X : {array-like}, shape (n_samples, n_features)
+            New data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        X_new : array-like, shape (n_samples, n_components)
+        """</span>
+
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">"csc"</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="identifier">X_gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span>
+
+        <span class="keyword">if</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X_gamma</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">X_gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">hstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">X_gamma</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span>
+                                 <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">X_gamma</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="string-literal">"csc"</span><span class="grouping">)</span>
+
+        <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X_gamma</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">X_gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">hstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">X_gamma</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span>
+                                 <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">X_gamma</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">X_gamma</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">indexHash_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Number of features of test samples does not"</span>
+                             <span class="string-literal">" match that of training samples."</span><span class="grouping">)</span>
+
+        <span class="identifier">count_sketches</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span>
+            <span class="grouping">(</span><span class="identifier">X_gamma</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X_gamma</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X_gamma</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">for</span> <span class="identifier">d</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">iHashIndex</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">indexHash_</span><span class="grouping">[</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>
+                    <span class="identifier">iHashBit</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bitHash_</span><span class="grouping">[</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>
+                    <span class="identifier">count_sketches</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">iHashIndex</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="invalid">\</span>
+                        <span class="grouping">(</span><span class="identifier">iHashBit</span> <span class="arithmetic-operator">*</span> <span class="identifier">X_gamma</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">toarray</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X_gamma</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">for</span> <span class="identifier">d</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">iHashIndex</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">indexHash_</span><span class="grouping">[</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>
+                    <span class="identifier">iHashBit</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bitHash_</span><span class="grouping">[</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>
+                    <span class="identifier">count_sketches</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">iHashIndex</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="invalid">\</span>
+                        <span class="identifier">iHashBit</span> <span class="arithmetic-operator">*</span> <span class="identifier">X_gamma</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>
+
+        <span class="comment"># For each same, compute a count sketch of phi(x) using the polynomial</span>
+        <span class="comment"># multiplication (via FFT) of p count sketches of x.</span>
+        <span class="identifier">count_sketches_fft</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fft</span><span class="grouping">(</span><span class="identifier">count_sketches</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">overwrite_x</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">count_sketches_fft_prod</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">prod</span><span class="grouping">(</span><span class="identifier">count_sketches_fft</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">data_sketch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">real</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">f</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">count_sketches_fft_prod</span><span class="punctuation">,</span> <span class="identifier">overwrite_x</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">data_sketch</span>
+
+
+<span class="keyword">class</span> <span class="identifier">RBFSampler</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Approximates feature map of an RBF kernel by Monte Carlo approximation
+    of its Fourier transform.
+
+    It implements a variant of Random Kitchen Sinks.[1]
+
+    Read more in the :ref:`User Guide &lt;rbf_kernel_approx&gt;`.
+
+    Parameters
+    ----------
+    gamma : float, default=1.0
+        Parameter of RBF kernel: exp(-gamma * x^2)
+
+    n_components : int, default=100
+        Number of Monte Carlo samples per original feature.
+        Equals the dimensionality of the computed feature space.
+
+    random_state : int, RandomState instance or None, default=None
+        Pseudo-random number generator to control the generation of the random
+        weights and random offset when fitting the training data.
+        Pass an int for reproducible output across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    random_offset_ : ndarray of shape (n_components,), dtype=float64
+        Random offset used to compute the projection in the `n_components`
+        dimensions of the feature space.
+
+    random_weights_ : ndarray of shape (n_features, n_components),\
+        dtype=float64
+        Random projection directions drawn from the Fourier transform
+        of the RBF kernel.
+
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.kernel_approximation import RBFSampler
+    &gt;&gt;&gt; from sklearn.linear_model import SGDClassifier
+    &gt;&gt;&gt; X = [[0, 0], [1, 1], [1, 0], [0, 1]]
+    &gt;&gt;&gt; y = [0, 0, 1, 1]
+    &gt;&gt;&gt; rbf_feature = RBFSampler(gamma=1, random_state=1)
+    &gt;&gt;&gt; X_features = rbf_feature.fit_transform(X)
+    &gt;&gt;&gt; clf = SGDClassifier(max_iter=5, tol=1e-3)
+    &gt;&gt;&gt; clf.fit(X_features, y)
+    SGDClassifier(max_iter=5)
+    &gt;&gt;&gt; clf.score(X_features, y)
+    1.0
+
+    Notes
+    -----
+    See "Random Features for Large-Scale Kernel Machines" by A. Rahimi and
+    Benjamin Recht.
+
+    [1] "Weighted Sums of Random Kitchen Sinks: Replacing
+    minimization with randomization in learning" by A. Rahimi and
+    Benjamin Recht.
+    (https://people.eecs.berkeley.edu/~brecht/papers/08.rah.rec.nips.pdf)
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gamma</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model with X.
+
+        Samples random projection according to n_features.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix}, shape (n_samples, n_features)
+            Training data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        self : object
+            Returns the transformer.
+        """</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="grouping">)</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_weights_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">normal</span><span class="grouping">(</span>
+            <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_offset_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">uniform</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="punctuation">,</span>
+                                                   <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply the approximate feature map to X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix}, shape (n_samples, n_features)
+            New data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        X_new : array-like, shape (n_samples, n_components)
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">projection</span> <span class="arithmetic-assignment">=</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_weights_</span><span class="grouping">)</span>
+        <span class="identifier">projection</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_offset_</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cos</span><span class="grouping">(</span><span class="identifier">projection</span><span class="punctuation">,</span> <span class="identifier">projection</span><span class="grouping">)</span>
+        <span class="identifier">projection</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">projection</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SkewedChi2Sampler</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Approximates feature map of the "skewed chi-squared" kernel by Monte
+    Carlo approximation of its Fourier transform.
+
+    Read more in the :ref:`User Guide &lt;skewed_chi_kernel_approx&gt;`.
+
+    Parameters
+    ----------
+    skewedness : float, default=1.0
+        "skewedness" parameter of the kernel. Needs to be cross-validated.
+
+    n_components : int, default=100
+        number of Monte Carlo samples per original feature.
+        Equals the dimensionality of the computed feature space.
+
+    random_state : int, RandomState instance or None, default=None
+        Pseudo-random number generator to control the generation of the random
+        weights and random offset when fitting the training data.
+        Pass an int for reproducible output across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    random_weights_ : ndarray of shape (n_features, n_components)
+        Weight array, sampled from a secant hyperbolic distribution, which will
+        be used to linearly transform the log of the data.
+
+    random_offset_ : ndarray of shape (n_features, n_components)
+        Bias term, which will be added to the data. It is uniformly distributed
+        between 0 and 2*pi.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.kernel_approximation import SkewedChi2Sampler
+    &gt;&gt;&gt; from sklearn.linear_model import SGDClassifier
+    &gt;&gt;&gt; X = [[0, 0], [1, 1], [1, 0], [0, 1]]
+    &gt;&gt;&gt; y = [0, 0, 1, 1]
+    &gt;&gt;&gt; chi2_feature = SkewedChi2Sampler(skewedness=.01,
+    ...                                  n_components=10,
+    ...                                  random_state=0)
+    &gt;&gt;&gt; X_features = chi2_feature.fit_transform(X, y)
+    &gt;&gt;&gt; clf = SGDClassifier(max_iter=10, tol=1e-3)
+    &gt;&gt;&gt; clf.fit(X_features, y)
+    SGDClassifier(max_iter=10)
+    &gt;&gt;&gt; clf.score(X_features, y)
+    1.0
+
+    References
+    ----------
+    See "Random Fourier Approximations for Skewed Multiplicative Histogram
+    Kernels" by Fuxin Li, Catalin Ionescu and Cristian Sminchisescu.
+
+    See Also
+    --------
+    AdditiveChi2Sampler : A different approach for approximating an additive
+        variant of the chi squared kernel.
+
+    sklearn.metrics.pairwise.chi2_kernel : The exact chi squared kernel.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">skewedness</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">skewedness</span> <span class="arithmetic-assignment">=</span> <span class="identifier">skewedness</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model with X.
+
+        Samples random projection according to n_features.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        self : object
+            Returns the transformer.
+        """</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">uniform</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">uniform</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="comment"># transform by inverse CDF of sech</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_weights_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span>
+                                <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">tan</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">uniform</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_offset_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">uniform</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="punctuation">,</span>
+                                                   <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply the approximate feature map to X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            New data, where n_samples in the number of samples
+            and n_features is the number of features. All values of X must be
+            strictly greater than "-skewedness".
+
+        Returns
+        -------
+        X_new : array-like, shape (n_samples, n_components)
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">X</span> <span class="relational-operator">&lt;=</span> <span class="arithmetic-operator">-</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">skewedness</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"X may not contain entries smaller than"</span>
+                             <span class="string-literal">" -skewedness."</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">skewedness</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">projection</span> <span class="arithmetic-assignment">=</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_weights_</span><span class="grouping">)</span>
+        <span class="identifier">projection</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_offset_</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cos</span><span class="grouping">(</span><span class="identifier">projection</span><span class="punctuation">,</span> <span class="identifier">projection</span><span class="grouping">)</span>
+        <span class="identifier">projection</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">projection</span>
+
+
+<span class="keyword">class</span> <span class="identifier">AdditiveChi2Sampler</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Approximate feature map for additive chi2 kernel.
+
+    Uses sampling the fourier transform of the kernel characteristic
+    at regular intervals.
+
+    Since the kernel that is to be approximated is additive, the components of
+    the input vectors can be treated separately.  Each entry in the original
+    space is transformed into 2*sample_steps+1 features, where sample_steps is
+    a parameter of the method. Typical values of sample_steps include 1, 2 and
+    3.
+
+    Optimal choices for the sampling interval for certain data ranges can be
+    computed (see the reference). The default values should be reasonable.
+
+    Read more in the :ref:`User Guide &lt;additive_chi_kernel_approx&gt;`.
+
+    Parameters
+    ----------
+    sample_steps : int, default=2
+        Gives the number of (complex) sampling points.
+    sample_interval : float, default=None
+        Sampling interval. Must be specified when sample_steps not in {1,2,3}.
+
+    Attributes
+    ----------
+    sample_interval_ : float
+        Stored sampling interval. Specified as a parameter if sample_steps not
+        in {1,2,3}.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.datasets import load_digits
+    &gt;&gt;&gt; from sklearn.linear_model import SGDClassifier
+    &gt;&gt;&gt; from sklearn.kernel_approximation import AdditiveChi2Sampler
+    &gt;&gt;&gt; X, y = load_digits(return_X_y=True)
+    &gt;&gt;&gt; chi2sampler = AdditiveChi2Sampler(sample_steps=2)
+    &gt;&gt;&gt; X_transformed = chi2sampler.fit_transform(X, y)
+    &gt;&gt;&gt; clf = SGDClassifier(max_iter=5, random_state=0, tol=1e-3)
+    &gt;&gt;&gt; clf.fit(X_transformed, y)
+    SGDClassifier(max_iter=5, random_state=0)
+    &gt;&gt;&gt; clf.score(X_transformed, y)
+    0.9499...
+
+    Notes
+    -----
+    This estimator approximates a slightly different version of the additive
+    chi squared kernel then ``metric.additive_chi2`` computes.
+
+    See Also
+    --------
+    SkewedChi2Sampler : A Fourier-approximation to a non-additive variant of
+        the chi squared kernel.
+
+    sklearn.metrics.pairwise.chi2_kernel : The exact chi squared kernel.
+
+    sklearn.metrics.pairwise.additive_chi2_kernel : The exact additive chi
+        squared kernel.
+
+    References
+    ----------
+    See `"Efficient additive kernels via explicit feature maps"
+    &lt;http://www.robots.ox.ac.uk/~vedaldi/assets/pubs/vedaldi11efficient.pdf&gt;`_
+    A. Vedaldi and A. Zisserman, Pattern Analysis and Machine Intelligence,
+    2011
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_steps</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">sample_interval</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_steps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_steps</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_interval</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Set the parameters
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training data, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        self : object
+            Returns the transformer.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="grouping">)</span>
+        <span class="identifier">check_non_negative</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">'X in AdditiveChi2Sampler.fit'</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="comment"># See reference, figure 2 c)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_steps</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.8</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_steps</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_steps</span> <span class="relational-operator">==</span> <span class="int-literal">3</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.4</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"If sample_steps is not in [1, 2, 3],"</span>
+                                 <span class="string-literal">" you need to provide sample_interval"</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply approximate feature map to X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+
+        Returns
+        -------
+        X_new : {ndarray, sparse matrix}, \
+               shape = (n_samples, n_features * (2*sample_steps + 1))
+            Whether the return value is an array of sparse matrix depends on
+            the type of the input X.
+        """</span>
+        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"%(name)s is not fitted. Call fit to set the parameters before"</span>
+               <span class="string-literal">" calling transform"</span><span class="grouping">)</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">msg</span><span class="arithmetic-assignment">=</span><span class="identifier">msg</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">check_non_negative</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">'X in AdditiveChi2Sampler.transform'</span><span class="grouping">)</span>
+        <span class="identifier">sparse</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="comment"># zeroth component</span>
+        <span class="comment"># 1/cosh = sech</span>
+        <span class="comment"># cosh(0) = 1.0</span>
+
+        <span class="identifier">transf</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_transform_sparse</span> <span class="keyword">if</span> <span class="identifier">sparse</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_transform_dense</span>
+        <span class="keyword">return</span> <span class="identifier">transf</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_transform_dense</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">non_zero</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">X</span> <span class="relational-operator">!=</span> <span class="float-literal">0.0</span><span class="grouping">)</span>
+        <span class="identifier">X_nz</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">non_zero</span><span class="grouping">]</span>
+
+        <span class="identifier">X_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">X_step</span><span class="grouping">[</span><span class="identifier">non_zero</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">X_nz</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span><span class="grouping">)</span>
+
+        <span class="identifier">X_new</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">X_step</span><span class="grouping">]</span>
+
+        <span class="identifier">log_step_nz</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">X_nz</span><span class="grouping">)</span>
+        <span class="identifier">step_nz</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">X_nz</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span>
+
+        <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_steps</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">factor_nz</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">step_nz</span> <span class="arithmetic-operator">/</span>
+                                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cosh</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span> <span class="arithmetic-operator">*</span> <span class="identifier">j</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">X_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="identifier">X_step</span><span class="grouping">[</span><span class="identifier">non_zero</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">factor_nz</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cos</span><span class="grouping">(</span><span class="identifier">j</span> <span class="arithmetic-operator">*</span> <span class="identifier">log_step_nz</span><span class="grouping">)</span>
+            <span class="identifier">X_new</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">X_step</span><span class="grouping">)</span>
+
+            <span class="identifier">X_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="identifier">X_step</span><span class="grouping">[</span><span class="identifier">non_zero</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">factor_nz</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sin</span><span class="grouping">(</span><span class="identifier">j</span> <span class="arithmetic-operator">*</span> <span class="identifier">log_step_nz</span><span class="grouping">)</span>
+            <span class="identifier">X_new</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">X_step</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">hstack</span><span class="grouping">(</span><span class="identifier">X_new</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_transform_sparse</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indices</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">indptr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indptr</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">data_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span><span class="grouping">)</span>
+        <span class="identifier">X_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">csr_matrix</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">data_step</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">indptr</span><span class="grouping">)</span><span class="punctuation">,</span>
+                               <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">X_new</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">X_step</span><span class="grouping">]</span>
+
+        <span class="identifier">log_step_nz</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">step_nz</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span>
+
+        <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_steps</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">factor_nz</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">step_nz</span> <span class="arithmetic-operator">/</span>
+                                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cosh</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span> <span class="arithmetic-operator">*</span> <span class="identifier">j</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_interval_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">data_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">factor_nz</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cos</span><span class="grouping">(</span><span class="identifier">j</span> <span class="arithmetic-operator">*</span> <span class="identifier">log_step_nz</span><span class="grouping">)</span>
+            <span class="identifier">X_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">csr_matrix</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">data_step</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">indptr</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                   <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="identifier">X_new</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">X_step</span><span class="grouping">)</span>
+
+            <span class="identifier">data_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">factor_nz</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sin</span><span class="grouping">(</span><span class="identifier">j</span> <span class="arithmetic-operator">*</span> <span class="identifier">log_step_nz</span><span class="grouping">)</span>
+            <span class="identifier">X_step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">csr_matrix</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">data_step</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">indptr</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                   <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="identifier">X_new</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">X_step</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">hstack</span><span class="grouping">(</span><span class="identifier">X_new</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'stateless'</span><span class="punctuation">:</span> <span class="bool-literal">True</span><span class="punctuation">,</span>
+                <span class="string-literal">'requires_positive_X'</span><span class="punctuation">:</span> <span class="bool-literal">True</span><span class="grouping">}</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Nystroem</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Approximate a kernel map using a subset of the training data.
+
+    Constructs an approximate feature map for an arbitrary kernel
+    using a subset of the data as basis.
+
+    Read more in the :ref:`User Guide &lt;nystroem_kernel_approx&gt;`.
+
+    .. versionadded:: 0.13
+
+    Parameters
+    ----------
+    kernel : string or callable, default='rbf'
+        Kernel map to be approximated. A callable should accept two arguments
+        and the keyword arguments passed to this object as kernel_params, and
+        should return a floating point number.
+
+    gamma : float, default=None
+        Gamma parameter for the RBF, laplacian, polynomial, exponential chi2
+        and sigmoid kernels. Interpretation of the default value is left to
+        the kernel; see the documentation for sklearn.metrics.pairwise.
+        Ignored by other kernels.
+
+    coef0 : float, default=None
+        Zero coefficient for polynomial and sigmoid kernels.
+        Ignored by other kernels.
+
+    degree : float, default=None
+        Degree of the polynomial kernel. Ignored by other kernels.
+
+    kernel_params : dict, default=None
+        Additional parameters (keyword arguments) for kernel function passed
+        as callable object.
+
+    n_components : int, default=100
+        Number of features to construct.
+        How many data points will be used to construct the mapping.
+
+    random_state : int, RandomState instance or None, default=None
+        Pseudo-random number generator to control the uniform sampling without
+        replacement of n_components of the training data to construct the basis
+        kernel.
+        Pass an int for reproducible output across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    n_jobs : int, default=None
+        The number of jobs to use for the computation. This works by breaking
+        down the kernel matrix into n_jobs even slices and computing them in
+        parallel.
+
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        Subset of training points used to construct the feature map.
+
+    component_indices_ : ndarray of shape (n_components)
+        Indices of ``components_`` in the training set.
+
+    normalization_ : ndarray of shape (n_components, n_components)
+        Normalization matrix needed for embedding.
+        Square root of the kernel matrix on ``components_``.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn import datasets, svm
+    &gt;&gt;&gt; from sklearn.kernel_approximation import Nystroem
+    &gt;&gt;&gt; X, y = datasets.load_digits(n_class=9, return_X_y=True)
+    &gt;&gt;&gt; data = X / 16.
+    &gt;&gt;&gt; clf = svm.LinearSVC()
+    &gt;&gt;&gt; feature_map_nystroem = Nystroem(gamma=.2,
+    ...                                 random_state=1,
+    ...                                 n_components=300)
+    &gt;&gt;&gt; data_transformed = feature_map_nystroem.fit_transform(data)
+    &gt;&gt;&gt; clf.fit(data_transformed, y)
+    LinearSVC()
+    &gt;&gt;&gt; clf.score(data_transformed, y)
+    0.9987...
+
+    References
+    ----------
+    * Williams, C.K.I. and Seeger, M.
+      "Using the Nystroem method to speed up kernel machines",
+      Advances in neural information processing systems 2001
+
+    * T. Yang, Y. Li, M. Mahdavi, R. Jin and Z. Zhou
+      "Nystroem Method vs Random Fourier Features: A Theoretical and Empirical
+      Comparison",
+      Advances in Neural Information Processing Systems 2012
+
+
+    See Also
+    --------
+    RBFSampler : An approximation to the RBF kernel using random Fourier
+        features.
+
+    sklearn.metrics.pairwise.kernel_metrics : List of built-in kernels.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="string-literal">"rbf"</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">coef0</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">degree</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">kernel_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gamma</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">degree</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_params</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit estimator to data.
+
+        Samples a subset of training points, computes kernel
+        on these and computes normalization matrix.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="grouping">)</span>
+        <span class="identifier">rnd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+        <span class="comment"># get basis vectors</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+            <span class="comment"># XXX should we just bail?</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"n_components &gt; n_samples. This is not possible.\n"</span>
+                          <span class="string-literal">"n_components was set to n_samples, which results"</span>
+                          <span class="string-literal">" in inefficient evaluation of the full kernel."</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span>
+        <span class="identifier">inds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rnd</span><span class="punctuation">.</span><span class="identifier">permutation</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">basis_inds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inds</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span>
+        <span class="identifier">basis</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">basis_inds</span><span class="grouping">]</span>
+
+        <span class="identifier">basis_kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pairwise_kernels</span><span class="grouping">(</span><span class="identifier">basis</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="punctuation">,</span>
+                                        <span class="identifier">filter_params</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                        <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                                        <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel_params</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># sqrt of kernel matrix on basis vectors</span>
+        <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">V</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">basis_kernel</span><span class="grouping">)</span>
+        <span class="identifier">S</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="identifier">S</span><span class="punctuation">,</span> <span class="float-literal">1e-12</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">normalization_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">U</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">S</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">V</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">basis</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">component_indices_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inds</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply feature map to X.
+
+        Computes an approximate feature map using the kernel
+        between some training points and X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Data to transform.
+
+        Returns
+        -------
+        X_transformed : ndarray of shape (n_samples, n_components)
+            Transformed data.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="identifier">kernel_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel_params</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">embedded</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pairwise_kernels</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">,</span>
+                                    <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="punctuation">,</span>
+                                    <span class="identifier">filter_params</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                    <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                                    <span class="arithmetic-operator">**</span><span class="identifier">kernel_params</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">embedded</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">normalization_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_kernel_params</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_params</span>
+        <span class="keyword">if</span> <span class="identifier">params</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">!=</span> <span class="string-literal">'precomputed'</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">param</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="identifier">KERNEL_PARAMS</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">param</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                    <span class="identifier">params</span><span class="grouping">[</span><span class="identifier">param</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">param</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">or</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">or</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Don't pass gamma, coef0 or degree to "</span>
+                                 <span class="string-literal">"Nystroem if using a callable "</span>
+                                 <span class="string-literal">"or precomputed kernel"</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">params</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="string-literal">'_xfail_checks'</span><span class="punctuation">:</span> <span class="grouping">{</span>
+                <span class="string-literal">'check_transformer_preserve_dtypes'</span><span class="punctuation">:</span>
+                <span class="string-literal">'dtypes are preserved but not at a close enough precision'</span><span class="punctuation">,</span>
+            <span class="grouping">}</span><span class="punctuation">,</span>
+            <span class="string-literal">'preserves_dtype'</span><span class="punctuation">:</span> <span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span>
+        <span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

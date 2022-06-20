@@ -1,0 +1,928 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+Linear Discriminant Analysis and Quadratic Discriminant Analysis
+"""</span>
+
+<span class="comment"># Authors: Clemens Brunner</span>
+<span class="comment">#          Martin Billinger</span>
+<span class="comment">#          Matthieu Perrot</span>
+<span class="comment">#          Mathieu Blondel</span>
+
+<span class="comment"># License: BSD 3-Clause</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">expit</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">linear_model</span><span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">LinearClassifierMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">covariance</span> <span class="keyword">import</span> <span class="identifier">ledoit_wolf</span><span class="punctuation">,</span> <span class="identifier">empirical_covariance</span><span class="punctuation">,</span> <span class="identifier">shrunk_covariance</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">multiclass</span> <span class="keyword">import</span> <span class="identifier">unique_labels</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">multiclass</span> <span class="keyword">import</span> <span class="identifier">check_classification_targets</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">softmax</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">StandardScaler</span>
+
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'LinearDiscriminantAnalysis', 'QuadraticDiscriminantAnalysis'</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_cov</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">covariance_estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Estimate covariance matrix (using optional covariance_estimator).
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Input data.
+
+    shrinkage : {'empirical', 'auto'} or float, default=None
+        Shrinkage parameter, possible values:
+          - None or 'empirical': no shrinkage (default).
+          - 'auto': automatic shrinkage using the Ledoit-Wolf lemma.
+          - float between 0 and 1: fixed shrinkage parameter.
+
+        Shrinkage parameter is ignored if  `covariance_estimator`
+        is not None.
+
+    covariance_estimator : estimator, default=None
+        If not None, `covariance_estimator` is used to estimate
+        the covariance matrices instead of relying on the empirical
+        covariance estimator (with potential shrinkage).
+        The object should have a fit method and a ``covariance_`` attribute
+        like the estimators in :mod:`sklearn.covariance``.
+        if None the shrinkage parameter drives the estimate.
+
+        .. versionadded:: 0.24
+
+    Returns
+    -------
+    s : ndarray of shape (n_features, n_features)
+        Estimated covariance matrix.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">covariance_estimator</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">shrinkage</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"empirical"</span> <span class="keyword">if</span> <span class="identifier">shrinkage</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">shrinkage</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">shrinkage</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">shrinkage</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+                <span class="identifier">sc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">StandardScaler</span><span class="grouping">(</span><span class="grouping">)</span>  <span class="comment"># standardize features</span>
+                <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sc</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ledoit_wolf</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                <span class="comment"># rescale</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sc</span><span class="punctuation">.</span><span class="identifier">scale_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">s</span> <span class="arithmetic-operator">*</span> <span class="identifier">sc</span><span class="punctuation">.</span><span class="identifier">scale_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+            <span class="keyword">elif</span> <span class="identifier">shrinkage</span> <span class="relational-operator">==</span> <span class="string-literal">'empirical'</span><span class="punctuation">:</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">empirical_covariance</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'unknown shrinkage parameter'</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">shrinkage</span><span class="punctuation">,</span> <span class="identifier">float</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">shrinkage</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">shrinkage</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">shrinkage</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'shrinkage parameter must be between 0 and 1'</span><span class="grouping">)</span>
+            <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">shrunk_covariance</span><span class="grouping">(</span><span class="identifier">empirical_covariance</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">'shrinkage must be a float or a string'</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">shrinkage</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">shrinkage</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"covariance_estimator and shrinkage parameters "</span>
+                             <span class="string-literal">"are not None. Only one of the two can be set."</span><span class="grouping">)</span>
+        <span class="identifier">covariance_estimator</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">covariance_estimator</span><span class="punctuation">,</span> <span class="string-literal">'covariance_'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"%s does not have a covariance_ attribute"</span> <span class="arithmetic-operator">%</span>
+                             <span class="identifier">covariance_estimator</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+        <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">covariance_estimator</span><span class="punctuation">.</span><span class="identifier">covariance_</span>
+    <span class="keyword">return</span> <span class="identifier">s</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_class_means</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute class means.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Input data.
+
+    y : array-like of shape (n_samples,) or (n_samples, n_targets)
+        Target values.
+
+    Returns
+    -------
+    means : array-like of shape (n_classes, n_features)
+        Class means.
+    """</span>
+    <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+    <span class="identifier">cnt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">bincount</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+    <span class="identifier">means</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">add</span><span class="punctuation">.</span><span class="identifier">at</span><span class="grouping">(</span><span class="identifier">means</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+    <span class="identifier">means</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">cnt</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">]</span>
+    <span class="keyword">return</span> <span class="identifier">means</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_class_cov</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">priors</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">covariance_estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute weighted within-class covariance matrix.
+
+    The per-class covariance are weighted by the class priors.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Input data.
+
+    y : array-like of shape (n_samples,) or (n_samples, n_targets)
+        Target values.
+
+    priors : array-like of shape (n_classes,)
+        Class priors.
+
+    shrinkage : 'auto' or float, default=None
+        Shrinkage parameter, possible values:
+          - None: no shrinkage (default).
+          - 'auto': automatic shrinkage using the Ledoit-Wolf lemma.
+          - float between 0 and 1: fixed shrinkage parameter.
+
+        Shrinkage parameter is ignored if `covariance_estimator` is not None.
+
+    covariance_estimator : estimator, default=None
+        If not None, `covariance_estimator` is used to estimate
+        the covariance matrices instead of relying the empirical
+        covariance estimator (with potential shrinkage).
+        The object should have a fit method and a ``covariance_`` attribute
+        like the estimators in sklearn.covariance.
+        If None, the shrinkage parameter drives the estimate.
+
+        .. versionadded:: 0.24
+
+    Returns
+    -------
+    cov : array-like of shape (n_features, n_features)
+        Weighted within-class covariance matrix
+    """</span>
+    <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+    <span class="identifier">cov</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">group</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">Xg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">y</span> <span class="relational-operator">==</span> <span class="identifier">group</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">cov</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">priors</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">atleast_2d</span><span class="grouping">(</span>
+            <span class="identifier">_cov</span><span class="grouping">(</span><span class="identifier">Xg</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="punctuation">,</span> <span class="identifier">covariance_estimator</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">cov</span>
+
+
+<span class="keyword">class</span> <span class="identifier">LinearDiscriminantAnalysis</span><span class="grouping">(</span><span class="identifier">LinearClassifierMixin</span><span class="punctuation">,</span>
+                                 <span class="identifier">TransformerMixin</span><span class="punctuation">,</span>
+                                 <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Linear Discriminant Analysis
+
+    A classifier with a linear decision boundary, generated by fitting class
+    conditional densities to the data and using Bayes' rule.
+
+    The model fits a Gaussian density to each class, assuming that all classes
+    share the same covariance matrix.
+
+    The fitted model can also be used to reduce the dimensionality of the input
+    by projecting it to the most discriminative directions, using the
+    `transform` method.
+
+    .. versionadded:: 0.17
+       *LinearDiscriminantAnalysis*.
+
+    Read more in the :ref:`User Guide &lt;lda_qda&gt;`.
+
+    Parameters
+    ----------
+    solver : {'svd', 'lsqr', 'eigen'}, default='svd'
+        Solver to use, possible values:
+          - 'svd': Singular value decomposition (default).
+            Does not compute the covariance matrix, therefore this solver is
+            recommended for data with a large number of features.
+          - 'lsqr': Least squares solution.
+            Can be combined with shrinkage or custom covariance estimator.
+          - 'eigen': Eigenvalue decomposition.
+            Can be combined with shrinkage or custom covariance estimator.
+
+    shrinkage : 'auto' or float, default=None
+        Shrinkage parameter, possible values:
+          - None: no shrinkage (default).
+          - 'auto': automatic shrinkage using the Ledoit-Wolf lemma.
+          - float between 0 and 1: fixed shrinkage parameter.
+
+        This should be left to None if `covariance_estimator` is used.
+        Note that shrinkage works only with 'lsqr' and 'eigen' solvers.
+
+    priors : array-like of shape (n_classes,), default=None
+        The class prior probabilities. By default, the class proportions are
+        inferred from the training data.
+
+    n_components : int, default=None
+        Number of components (&lt;= min(n_classes - 1, n_features)) for
+        dimensionality reduction. If None, will be set to
+        min(n_classes - 1, n_features). This parameter only affects the
+        `transform` method.
+
+    store_covariance : bool, default=False
+        If True, explicitely compute the weighted within-class covariance
+        matrix when solver is 'svd'. The matrix is always computed
+        and stored for the other solvers.
+
+        .. versionadded:: 0.17
+
+    tol : float, default=1.0e-4
+        Absolute threshold for a singular value of X to be considered
+        significant, used to estimate the rank of X. Dimensions whose
+        singular values are non-significant are discarded. Only used if
+        solver is 'svd'.
+
+        .. versionadded:: 0.17
+
+    covariance_estimator : covariance estimator, default=None
+        If not None, `covariance_estimator` is used to estimate
+        the covariance matrices instead of relying on the empirical
+        covariance estimator (with potential shrinkage).
+        The object should have a fit method and a ``covariance_`` attribute
+        like the estimators in :mod:`sklearn.covariance`.
+        if None the shrinkage parameter drives the estimate.
+
+        This should be left to None if `shrinkage` is used.
+        Note that `covariance_estimator` works only with 'lsqr' and 'eigen'
+        solvers.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    coef_ : ndarray of shape (n_features,) or (n_classes, n_features)
+        Weight vector(s).
+
+    intercept_ : ndarray of shape (n_classes,)
+        Intercept term.
+
+    covariance_ : array-like of shape (n_features, n_features)
+        Weighted within-class covariance matrix. It corresponds to
+        `sum_k prior_k * C_k` where `C_k` is the covariance matrix of the
+        samples in class `k`. The `C_k` are estimated using the (potentially
+        shrunk) biased estimator of covariance. If solver is 'svd', only
+        exists when `store_covariance` is True.
+
+    explained_variance_ratio_ : ndarray of shape (n_components,)
+        Percentage of variance explained by each of the selected components.
+        If ``n_components`` is not set then all components are stored and the
+        sum of explained variances is equal to 1.0. Only available when eigen
+        or svd solver is used.
+
+    means_ : array-like of shape (n_classes, n_features)
+        Class-wise means.
+
+    priors_ : array-like of shape (n_classes,)
+        Class priors (sum to 1).
+
+    scalings_ : array-like of shape (rank, n_classes - 1)
+        Scaling of the features in the space spanned by the class centroids.
+        Only available for 'svd' and 'eigen' solvers.
+
+    xbar_ : array-like of shape (n_features,)
+        Overall mean. Only present if solver is 'svd'.
+
+    classes_ : array-like of shape (n_classes,)
+        Unique class labels.
+
+    See Also
+    --------
+    QuadraticDiscriminantAnalysis : Quadratic Discriminant Analysis.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    &gt;&gt;&gt; X = np.array([[-1, -1], [-2, -1], [-3, -2], [1, 1], [2, 1], [3, 2]])
+    &gt;&gt;&gt; y = np.array([1, 1, 1, 2, 2, 2])
+    &gt;&gt;&gt; clf = LinearDiscriminantAnalysis()
+    &gt;&gt;&gt; clf.fit(X, y)
+    LinearDiscriminantAnalysis()
+    &gt;&gt;&gt; print(clf.predict([[-0.8, -1]]))
+    [1]
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">solver</span><span class="arithmetic-assignment">=</span><span class="string-literal">'svd'</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">priors</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">store_covariance</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-4</span><span class="punctuation">,</span>
+                 <span class="identifier">covariance_estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">shrinkage</span> <span class="arithmetic-assignment">=</span> <span class="identifier">shrinkage</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">priors</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">store_covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">store_covariance</span>  <span class="comment"># used only in svd solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>  <span class="comment"># used only in svd solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">covariance_estimator</span>
+
+    <span class="keyword">def</span> <span class="identifier">_solve_lsqr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="punctuation">,</span> <span class="identifier">covariance_estimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Least squares solver.
+
+        The least squares solver computes a straightforward solution of the
+        optimal decision rule based directly on the discriminant functions. It
+        can only be used for classification (with any covariance estimator),
+        because
+        estimation of eigenvectors is not performed. Therefore, dimensionality
+        reduction with the transform is not supported.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,) or (n_samples, n_classes)
+            Target values.
+
+        shrinkage : 'auto', float or None
+            Shrinkage parameter, possible values:
+              - None: no shrinkage.
+              - 'auto': automatic shrinkage using the Ledoit-Wolf lemma.
+              - float between 0 and 1: fixed shrinkage parameter.
+
+            Shrinkage parameter is ignored if  `covariance_estimator` i
+            not None
+
+        covariance_estimator : estimator, default=None
+            If not None, `covariance_estimator` is used to estimate
+            the covariance matrices instead of relying the empirical
+            covariance estimator (with potential shrinkage).
+            The object should have a fit method and a ``covariance_`` attribute
+            like the estimators in sklearn.covariance.
+            if None the shrinkage parameter drives the estimate.
+
+            .. versionadded:: 0.24
+
+        Notes
+        -----
+        This solver is based on [1]_, section 2.6.2, pp. 39-41.
+
+        References
+        ----------
+        .. [1] R. O. Duda, P. E. Hart, D. G. Stork. Pattern Classification
+           (Second Edition). John Wiley & Sons, Inc., New York, 2001. ISBN
+           0-471-05669-3.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_class_means</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_class_cov</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="punctuation">,</span>
+                                      <span class="identifier">covariance_estimator</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">lstsq</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="float-literal">-0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+                           <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_solve_eigen</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="punctuation">,</span>
+                     <span class="identifier">covariance_estimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Eigenvalue solver.
+
+        The eigenvalue solver computes the optimal solution of the Rayleigh
+        coefficient (basically the ratio of between class scatter to within
+        class scatter). This solver supports both classification and
+        dimensionality reduction (with any covariance estimator).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,) or (n_samples, n_targets)
+            Target values.
+
+        shrinkage : 'auto', float or None
+            Shrinkage parameter, possible values:
+              - None: no shrinkage.
+              - 'auto': automatic shrinkage using the Ledoit-Wolf lemma.
+              - float between 0 and 1: fixed shrinkage constant.
+
+            Shrinkage parameter is ignored if  `covariance_estimator` i
+            not None
+
+        covariance_estimator : estimator, default=None
+            If not None, `covariance_estimator` is used to estimate
+            the covariance matrices instead of relying the empirical
+            covariance estimator (with potential shrinkage).
+            The object should have a fit method and a ``covariance_`` attribute
+            like the estimators in sklearn.covariance.
+            if None the shrinkage parameter drives the estimate.
+
+            .. versionadded:: 0.24
+
+        Notes
+        -----
+        This solver is based on [1]_, section 3.8.3, pp. 121-124.
+
+        References
+        ----------
+        .. [1] R. O. Duda, P. E. Hart, D. G. Stork. Pattern Classification
+           (Second Edition). John Wiley & Sons, Inc., New York, 2001. ISBN
+           0-471-05669-3.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_class_means</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_class_cov</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="punctuation">,</span>
+                                      <span class="identifier">covariance_estimator</span><span class="grouping">)</span>
+
+        <span class="identifier">Sw</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_</span>  <span class="comment"># within scatter</span>
+        <span class="identifier">St</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_cov</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="punctuation">,</span> <span class="identifier">covariance_estimator</span><span class="grouping">)</span>  <span class="comment"># total scatter</span>
+        <span class="identifier">Sb</span> <span class="arithmetic-assignment">=</span> <span class="identifier">St</span> <span class="arithmetic-operator">-</span> <span class="identifier">Sw</span>  <span class="comment"># between scatter</span>
+
+        <span class="identifier">evals</span><span class="punctuation">,</span> <span class="identifier">evecs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">eigh</span><span class="grouping">(</span><span class="identifier">Sb</span><span class="punctuation">,</span> <span class="identifier">Sw</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_ratio_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sort</span><span class="grouping">(</span><span class="identifier">evals</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">evals</span><span class="grouping">)</span>
+                                                 <span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_components</span><span class="grouping">]</span>
+        <span class="identifier">evecs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">evecs</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">evals</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span>  <span class="comment"># sort eigenvectors</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">evecs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span><span class="punctuation">,</span> <span class="identifier">evecs</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">evecs</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="float-literal">-0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+                           <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_solve_svd</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""SVD solver.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,) or (n_samples, n_targets)
+            Target values.
+        """</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_class_means</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">store_covariance</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_class_cov</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="grouping">)</span>
+
+        <span class="identifier">Xc</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">group</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">Xg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">y</span> <span class="relational-operator">==</span> <span class="identifier">group</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+            <span class="identifier">Xc</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">Xg</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">xbar_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span><span class="grouping">)</span>
+
+        <span class="identifier">Xc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="identifier">Xc</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="comment"># 1) within (univariate) scaling by with classes std-dev</span>
+        <span class="identifier">std</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xc</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="comment"># avoid division by zero in normalization</span>
+        <span class="identifier">std</span><span class="grouping">[</span><span class="identifier">std</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+        <span class="identifier">fac</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_classes</span><span class="grouping">)</span>
+
+        <span class="comment"># 2) Within variance scaling</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">fac</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">Xc</span> <span class="arithmetic-operator">/</span> <span class="identifier">std</span><span class="grouping">)</span>
+        <span class="comment"># SVD of centered (within)scaled data</span>
+        <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">full_matrices</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="identifier">rank</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">S</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="grouping">)</span>
+        <span class="comment"># Scaling of within covariance is: V' 1/S</span>
+        <span class="identifier">scalings</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">Vt</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">rank</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">std</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span> <span class="arithmetic-operator">/</span> <span class="identifier">S</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">rank</span><span class="grouping">]</span>
+
+        <span class="comment"># 3) Between variance scaling</span>
+        <span class="comment"># Scale weighted centers</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">fac</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span>
+                    <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">xbar_</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">scalings</span><span class="grouping">)</span>
+        <span class="comment"># Centers are living in a space with n_classes-1 dim (maximum)</span>
+        <span class="comment"># Use SVD to find projection in the space spanned by the</span>
+        <span class="comment"># (n_classes) centers</span>
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">full_matrices</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_components</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_ratio_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_ratio_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">S</span><span class="arithmetic-operator">**</span><span class="int-literal">2</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span>
+                <span class="identifier">S</span><span class="arithmetic-operator">**</span><span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_components</span><span class="grouping">]</span>
+
+        <span class="identifier">rank</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">S</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-operator">*</span> <span class="identifier">S</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">scalings</span><span class="punctuation">,</span> <span class="identifier">Vt</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="identifier">rank</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">coef</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">xbar_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="float-literal">-0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">coef</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+                           <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">coef</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">xbar_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit LinearDiscriminantAnalysis model according to the given
+           training data and parameters.
+
+           .. versionchanged:: 0.19
+              *store_covariance* has been moved to main constructor.
+
+           .. versionchanged:: 0.19
+              *tol* has been moved to main constructor.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,)
+            Target values.
+        """</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">ensure_min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">,</span>
+                                   <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">unique_labels</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">==</span> <span class="identifier">n_classes</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"The number of samples must be more "</span>
+                             <span class="string-literal">"than the number of classes."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>  <span class="comment"># estimate priors from sample</span>
+            <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">y_t</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>  <span class="comment"># non-negative ints</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">bincount</span><span class="grouping">(</span><span class="identifier">y_t</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"priors must be non-negative"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isclose</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="float-literal">1.0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"The priors do not sum to 1. Renormalizing"</span><span class="punctuation">,</span>
+                          <span class="identifier">UserWarning</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="comment"># Maximum number of components no matter what n_components is</span>
+        <span class="comment"># specified:</span>
+        <span class="identifier">max_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_components</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">&gt;</span> <span class="identifier">max_components</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">"n_components cannot be larger than min(n_features, "</span>
+                    <span class="string-literal">"n_classes - 1)."</span>
+                <span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">'svd'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">shrinkage</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span><span class="string-literal">'shrinkage not supported'</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_estimator</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                        <span class="string-literal">'covariance estimator '</span>
+                        <span class="string-literal">'is not supported '</span>
+                        <span class="string-literal">'with svd solver. Try another solver'</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_solve_svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">'lsqr'</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_solve_lsqr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">shrinkage</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">shrinkage</span><span class="punctuation">,</span>
+                             <span class="identifier">covariance_estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_estimator</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">'eigen'</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_solve_eigen</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span>
+                              <span class="identifier">shrinkage</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">shrinkage</span><span class="punctuation">,</span>
+                              <span class="identifier">covariance_estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_estimator</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"unknown solver {} (valid solvers are 'svd', "</span>
+                             <span class="string-literal">"'lsqr', and 'eigen')."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>  <span class="comment"># treat binary case as a special case</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">ndmin</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+                                  <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                       <span class="identifier">ndmin</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Project data to maximize class separation.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Input data.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+            Transformed data.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">'lsqr'</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span><span class="string-literal">"transform not implemented for 'lsqr' "</span>
+                                      <span class="string-literal">"solver (use 'svd' or 'eigen')."</span><span class="grouping">)</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">'svd'</span><span class="punctuation">:</span>
+            <span class="identifier">X_new</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">xbar_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">'eigen'</span><span class="punctuation">:</span>
+            <span class="identifier">X_new</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">X_new</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_components</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Estimate probability.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Input data.
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples, n_classes)
+            Estimated probabilities.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">decision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="identifier">proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">expit</span><span class="grouping">(</span><span class="identifier">decision</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">1</span><span class="arithmetic-operator">-</span><span class="identifier">proba</span><span class="punctuation">,</span> <span class="identifier">proba</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">softmax</span><span class="grouping">(</span><span class="identifier">decision</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_log_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Estimate log probability.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Input data.
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples, n_classes)
+            Estimated log probabilities.
+        """</span>
+        <span class="identifier">prediction</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">prediction</span><span class="grouping">[</span><span class="identifier">prediction</span> <span class="relational-operator">==</span> <span class="float-literal">0.0</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">prediction</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tiny</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">prediction</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply decision function to an array of samples.
+
+        The decision function is equal (up to a constant factor) to the
+        log-posterior of the model, i.e. `log p(y = k | x)`. In a binary
+        classification setting this instead corresponds to the difference
+        `log p(y = 1 | x) - log p(y = 0 | x)`. See :ref:`lda_qda_math`.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Array of samples (test vectors).
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples,) or (n_samples, n_classes)
+            Decision function values related to each class, per sample.
+            In the two-class case, the shape is (n_samples,), giving the
+            log likelihood ratio of the positive class.
+        """</span>
+        <span class="comment"># Only override for the doc</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">QuadraticDiscriminantAnalysis</span><span class="grouping">(</span><span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Quadratic Discriminant Analysis
+
+    A classifier with a quadratic decision boundary, generated
+    by fitting class conditional densities to the data
+    and using Bayes' rule.
+
+    The model fits a Gaussian density to each class.
+
+    .. versionadded:: 0.17
+       *QuadraticDiscriminantAnalysis*
+
+    Read more in the :ref:`User Guide &lt;lda_qda&gt;`.
+
+    Parameters
+    ----------
+    priors : ndarray of shape (n_classes,), default=None
+        Class priors. By default, the class proportions are inferred from the
+        training data.
+
+    reg_param : float, default=0.0
+        Regularizes the per-class covariance estimates by transforming S2 as
+        ``S2 = (1 - reg_param) * S2 + reg_param * np.eye(n_features)``,
+        where S2 corresponds to the `scaling_` attribute of a given class.
+
+    store_covariance : bool, default=False
+        If True, the class covariance matrices are explicitely computed and
+        stored in the `self.covariance_` attribute.
+
+        .. versionadded:: 0.17
+
+    tol : float, default=1.0e-4
+        Absolute threshold for a singular value to be considered significant,
+        used to estimate the rank of `Xk` where `Xk` is the centered matrix
+        of samples in class k. This parameter does not affect the
+        predictions. It only controls a warning that is raised when features
+        are considered to be colinear.
+
+        .. versionadded:: 0.17
+
+    Attributes
+    ----------
+    covariance_ : list of len n_classes of ndarray \
+            of shape (n_features, n_features)
+        For each class, gives the covariance matrix estimated using the
+        samples of that class. The estimations are unbiased. Only present if
+        `store_covariance` is True.
+
+    means_ : array-like of shape (n_classes, n_features)
+        Class-wise means.
+
+    priors_ : array-like of shape (n_classes,)
+        Class priors (sum to 1).
+
+    rotations_ : list of len n_classes of ndarray of shape (n_features, n_k)
+        For each class k an array of shape (n_features, n_k), where
+        ``n_k = min(n_features, number of elements in class k)``
+        It is the rotation of the Gaussian distribution, i.e. its
+        principal axis. It corresponds to `V`, the matrix of eigenvectors
+        coming from the SVD of `Xk = U S Vt` where `Xk` is the centered
+        matrix of samples from class k.
+
+    scalings_ : list of len n_classes of ndarray of shape (n_k,)
+        For each class, contains the scaling of
+        the Gaussian distributions along its principal axes, i.e. the
+        variance in the rotated coordinate system. It corresponds to `S^2 /
+        (n_samples - 1)`, where `S` is the diagonal matrix of singular values
+        from the SVD of `Xk`, where `Xk` is the centered matrix of samples
+        from class k.
+
+    classes_ : ndarray of shape (n_classes,)
+        Unique class labels.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[-1, -1], [-2, -1], [-3, -2], [1, 1], [2, 1], [3, 2]])
+    &gt;&gt;&gt; y = np.array([1, 1, 1, 2, 2, 2])
+    &gt;&gt;&gt; clf = QuadraticDiscriminantAnalysis()
+    &gt;&gt;&gt; clf.fit(X, y)
+    QuadraticDiscriminantAnalysis()
+    &gt;&gt;&gt; print(clf.predict([[-0.8, -1]]))
+    [1]
+
+    See Also
+    --------
+    LinearDiscriminantAnalysis : Linear Discriminant Analysis.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">priors</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">reg_param</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">store_covariance</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0e-4</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">priors</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">priors</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">reg_param</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reg_param</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">store_covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">store_covariance</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model according to the given training data and parameters.
+
+            .. versionchanged:: 0.19
+               ``store_covariances`` has been moved to main constructor as
+               ``store_covariance``
+
+            .. versionchanged:: 0.19
+               ``tol`` has been moved to main constructor.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training vector, where n_samples is the number of samples and
+            n_features is the number of features.
+
+        y : array-like of shape (n_samples,)
+            Target values (integers)
+        """</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">check_classification_targets</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">&lt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'The number of classes has to be greater than'</span>
+                             <span class="string-literal">' one; got %d class'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_classes</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">bincount</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors</span>
+
+        <span class="identifier">cov</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">store_covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">store_covariance</span>
+        <span class="keyword">if</span> <span class="identifier">store_covariance</span><span class="punctuation">:</span>
+            <span class="identifier">cov</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">means</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">scalings</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">rotations</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">ind</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_classes</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">Xg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">y</span> <span class="relational-operator">==</span> <span class="identifier">ind</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+            <span class="identifier">meang</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xg</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="int-literal">0</span><span class="grouping">)</span>
+            <span class="identifier">means</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">meang</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">Xg</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'y has only 1 sample in class %s, covariance '</span>
+                                 <span class="string-literal">'is ill defined.'</span> <span class="arithmetic-operator">%</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">ind</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">Xgc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xg</span> <span class="arithmetic-operator">-</span> <span class="identifier">meang</span>
+            <span class="comment"># Xgc = U * S * V.T</span>
+            <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">Xgc</span><span class="punctuation">,</span> <span class="identifier">full_matrices</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="identifier">rank</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">S</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">rank</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+                <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Variables are collinear"</span><span class="grouping">)</span>
+            <span class="identifier">S2</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">S</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">Xg</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">S2</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">reg_param</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">S2</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">reg_param</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">store_covariance</span> <span class="logical-operator">or</span> <span class="identifier">store_covariance</span><span class="punctuation">:</span>
+                <span class="comment"># cov = V * (S^2 / (n-1)) * V.T</span>
+                <span class="identifier">cov</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">S2</span> <span class="arithmetic-operator">*</span> <span class="identifier">Vt</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">Vt</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">scalings</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">S2</span><span class="grouping">)</span>
+            <span class="identifier">rotations</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">Vt</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">store_covariance</span> <span class="logical-operator">or</span> <span class="identifier">store_covariance</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">covariance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cov</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">means</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scalings</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rotations_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rotations</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">_decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># return log posterior, see eq (4.12) p. 110 of the ESL.</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">norm2</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">R</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rotations_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="identifier">S</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="identifier">Xm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">means_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="identifier">X2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">Xm</span><span class="punctuation">,</span> <span class="identifier">R</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">S</span> <span class="arithmetic-operator">**</span> <span class="grouping">(</span><span class="float-literal">-0.5</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">norm2</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">X2</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">norm2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">norm2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>  <span class="comment"># shape = [len(X), n_classes]</span>
+        <span class="identifier">u</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">s</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scalings_</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="grouping">(</span><span class="float-literal">-0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">norm2</span> <span class="arithmetic-operator">+</span> <span class="identifier">u</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">priors_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply decision function to an array of samples.
+
+        The decision function is equal (up to a constant factor) to the
+        log-posterior of the model, i.e. `log p(y = k | x)`. In a binary
+        classification setting this instead corresponds to the difference
+        `log p(y = 1 | x) - log p(y = 0 | x)`. See :ref:`lda_qda_math`.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Array of samples (test vectors).
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples,) or (n_samples, n_classes)
+            Decision function values related to each class, per sample.
+            In the two-class case, the shape is (n_samples,), giving the
+            log likelihood ratio of the positive class.
+        """</span>
+        <span class="identifier">dec_func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="comment"># handle special case of two classes</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">dec_func</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">dec_func</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">dec_func</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform classification on an array of test vectors X.
+
+        The predicted class C for each sample in X is returned.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples,)
+        """</span>
+        <span class="identifier">d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">d</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">y_pred</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return posterior probabilities of classification.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Array of samples/test vectors.
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples, n_classes)
+            Posterior probabilities of classification per class.
+        """</span>
+        <span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="comment"># compute the likelihood of the underlying gaussian models</span>
+        <span class="comment"># up to a multiplicative constant.</span>
+        <span class="identifier">likelihood</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="identifier">values</span> <span class="arithmetic-operator">-</span> <span class="identifier">values</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="comment"># compute posterior probabilities</span>
+        <span class="keyword">return</span> <span class="identifier">likelihood</span> <span class="arithmetic-operator">/</span> <span class="identifier">likelihood</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_log_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return log of posterior probabilities of classification.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Array of samples/test vectors.
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples, n_classes)
+            Posterior log-probabilities of classification per class.
+        """</span>
+        <span class="comment"># XXX : can do better to avoid precision overflows</span>
+        <span class="identifier">probas_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">probas_</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

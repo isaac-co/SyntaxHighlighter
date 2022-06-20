@@ -1,0 +1,631 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">""" Principal Component Analysis.
+"""</span>
+
+<span class="comment"># Author: Alexandre Gramfort &lt;alexandre.gramfort@inria.fr&gt;</span>
+<span class="comment">#         Olivier Grisel &lt;olivier.grisel@ensta.org&gt;</span>
+<span class="comment">#         Mathieu Blondel &lt;mathieu@mblondel.org&gt;</span>
+<span class="comment">#         Denis A. Engemann &lt;denis-alexander.engemann@inria.fr&gt;</span>
+<span class="comment">#         Michael Eickenberg &lt;michael.eickenberg@inria.fr&gt;</span>
+<span class="comment">#         Giorgio Patrini &lt;giorgio.patrini@anu.edu.au&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">math</span> <span class="keyword">import</span> <span class="identifier">log</span><span class="punctuation">,</span> <span class="identifier">sqrt</span>
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">gammaln</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">import</span> <span class="identifier">issparse</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">svds</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_BasePCA</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_arpack</span> <span class="keyword">import</span> <span class="identifier">_init_arpack_v0</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">fast_logdet</span><span class="punctuation">,</span> <span class="identifier">randomized_svd</span><span class="punctuation">,</span> <span class="identifier">svd_flip</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">stable_cumsum</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_assess_dimension</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="punctuation">,</span> <span class="identifier">rank</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute the log-likelihood of a rank ``rank`` dataset.
+
+    The dataset is assumed to be embedded in gaussian noise of shape(n,
+    dimf) having spectrum ``spectrum``. This implements the method of
+    T. P. Minka.
+
+    Parameters
+    ----------
+    spectrum : ndarray of shape (n_features,)
+        Data spectrum.
+    rank : int
+        Tested rank value. It should be strictly lower than n_features,
+        otherwise the method isn't specified (division by zero in equation
+        (31) from the paper).
+    n_samples : int
+        Number of samples.
+
+    Returns
+    -------
+    ll : float
+        The log-likelihood.
+
+    References
+    ----------
+    This implements the method of `Thomas P. Minka:
+    Automatic Choice of Dimensionality for PCA. NIPS 2000: 598-604
+    &lt;https://proceedings.neurips.cc/paper/2000/file/7503cfacd12053d309b6bed5c89de212-Paper.pdf&gt;`_
+    """</span>
+
+    <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">spectrum</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="int-literal">1</span> <span class="relational-operator">&lt;=</span> <span class="identifier">rank</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"the tested rank should be in [1, n_features - 1]"</span><span class="grouping">)</span>
+
+    <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">1e-15</span>
+
+    <span class="keyword">if</span> <span class="identifier">spectrum</span><span class="grouping">[</span><span class="identifier">rank</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&lt;</span> <span class="identifier">eps</span><span class="punctuation">:</span>
+        <span class="comment"># When the tested rank is associated with a small eigenvalue, there's</span>
+        <span class="comment"># no point in computing the log-likelihood: it's going to be very</span>
+        <span class="comment"># small and won't be the max anyway. Also, it can lead to numerical</span>
+        <span class="comment"># issues below when computing pa, in particular in log((spectrum[i] -</span>
+        <span class="comment"># spectrum[j]) because this will take the log of something very small.</span>
+        <span class="keyword">return</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+
+    <span class="identifier">pu</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">rank</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">rank</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">pu</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span><span class="identifier">gammaln</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">-</span> <span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+               <span class="identifier">log</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">-</span> <span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span><span class="grouping">)</span>
+
+    <span class="identifier">pl</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">rank</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">pl</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">pl</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span>
+
+    <span class="identifier">v</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">eps</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="grouping">[</span><span class="identifier">rank</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">-</span> <span class="identifier">rank</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">pv</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">v</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">-</span> <span class="identifier">rank</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span>
+
+    <span class="identifier">m</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span> <span class="arithmetic-operator">*</span> <span class="identifier">rank</span> <span class="arithmetic-operator">-</span> <span class="identifier">rank</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">rank</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span>
+    <span class="identifier">pp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">log</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">m</span> <span class="arithmetic-operator">+</span> <span class="identifier">rank</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span>
+
+    <span class="identifier">pa</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+    <span class="identifier">spectrum_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">spectrum</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">spectrum_</span><span class="grouping">[</span><span class="identifier">rank</span><span class="punctuation">:</span><span class="identifier">n_features</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">v</span>
+    <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">rank</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">pa</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">log</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">spectrum</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span>
+                      <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">spectrum_</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">spectrum_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">log</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+
+    <span class="identifier">ll</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pu</span> <span class="arithmetic-operator">+</span> <span class="identifier">pl</span> <span class="arithmetic-operator">+</span> <span class="identifier">pv</span> <span class="arithmetic-operator">+</span> <span class="identifier">pp</span> <span class="arithmetic-operator">-</span> <span class="identifier">pa</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="identifier">rank</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span>
+
+    <span class="keyword">return</span> <span class="identifier">ll</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_infer_dimension</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Infers the dimension of a dataset with a given spectrum.
+
+    The returned value will be in [1, n_features - 1].
+    """</span>
+    <span class="identifier">ll</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty_like</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="grouping">)</span>
+    <span class="identifier">ll</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>  <span class="comment"># we don't want to return n_components = 0</span>
+    <span class="keyword">for</span> <span class="identifier">rank</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">spectrum</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">ll</span><span class="grouping">[</span><span class="identifier">rank</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_assess_dimension</span><span class="grouping">(</span><span class="identifier">spectrum</span><span class="punctuation">,</span> <span class="identifier">rank</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">ll</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">PCA</span><span class="grouping">(</span><span class="identifier">_BasePCA</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Principal component analysis (PCA).
+
+    Linear dimensionality reduction using Singular Value Decomposition of the
+    data to project it to a lower dimensional space. The input data is centered
+    but not scaled for each feature before applying the SVD.
+
+    It uses the LAPACK implementation of the full SVD or a randomized truncated
+    SVD by the method of Halko et al. 2009, depending on the shape of the input
+    data and the number of components to extract.
+
+    It can also use the scipy.sparse.linalg ARPACK implementation of the
+    truncated SVD.
+
+    Notice that this class does not support sparse input. See
+    :class:`TruncatedSVD` for an alternative with sparse data.
+
+    Read more in the :ref:`User Guide &lt;PCA&gt;`.
+
+    Parameters
+    ----------
+    n_components : int, float or 'mle', default=None
+        Number of components to keep.
+        if n_components is not set all components are kept::
+
+            n_components == min(n_samples, n_features)
+
+        If ``n_components == 'mle'`` and ``svd_solver == 'full'``, Minka's
+        MLE is used to guess the dimension. Use of ``n_components == 'mle'``
+        will interpret ``svd_solver == 'auto'`` as ``svd_solver == 'full'``.
+
+        If ``0 &lt; n_components &lt; 1`` and ``svd_solver == 'full'``, select the
+        number of components such that the amount of variance that needs to be
+        explained is greater than the percentage specified by n_components.
+
+        If ``svd_solver == 'arpack'``, the number of components must be
+        strictly less than the minimum of n_features and n_samples.
+
+        Hence, the None case results in::
+
+            n_components == min(n_samples, n_features) - 1
+
+    copy : bool, default=True
+        If False, data passed to fit are overwritten and running
+        fit(X).transform(X) will not yield the expected results,
+        use fit_transform(X) instead.
+
+    whiten : bool, default=False
+        When True (False by default) the `components_` vectors are multiplied
+        by the square root of n_samples and then divided by the singular values
+        to ensure uncorrelated outputs with unit component-wise variances.
+
+        Whitening will remove some information from the transformed signal
+        (the relative variance scales of the components) but can sometime
+        improve the predictive accuracy of the downstream estimators by
+        making their data respect some hard-wired assumptions.
+
+    svd_solver : {'auto', 'full', 'arpack', 'randomized'}, default='auto'
+        If auto :
+            The solver is selected by a default policy based on `X.shape` and
+            `n_components`: if the input data is larger than 500x500 and the
+            number of components to extract is lower than 80% of the smallest
+            dimension of the data, then the more efficient 'randomized'
+            method is enabled. Otherwise the exact full SVD is computed and
+            optionally truncated afterwards.
+        If full :
+            run exact full SVD calling the standard LAPACK solver via
+            `scipy.linalg.svd` and select the components by postprocessing
+        If arpack :
+            run SVD truncated to n_components calling ARPACK solver via
+            `scipy.sparse.linalg.svds`. It requires strictly
+            0 &lt; n_components &lt; min(X.shape)
+        If randomized :
+            run randomized SVD by the method of Halko et al.
+
+        .. versionadded:: 0.18.0
+
+    tol : float, default=0.0
+        Tolerance for singular values computed by svd_solver == 'arpack'.
+        Must be of range [0.0, infinity).
+
+        .. versionadded:: 0.18.0
+
+    iterated_power : int or 'auto', default='auto'
+        Number of iterations for the power method computed by
+        svd_solver == 'randomized'.
+        Must be of range [0, infinity).
+
+        .. versionadded:: 0.18.0
+
+    random_state : int, RandomState instance or None, default=None
+        Used when the 'arpack' or 'randomized' solvers are used. Pass an int
+        for reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+        .. versionadded:: 0.18.0
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        Principal axes in feature space, representing the directions of
+        maximum variance in the data. The components are sorted by
+        ``explained_variance_``.
+
+    explained_variance_ : ndarray of shape (n_components,)
+        The amount of variance explained by each of the selected components.
+        The variance estimation uses `n_samples - 1` degrees of freedom.
+
+        Equal to n_components largest eigenvalues
+        of the covariance matrix of X.
+
+        .. versionadded:: 0.18
+
+    explained_variance_ratio_ : ndarray of shape (n_components,)
+        Percentage of variance explained by each of the selected components.
+
+        If ``n_components`` is not set then all components are stored and the
+        sum of the ratios is equal to 1.0.
+
+    singular_values_ : ndarray of shape (n_components,)
+        The singular values corresponding to each of the selected components.
+        The singular values are equal to the 2-norms of the ``n_components``
+        variables in the lower-dimensional space.
+
+        .. versionadded:: 0.19
+
+    mean_ : ndarray of shape (n_features,)
+        Per-feature empirical mean, estimated from the training set.
+
+        Equal to `X.mean(axis=0)`.
+
+    n_components_ : int
+        The estimated number of components. When n_components is set
+        to 'mle' or a number between 0 and 1 (with svd_solver == 'full') this
+        number is estimated from input data. Otherwise it equals the parameter
+        n_components, or the lesser value of n_features and n_samples
+        if n_components is None.
+
+    n_features_ : int
+        Number of features in the training data.
+
+    n_samples_ : int
+        Number of samples in the training data.
+
+    noise_variance_ : float
+        The estimated noise covariance following the Probabilistic PCA model
+        from Tipping and Bishop 1999. See "Pattern Recognition and
+        Machine Learning" by C. Bishop, 12.2.1 p. 574 or
+        http://www.miketipping.com/papers/met-mppca.pdf. It is required to
+        compute the estimated data covariance and score samples.
+
+        Equal to the average of (min(n_features, n_samples) - n_components)
+        smallest eigenvalues of the covariance matrix of X.
+
+    See Also
+    --------
+    KernelPCA : Kernel Principal Component Analysis.
+    SparsePCA : Sparse Principal Component Analysis.
+    TruncatedSVD : Dimensionality reduction using truncated SVD.
+    IncrementalPCA : Incremental Principal Component Analysis.
+
+    References
+    ----------
+    For n_components == 'mle', this class uses the method from:
+    `Minka, T. P.. "Automatic choice of dimensionality for PCA".
+    In NIPS, pp. 598-604 &lt;https://tminka.github.io/papers/pca/minka-pca.pdf&gt;`_
+
+    Implements the probabilistic PCA model from:
+    `Tipping, M. E., and Bishop, C. M. (1999). "Probabilistic principal
+    component analysis". Journal of the Royal Statistical Society:
+    Series B (Statistical Methodology), 61(3), 611-622.
+    &lt;http://www.miketipping.com/papers/met-mppca.pdf&gt;`_
+    via the score and score_samples methods.
+
+    For svd_solver == 'arpack', refer to `scipy.sparse.linalg.svds`.
+
+    For svd_solver == 'randomized', see:
+    `Halko, N., Martinsson, P. G., and Tropp, J. A. (2011).
+    "Finding structure with randomness: Probabilistic algorithms for
+    constructing approximate matrix decompositions".
+    SIAM review, 53(2), 217-288.
+    &lt;https://doi.org/10.1137/090771806&gt;`_
+    and also
+    `Martinsson, P. G., Rokhlin, V., and Tygert, M. (2011).
+    "A randomized algorithm for the decomposition of matrices".
+    Applied and Computational Harmonic Analysis, 30(1), 47-68
+    &lt;https://doi.org/10.1016/j.acha.2010.02.003&gt;`_.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.decomposition import PCA
+    &gt;&gt;&gt; X = np.array([[-1, -1], [-2, -1], [-3, -2], [1, 1], [2, 1], [3, 2]])
+    &gt;&gt;&gt; pca = PCA(n_components=2)
+    &gt;&gt;&gt; pca.fit(X)
+    PCA(n_components=2)
+    &gt;&gt;&gt; print(pca.explained_variance_ratio_)
+    [0.9924... 0.0075...]
+    &gt;&gt;&gt; print(pca.singular_values_)
+    [6.30061... 0.54980...]
+
+    &gt;&gt;&gt; pca = PCA(n_components=2, svd_solver='full')
+    &gt;&gt;&gt; pca.fit(X)
+    PCA(n_components=2, svd_solver='full')
+    &gt;&gt;&gt; print(pca.explained_variance_ratio_)
+    [0.9924... 0.00755...]
+    &gt;&gt;&gt; print(pca.singular_values_)
+    [6.30061... 0.54980...]
+
+    &gt;&gt;&gt; pca = PCA(n_components=1, svd_solver='arpack')
+    &gt;&gt;&gt; pca.fit(X)
+    PCA(n_components=1, svd_solver='arpack')
+    &gt;&gt;&gt; print(pca.explained_variance_ratio_)
+    [0.99244...]
+    &gt;&gt;&gt; print(pca.singular_values_)
+    [6.30061...]
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">whiten</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">svd_solver</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto', tol=0.0, iterated_power='auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span> <span class="arithmetic-assignment">=</span> <span class="identifier">whiten</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svd_solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">iterated_power</span> <span class="arithmetic-assignment">=</span> <span class="identifier">iterated_power</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model with X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples
+            and n_features is the number of features.
+
+        y : Ignored
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model with X and apply the dimensionality reduction on X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples
+            and n_features is the number of features.
+
+        y : Ignored
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+            Transformed values.
+
+        Notes
+        -----
+        This method returns a Fortran-ordered array. To convert it to a
+        C-ordered array, use 'np.ascontiguousarray'.
+        """</span>
+        <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">U</span> <span class="arithmetic-assignment">=</span> <span class="identifier">U</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components_</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">whiten</span><span class="punctuation">:</span>
+            <span class="comment"># X_new = X * V / S * sqrt(n_samples) = U * sqrt(n_samples)</span>
+            <span class="identifier">U</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># X_new = X * V = U * S * Vt * V = U * S</span>
+            <span class="identifier">U</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">S</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components_</span><span class="grouping">]</span>
+
+        <span class="keyword">return</span> <span class="identifier">U</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Dispatch to the right submethod depending on the chosen solver."""</span>
+
+        <span class="comment"># Raise an error for sparse input.</span>
+        <span class="comment"># This is more informative than the generic one raised by check_array.</span>
+        <span class="keyword">if</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">'PCA does not support sparse input. See '</span>
+                            <span class="string-literal">'TruncatedSVD for a possible alternative.'</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">)</span>
+
+        <span class="comment"># Handle n_components==None</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_solver</span> <span class="relational-operator">!=</span> <span class="string-literal">'arpack'</span><span class="punctuation">:</span>
+                <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+
+        <span class="comment"># Handle svd_solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_solver</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="comment"># Small problem or n_components == 'mle', just call full PCA</span>
+            <span class="keyword">if</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">500</span> <span class="logical-operator">or</span> <span class="identifier">n_components</span> <span class="relational-operator">==</span> <span class="string-literal">'mle'</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'full'</span>
+            <span class="keyword">elif</span> <span class="identifier">n_components</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span> <span class="logical-operator">and</span> <span class="identifier">n_components</span> <span class="relational-operator">&lt;</span> <span class="float-literal">.8</span> <span class="arithmetic-operator">*</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'randomized'</span>
+            <span class="comment"># This is also the case of n_components in (0,1)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'full'</span>
+
+        <span class="comment"># Call different fits for either full or truncated SVD</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'full'</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_full</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">'arpack', 'randomized'</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_truncated</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unrecognized svd_solver='{0}'"</span>
+                             <span class="string-literal">""</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_svd_solver</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit_full</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model by computing full SVD on X."""</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_components</span> <span class="relational-operator">==</span> <span class="string-literal">'mle'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_components='mle' is only supported "</span>
+                                 <span class="string-literal">"if n_samples &gt;= n_features"</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="int-literal">0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">n_components</span> <span class="relational-operator">&lt;=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_components=%r must be between 0 and "</span>
+                             <span class="string-literal">"min(n_samples, n_features)=%r with "</span>
+                             <span class="string-literal">"svd_solver='full'"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">n_components</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_components=%r must be of type int "</span>
+                                 <span class="string-literal">"when greater than or equal to 1, "</span>
+                                 <span class="string-literal">"was of type=%r"</span>
+                                 <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Center data</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">full_matrices</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="comment"># flip eigenvectors' sign to enforce deterministic output</span>
+        <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svd_flip</span><span class="grouping">(</span><span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">Vt</span><span class="grouping">)</span>
+
+        <span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Vt</span>
+
+        <span class="comment"># Get variance explained by singular values</span>
+        <span class="identifier">explained_variance_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">S</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">total_var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">explained_variance_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">explained_variance_ratio_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">explained_variance_</span> <span class="arithmetic-operator">/</span> <span class="identifier">total_var</span>
+        <span class="identifier">singular_values_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>  <span class="comment"># Store the singular values.</span>
+
+        <span class="comment"># Postprocess the number of components required</span>
+        <span class="keyword">if</span> <span class="identifier">n_components</span> <span class="relational-operator">==</span> <span class="string-literal">'mle'</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                <span class="identifier">_infer_dimension</span><span class="grouping">(</span><span class="identifier">explained_variance_</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="int-literal">0</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_components</span> <span class="relational-operator">&lt;</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="comment"># number of components for which the cumulated explained</span>
+            <span class="comment"># variance percentage is superior to the desired threshold</span>
+            <span class="comment"># side='right' ensures that number of features selected</span>
+            <span class="comment"># their variance is always greater than n_components float</span>
+            <span class="comment"># passed. More discussion in issue: #15669</span>
+            <span class="identifier">ratio_cumsum</span> <span class="arithmetic-assignment">=</span> <span class="identifier">stable_cumsum</span><span class="grouping">(</span><span class="identifier">explained_variance_ratio_</span><span class="grouping">)</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">ratio_cumsum</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span>
+                                           <span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="string-literal">'right'</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="comment"># Compute noise covariance using Probabilistic PCA model</span>
+        <span class="comment"># The sigma2 maximum likelihood (cf. eq. 12.46)</span>
+        <span class="keyword">if</span> <span class="identifier">n_components</span> <span class="relational-operator">&lt;</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">explained_variance_</span><span class="grouping">[</span><span class="identifier">n_components</span><span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_samples_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">components_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">explained_variance_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_ratio_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+            <span class="identifier">explained_variance_ratio_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">singular_values_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">singular_values_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span>
+
+        <span class="keyword">return</span> <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit_truncated</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">svd_solver</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model by computing truncated SVD (by ARPACK or randomized)
+        on X.
+        """</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_components=%r cannot be a string "</span>
+                             <span class="string-literal">"with svd_solver='%s'"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">svd_solver</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="int-literal">1</span> <span class="relational-operator">&lt;=</span> <span class="identifier">n_components</span> <span class="relational-operator">&lt;=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_components=%r must be between 1 and "</span>
+                             <span class="string-literal">"min(n_samples, n_features)=%r with "</span>
+                             <span class="string-literal">"svd_solver='%s'"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                <span class="identifier">svd_solver</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_components=%r must be of type int "</span>
+                             <span class="string-literal">"when greater than or equal to 1, was of type=%r"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">svd_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'arpack'</span> <span class="logical-operator">and</span> <span class="identifier">n_components</span> <span class="relational-operator">==</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span>
+                                                            <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_components=%r must be strictly less than "</span>
+                             <span class="string-literal">"min(n_samples, n_features)=%r with "</span>
+                             <span class="string-literal">"svd_solver='%s'"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                <span class="identifier">svd_solver</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="comment"># Center data</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="keyword">if</span> <span class="identifier">svd_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'arpack'</span><span class="punctuation">:</span>
+            <span class="identifier">v0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_init_arpack_v0</span><span class="grouping">(</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span>
+            <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svds</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">v0</span><span class="arithmetic-assignment">=</span><span class="identifier">v0</span><span class="grouping">)</span>
+            <span class="comment"># svds doesn't abide by scipy.linalg.svd/randomized_svd</span>
+            <span class="comment"># conventions, so reverse its outputs.</span>
+            <span class="identifier">S</span> <span class="arithmetic-assignment">=</span> <span class="identifier">S</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="comment"># flip eigenvectors' sign to enforce deterministic output</span>
+            <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svd_flip</span><span class="grouping">(</span><span class="identifier">U</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">Vt</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">elif</span> <span class="identifier">svd_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'randomized'</span><span class="punctuation">:</span>
+            <span class="comment"># sign flipping is done inside</span>
+            <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">randomized_svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="identifier">n_components</span><span class="punctuation">,</span>
+                                      <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">iterated_power</span><span class="punctuation">,</span>
+                                      <span class="identifier">flip_sign</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                      <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_samples_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Vt</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+
+        <span class="comment"># Get variance explained by singular values</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">S</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">total_var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">var</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ddof</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_ratio_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_</span> <span class="arithmetic-operator">/</span> <span class="identifier">total_var</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">singular_values_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>  <span class="comment"># Store the singular values.</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components_</span> <span class="relational-operator">&lt;</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">total_var</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+                                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">explained_variance_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_components</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+        <span class="keyword">return</span> <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vt</span>
+
+    <span class="keyword">def</span> <span class="identifier">score_samples</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return the log-likelihood of each sample.
+
+        See. "Pattern Recognition and Machine Learning"
+        by C. Bishop, 12.2.1 p. 574
+        or http://www.miketipping.com/papers/met-mppca.pdf
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data.
+
+        Returns
+        -------
+        ll : ndarray of shape (n_samples,)
+            Log-likelihood of each sample under the current model.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">Xr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">get_precision</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">log_like</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">-.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">Xr</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">Xr</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">log_like</span> <span class="arithmetic-assignment">-=</span> <span class="float-literal">.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+                          <span class="identifier">fast_logdet</span><span class="grouping">(</span><span class="identifier">precision</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">log_like</span>
+
+    <span class="keyword">def</span> <span class="identifier">score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return the average log-likelihood of all samples.
+
+        See. "Pattern Recognition and Machine Learning"
+        by C. Bishop, 12.2.1 p. 574
+        or http://www.miketipping.com/papers/met-mppca.pdf
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data.
+
+        y : Ignored
+
+        Returns
+        -------
+        ll : float
+            Average log-likelihood of the samples under the current model.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">score_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'preserves_dtype'</span><span class="punctuation">:</span> <span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

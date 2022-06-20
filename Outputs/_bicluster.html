@@ -1,0 +1,532 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Spectral biclustering algorithms."""</span>
+<span class="comment"># Authors : Kemal Eren</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">ABCMeta</span><span class="punctuation">,</span> <span class="identifier">abstractmethod</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">norm</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">import</span> <span class="identifier">dia_matrix</span><span class="punctuation">,</span> <span class="identifier">issparse</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">eigsh</span><span class="punctuation">,</span> <span class="identifier">svds</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">KMeans</span><span class="punctuation">,</span> <span class="identifier">MiniBatchKMeans</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">BiclusterMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">make_nonnegative</span><span class="punctuation">,</span> <span class="identifier">randomized_svd</span><span class="punctuation">,</span>
+                             <span class="identifier">safe_sparse_dot</span><span class="grouping">)</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span>
+
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'SpectralCoclustering'</span><span class="punctuation">,</span>
+           <span class="string-literal">'SpectralBiclustering'</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_scale_normalize</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Normalize ``X`` by scaling rows and columns independently.
+
+    Returns the normalized matrix and the row and column scaling
+    factors.
+
+    """</span>
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_nonnegative</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="identifier">row_diag</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="float-literal">1.0</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">col_diag</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="float-literal">1.0</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">row_diag</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">row_diag</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">row_diag</span><span class="grouping">)</span>
+    <span class="identifier">col_diag</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">col_diag</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">col_diag</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">n_rows</span><span class="punctuation">,</span> <span class="identifier">n_cols</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">r</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dia_matrix</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">row_diag</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_rows</span><span class="punctuation">,</span> <span class="identifier">n_rows</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dia_matrix</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">col_diag</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_cols</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">an</span> <span class="arithmetic-assignment">=</span> <span class="identifier">r</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span> <span class="arithmetic-operator">*</span> <span class="identifier">c</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">an</span> <span class="arithmetic-assignment">=</span> <span class="identifier">row_diag</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span> <span class="arithmetic-operator">*</span> <span class="identifier">col_diag</span>
+    <span class="keyword">return</span> <span class="identifier">an</span><span class="punctuation">,</span> <span class="identifier">row_diag</span><span class="punctuation">,</span> <span class="identifier">col_diag</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_bistochastic_normalize</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">1000</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-5</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Normalize rows and columns of ``X`` simultaneously so that all
+    rows sum to one constant and all columns sum to a different
+    constant.
+
+    """</span>
+    <span class="comment"># According to paper, this can also be done more efficiently with</span>
+    <span class="comment"># deviation reduction and balancing algorithms.</span>
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_nonnegative</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="identifier">X_scaled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+    <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X_new</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_scale_normalize</span><span class="grouping">(</span><span class="identifier">X_scaled</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">X_scaled</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-operator">-</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">X_scaled</span> <span class="arithmetic-operator">-</span> <span class="identifier">X_new</span><span class="grouping">)</span>
+        <span class="identifier">X_scaled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_new</span>
+        <span class="keyword">if</span> <span class="identifier">dist</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">dist</span> <span class="relational-operator">&lt;</span> <span class="identifier">tol</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+    <span class="keyword">return</span> <span class="identifier">X_scaled</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_log_normalize</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Normalize ``X`` according to Kluger's log-interactions scheme."""</span>
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_nonnegative</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">min_value</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Cannot compute log of a sparse matrix,"</span>
+                         <span class="string-literal">" because log(x) diverges to -infinity as x"</span>
+                         <span class="string-literal">" goes to 0."</span><span class="grouping">)</span>
+    <span class="identifier">L</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="identifier">row_avg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">L</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+    <span class="identifier">col_avg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">L</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="identifier">avg</span> <span class="arithmetic-assignment">=</span> <span class="identifier">L</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">L</span> <span class="arithmetic-operator">-</span> <span class="identifier">row_avg</span> <span class="arithmetic-operator">-</span> <span class="identifier">col_avg</span> <span class="arithmetic-operator">+</span> <span class="identifier">avg</span>
+
+
+<span class="keyword">class</span> <span class="identifier">BaseSpectral</span><span class="grouping">(</span><span class="identifier">BiclusterMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">metaclass</span><span class="arithmetic-assignment">=</span><span class="identifier">ABCMeta</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Base class for spectral biclustering."""</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">svd_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">"randomized"</span><span class="punctuation">,</span>
+                 <span class="identifier">n_svd_vecs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">mini_batch</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">init</span><span class="arithmetic-assignment">=</span><span class="string-literal">"k-means++"</span><span class="punctuation">,</span>
+                 <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_clusters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svd_method</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_svd_vecs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_svd_vecs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mini_batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mini_batch</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_parameters</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">legal_svd_methods</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">'randomized', 'arpack'</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">legal_svd_methods</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unknown SVD method: '{0}'. svd_method must be"</span>
+                             <span class="string-literal">" one of {1}."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span><span class="punctuation">,</span>
+                                                   <span class="identifier">legal_svd_methods</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Creates a biclustering for X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+
+        y : Ignored
+
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_parameters</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">_svd</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">array</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_discard</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Returns first `n_components` left and right singular
+        vectors u and v, discarding the first `n_discard`.
+
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span> <span class="relational-operator">==</span> <span class="string-literal">'randomized'</span><span class="punctuation">:</span>
+            <span class="identifier">kwargs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_svd_vecs</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">'n_oversamples'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_svd_vecs</span>
+            <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">randomized_svd</span><span class="grouping">(</span><span class="identifier">array</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span>
+                                      <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+                                      <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span> <span class="relational-operator">==</span> <span class="string-literal">'arpack'</span><span class="punctuation">:</span>
+            <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svds</span><span class="grouping">(</span><span class="identifier">array</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">ncv</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_svd_vecs</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">vt</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="comment"># some eigenvalues of A * A.T are negative, causing</span>
+                <span class="comment"># sqrt() to be np.nan. This causes some vectors in vt</span>
+                <span class="comment"># to be np.nan.</span>
+                <span class="identifier">A</span> <span class="arithmetic-assignment">=</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">array</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">array</span><span class="grouping">)</span>
+                <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+                <span class="comment"># initialize with [-1,1] as in ARPACK</span>
+                <span class="identifier">v0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">uniform</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigsh</span><span class="grouping">(</span><span class="identifier">A</span><span class="punctuation">,</span> <span class="identifier">ncv</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_svd_vecs</span><span class="punctuation">,</span> <span class="identifier">v0</span><span class="arithmetic-assignment">=</span><span class="identifier">v0</span><span class="grouping">)</span>
+                <span class="identifier">vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">T</span>
+            <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">u</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">A</span> <span class="arithmetic-assignment">=</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">array</span><span class="punctuation">,</span> <span class="identifier">array</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+                <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+                <span class="comment"># initialize with [-1,1] as in ARPACK</span>
+                <span class="identifier">v0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">uniform</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">u</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigsh</span><span class="grouping">(</span><span class="identifier">A</span><span class="punctuation">,</span> <span class="identifier">ncv</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_svd_vecs</span><span class="punctuation">,</span> <span class="identifier">v0</span><span class="arithmetic-assignment">=</span><span class="identifier">v0</span><span class="grouping">)</span>
+
+        <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">u</span><span class="grouping">)</span>
+        <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">vt</span><span class="grouping">)</span>
+        <span class="identifier">u</span> <span class="arithmetic-assignment">=</span> <span class="identifier">u</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">n_discard</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vt</span><span class="grouping">[</span><span class="identifier">n_discard</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">vt</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+    <span class="keyword">def</span> <span class="identifier">_k_means</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mini_batch</span><span class="punctuation">:</span>
+            <span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MiniBatchKMeans</span><span class="grouping">(</span><span class="identifier">n_clusters</span><span class="punctuation">,</span>
+                                    <span class="identifier">init</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">init</span><span class="punctuation">,</span>
+                                    <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_init</span><span class="punctuation">,</span>
+                                    <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">KMeans</span><span class="grouping">(</span><span class="identifier">n_clusters</span><span class="punctuation">,</span> <span class="identifier">init</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">init</span><span class="punctuation">,</span>
+                           <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_init</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">centroid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">cluster_centers_</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">labels_</span>
+        <span class="keyword">return</span> <span class="identifier">centroid</span><span class="punctuation">,</span> <span class="identifier">labels</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="string-literal">"_xfail_checks"</span><span class="punctuation">:</span> <span class="grouping">{</span>
+                <span class="string-literal">"check_estimators_dtypes": "raises nan error"</span><span class="punctuation">,</span>
+                <span class="string-literal">"check_fit2d_1sample": "_scale_normalize fails"</span><span class="punctuation">,</span>
+                <span class="string-literal">"check_fit2d_1feature": "raises apply_along_axis error"</span><span class="punctuation">,</span>
+                <span class="string-literal">"check_estimator_sparse_data": "does not fail gracefully"</span><span class="punctuation">,</span>
+                <span class="string-literal">"check_methods_subset_invariance": "empty array passed inside"</span><span class="punctuation">,</span>
+                <span class="string-literal">"check_dont_overwrite_parameters": "empty array passed inside"</span><span class="punctuation">,</span>
+                <span class="string-literal">"check_fit2d_predict1d": "emptry array passed inside"</span><span class="punctuation">,</span>
+            <span class="grouping">}</span>
+        <span class="grouping">}</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SpectralCoclustering</span><span class="grouping">(</span><span class="identifier">BaseSpectral</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Spectral Co-Clustering algorithm (Dhillon, 2001).
+
+    Clusters rows and columns of an array `X` to solve the relaxed
+    normalized cut of the bipartite graph created from `X` as follows:
+    the edge between row vertex `i` and column vertex `j` has weight
+    `X[i, j]`.
+
+    The resulting bicluster structure is block-diagonal, since each
+    row and each column belongs to exactly one bicluster.
+
+    Supports sparse matrices, as long as they are nonnegative.
+
+    Read more in the :ref:`User Guide &lt;spectral_coclustering&gt;`.
+
+    Parameters
+    ----------
+    n_clusters : int, default=3
+        The number of biclusters to find.
+
+    svd_method : {'randomized', 'arpack'}, default='randomized'
+        Selects the algorithm for finding singular vectors. May be
+        'randomized' or 'arpack'. If 'randomized', use
+        :func:`sklearn.utils.extmath.randomized_svd`, which may be faster
+        for large matrices. If 'arpack', use
+        :func:`scipy.sparse.linalg.svds`, which is more accurate, but
+        possibly slower in some cases.
+
+    n_svd_vecs : int, default=None
+        Number of vectors to use in calculating the SVD. Corresponds
+        to `ncv` when `svd_method=arpack` and `n_oversamples` when
+        `svd_method` is 'randomized`.
+
+    mini_batch : bool, default=False
+        Whether to use mini-batch k-means, which is faster but may get
+        different results.
+
+    init : {'k-means++', 'random', or ndarray of shape \
+            (n_clusters, n_features), default='k-means++'
+        Method for initialization of k-means algorithm; defaults to
+        'k-means++'.
+
+    n_init : int, default=10
+        Number of random initializations that are tried with the
+        k-means algorithm.
+
+        If mini-batch k-means is used, the best initialization is
+        chosen and the algorithm runs once. Otherwise, the algorithm
+        is run for each initialization and the best solution chosen.
+
+    random_state : int, RandomState instance, default=None
+        Used for randomizing the singular value decomposition and the k-means
+        initialization. Use an int to make the randomness deterministic.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    rows_ : array-like of shape (n_row_clusters, n_rows)
+        Results of the clustering. `rows[i, r]` is True if
+        cluster `i` contains row `r`. Available only after calling ``fit``.
+
+    columns_ : array-like of shape (n_column_clusters, n_columns)
+        Results of the clustering, like `rows`.
+
+    row_labels_ : array-like of shape (n_rows,)
+        The bicluster label of each row.
+
+    column_labels_ : array-like of shape (n_cols,)
+        The bicluster label of each column.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import SpectralCoclustering
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[1, 1], [2, 1], [1, 0],
+    ...               [4, 7], [3, 5], [3, 6]])
+    &gt;&gt;&gt; clustering = SpectralCoclustering(n_clusters=2, random_state=0).fit(X)
+    &gt;&gt;&gt; clustering.row_labels_ #doctest: +SKIP
+    array([0, 1, 1, 0, 0, 0], dtype=int32)
+    &gt;&gt;&gt; clustering.column_labels_ #doctest: +SKIP
+    array([0, 0], dtype=int32)
+    &gt;&gt;&gt; clustering
+    SpectralCoclustering(n_clusters=2, random_state=0)
+
+    References
+    ----------
+
+    * Dhillon, Inderjit S, 2001. `Co-clustering documents and words using
+      bipartite spectral graph partitioning
+      &lt;http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.140.3011&gt;`__.
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">svd_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'randomized'</span><span class="punctuation">,</span>
+                 <span class="identifier">n_svd_vecs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">mini_batch</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">init</span><span class="arithmetic-assignment">=</span><span class="string-literal">'k-means++'</span><span class="punctuation">,</span>
+                 <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">n_clusters</span><span class="punctuation">,</span>
+                         <span class="identifier">svd_method</span><span class="punctuation">,</span>
+                         <span class="identifier">n_svd_vecs</span><span class="punctuation">,</span>
+                         <span class="identifier">mini_batch</span><span class="punctuation">,</span>
+                         <span class="identifier">init</span><span class="punctuation">,</span>
+                         <span class="identifier">n_init</span><span class="punctuation">,</span>
+                         <span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">normalized_data</span><span class="punctuation">,</span> <span class="identifier">row_diag</span><span class="punctuation">,</span> <span class="identifier">col_diag</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_scale_normalize</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">n_sv</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">+</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ceil</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log2</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_svd</span><span class="grouping">(</span><span class="identifier">normalized_data</span><span class="punctuation">,</span> <span class="identifier">n_sv</span><span class="punctuation">,</span> <span class="identifier">n_discard</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">z</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">row_diag</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">u</span><span class="punctuation">,</span>
+                       <span class="identifier">col_diag</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">v</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_k_means</span><span class="grouping">(</span><span class="identifier">z</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span><span class="grouping">)</span>
+
+        <span class="identifier">n_rows</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">row_labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">labels</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_rows</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">column_labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">n_rows</span><span class="punctuation">:</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rows_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">row_labels_</span> <span class="relational-operator">==</span> <span class="identifier">c</span>
+                                <span class="keyword">for</span> <span class="identifier">c</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">columns_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">column_labels_</span> <span class="relational-operator">==</span> <span class="identifier">c</span>
+                                   <span class="keyword">for</span> <span class="identifier">c</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SpectralBiclustering</span><span class="grouping">(</span><span class="identifier">BaseSpectral</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Spectral biclustering (Kluger, 2003).
+
+    Partitions rows and columns under the assumption that the data has
+    an underlying checkerboard structure. For instance, if there are
+    two row partitions and three column partitions, each row will
+    belong to three biclusters, and each column will belong to two
+    biclusters. The outer product of the corresponding row and column
+    label vectors gives this checkerboard structure.
+
+    Read more in the :ref:`User Guide &lt;spectral_biclustering&gt;`.
+
+    Parameters
+    ----------
+    n_clusters : int or tuple (n_row_clusters, n_column_clusters), default=3
+        The number of row and column clusters in the checkerboard
+        structure.
+
+    method : {'bistochastic', 'scale', 'log'}, default='bistochastic'
+        Method of normalizing and converting singular vectors into
+        biclusters. May be one of 'scale', 'bistochastic', or 'log'.
+        The authors recommend using 'log'. If the data is sparse,
+        however, log normalization will not work, which is why the
+        default is 'bistochastic'.
+
+        .. warning::
+           if `method='log'`, the data must be sparse.
+
+    n_components : int, default=6
+        Number of singular vectors to check.
+
+    n_best : int, default=3
+        Number of best singular vectors to which to project the data
+        for clustering.
+
+    svd_method : {'randomized', 'arpack'}, default='randomized'
+        Selects the algorithm for finding singular vectors. May be
+        'randomized' or 'arpack'. If 'randomized', uses
+        :func:`~sklearn.utils.extmath.randomized_svd`, which may be faster
+        for large matrices. If 'arpack', uses
+        `scipy.sparse.linalg.svds`, which is more accurate, but
+        possibly slower in some cases.
+
+    n_svd_vecs : int, default=None
+        Number of vectors to use in calculating the SVD. Corresponds
+        to `ncv` when `svd_method=arpack` and `n_oversamples` when
+        `svd_method` is 'randomized`.
+
+    mini_batch : bool, default=False
+        Whether to use mini-batch k-means, which is faster but may get
+        different results.
+
+    init : {'k-means++', 'random'} or ndarray of (n_clusters, n_features), \
+            default='k-means++'
+        Method for initialization of k-means algorithm; defaults to
+        'k-means++'.
+
+    n_init : int, default=10
+        Number of random initializations that are tried with the
+        k-means algorithm.
+
+        If mini-batch k-means is used, the best initialization is
+        chosen and the algorithm runs once. Otherwise, the algorithm
+        is run for each initialization and the best solution chosen.
+
+    random_state : int, RandomState instance, default=None
+        Used for randomizing the singular value decomposition and the k-means
+        initialization. Use an int to make the randomness deterministic.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    rows_ : array-like of shape (n_row_clusters, n_rows)
+        Results of the clustering. `rows[i, r]` is True if
+        cluster `i` contains row `r`. Available only after calling ``fit``.
+
+    columns_ : array-like of shape (n_column_clusters, n_columns)
+        Results of the clustering, like `rows`.
+
+    row_labels_ : array-like of shape (n_rows,)
+        Row partition labels.
+
+    column_labels_ : array-like of shape (n_cols,)
+        Column partition labels.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import SpectralBiclustering
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[1, 1], [2, 1], [1, 0],
+    ...               [4, 7], [3, 5], [3, 6]])
+    &gt;&gt;&gt; clustering = SpectralBiclustering(n_clusters=2, random_state=0).fit(X)
+    &gt;&gt;&gt; clustering.row_labels_
+    array([1, 1, 1, 0, 0, 0], dtype=int32)
+    &gt;&gt;&gt; clustering.column_labels_
+    array([0, 1], dtype=int32)
+    &gt;&gt;&gt; clustering
+    SpectralBiclustering(n_clusters=2, random_state=0)
+
+    References
+    ----------
+
+    * Kluger, Yuval, et. al., 2003. `Spectral biclustering of microarray
+      data: coclustering genes and conditions
+      &lt;http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.135.1608&gt;`__.
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'bistochastic'</span><span class="punctuation">,</span>
+                 <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="identifier">n_best</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">svd_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'randomized'</span><span class="punctuation">,</span>
+                 <span class="identifier">n_svd_vecs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">mini_batch</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">init</span><span class="arithmetic-assignment">=</span><span class="string-literal">'k-means++'</span><span class="punctuation">,</span>
+                 <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">n_clusters</span><span class="punctuation">,</span>
+                         <span class="identifier">svd_method</span><span class="punctuation">,</span>
+                         <span class="identifier">n_svd_vecs</span><span class="punctuation">,</span>
+                         <span class="identifier">mini_batch</span><span class="punctuation">,</span>
+                         <span class="identifier">init</span><span class="punctuation">,</span>
+                         <span class="identifier">n_init</span><span class="punctuation">,</span>
+                         <span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">method</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_best</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_best</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_parameters</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_check_parameters</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">legal_methods</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">'bistochastic', 'scale', 'log'</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">legal_methods</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unknown method: '{0}'. method must be"</span>
+                             <span class="string-literal">" one of {1}."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span><span class="punctuation">,</span> <span class="identifier">legal_methods</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">TypeError</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">r</span><span class="punctuation">,</span> <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span>
+                <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">r</span><span class="grouping">)</span>
+                <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">c</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="grouping">(</span><span class="identifier">ValueError</span><span class="punctuation">,</span> <span class="identifier">TypeError</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Incorrect parameter n_clusters has value:"</span>
+                                 <span class="string-literal">" {}. It should either be a single integer"</span>
+                                 <span class="string-literal">" or an iterable with two integers:"</span>
+                                 <span class="string-literal">" (n_row_clusters, n_column_clusters)"</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Parameter n_components must be greater than 0,"</span>
+                             <span class="string-literal">" but its value is {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_best</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Parameter n_best must be greater than 0,"</span>
+                             <span class="string-literal">" but its value is {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_best</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_best</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_best cannot be larger than"</span>
+                             <span class="string-literal">" n_components, but {} &gt;  {}"</span>
+                             <span class="string-literal">""</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_best</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">n_sv</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'bistochastic'</span><span class="punctuation">:</span>
+            <span class="identifier">normalized_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_bistochastic_normalize</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="identifier">n_sv</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'scale'</span><span class="punctuation">:</span>
+            <span class="identifier">normalized_data</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_scale_normalize</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="identifier">n_sv</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'log'</span><span class="punctuation">:</span>
+            <span class="identifier">normalized_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_log_normalize</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">n_discard</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'log'</span> <span class="keyword">else</span> <span class="int-literal">1</span>
+        <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_svd</span><span class="grouping">(</span><span class="identifier">normalized_data</span><span class="punctuation">,</span> <span class="identifier">n_sv</span><span class="punctuation">,</span> <span class="identifier">n_discard</span><span class="grouping">)</span>
+        <span class="identifier">ut</span> <span class="arithmetic-assignment">=</span> <span class="identifier">u</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="identifier">vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">n_row_clusters</span><span class="punctuation">,</span> <span class="identifier">n_col_clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span>
+        <span class="keyword">except</span> <span class="identifier">TypeError</span><span class="punctuation">:</span>
+            <span class="identifier">n_row_clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_col_clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span>
+
+        <span class="identifier">best_ut</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_best_piecewise</span><span class="grouping">(</span><span class="identifier">ut</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_best</span><span class="punctuation">,</span>
+                                           <span class="identifier">n_row_clusters</span><span class="grouping">)</span>
+
+        <span class="identifier">best_vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_best_piecewise</span><span class="grouping">(</span><span class="identifier">vt</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_best</span><span class="punctuation">,</span>
+                                           <span class="identifier">n_col_clusters</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">row_labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_project_and_cluster</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">best_vt</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span>
+                                                     <span class="identifier">n_row_clusters</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">column_labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_project_and_cluster</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">best_ut</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span>
+                                                        <span class="identifier">n_col_clusters</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rows_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">row_labels_</span> <span class="relational-operator">==</span> <span class="identifier">label</span>
+                                <span class="keyword">for</span> <span class="identifier">label</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_row_clusters</span><span class="grouping">)</span>
+                                <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_col_clusters</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">columns_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">column_labels_</span> <span class="relational-operator">==</span> <span class="identifier">label</span>
+                                   <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_row_clusters</span><span class="grouping">)</span>
+                                   <span class="keyword">for</span> <span class="identifier">label</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_col_clusters</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit_best_piecewise</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">vectors</span><span class="punctuation">,</span> <span class="identifier">n_best</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Find the ``n_best`` vectors that are best approximated by piecewise
+        constant vectors.
+
+        The piecewise vectors are found by k-means; the best is chosen
+        according to Euclidean distance.
+
+        """</span>
+        <span class="keyword">def</span> <span class="identifier">make_piecewise</span><span class="grouping">(</span><span class="identifier">v</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">centroid</span><span class="punctuation">,</span> <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_k_means</span><span class="grouping">(</span><span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">centroid</span><span class="grouping">[</span><span class="identifier">labels</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">piecewise_vectors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">apply_along_axis</span><span class="grouping">(</span><span class="identifier">make_piecewise</span><span class="punctuation">,</span>
+                                                <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">arr</span><span class="arithmetic-assignment">=</span><span class="identifier">vectors</span><span class="grouping">)</span>
+        <span class="identifier">dists</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">apply_along_axis</span><span class="grouping">(</span><span class="identifier">norm</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                                    <span class="identifier">arr</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">vectors</span> <span class="arithmetic-operator">-</span> <span class="identifier">piecewise_vectors</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">result</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectors</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">dists</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_best</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">result</span>
+
+    <span class="keyword">def</span> <span class="identifier">_project_and_cluster</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">vectors</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Project ``data`` to ``vectors`` and cluster the result."""</span>
+        <span class="identifier">projected</span> <span class="arithmetic-assignment">=</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">vectors</span><span class="grouping">)</span>
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_k_means</span><span class="grouping">(</span><span class="identifier">projected</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">labels</span>
+
+    </pre>
+  </body>
+</html>

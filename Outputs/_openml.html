@@ -1,0 +1,945 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="keyword">import</span> <span class="identifier">gzip</span>
+<span class="keyword">import</span> <span class="identifier">json</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">import</span> <span class="identifier">shutil</span>
+<span class="keyword">import</span> <span class="identifier">hashlib</span>
+<span class="keyword">from</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span> <span class="keyword">import</span> <span class="identifier">join</span>
+<span class="keyword">from</span> <span class="identifier">warnings</span> <span class="keyword">import</span> <span class="identifier">warn</span>
+<span class="keyword">from</span> <span class="identifier">contextlib</span> <span class="keyword">import</span> <span class="identifier">closing</span>
+<span class="keyword">from</span> <span class="identifier">functools</span> <span class="keyword">import</span> <span class="identifier">wraps</span>
+<span class="keyword">from</span> <span class="identifier">typing</span> <span class="keyword">import</span> <span class="identifier">Callable</span><span class="punctuation">,</span> <span class="identifier">Optional</span><span class="punctuation">,</span> <span class="identifier">Dict</span><span class="punctuation">,</span> <span class="identifier">Tuple</span><span class="punctuation">,</span> <span class="identifier">List</span><span class="punctuation">,</span> <span class="identifier">Any</span><span class="punctuation">,</span> <span class="identifier">Union</span>
+<span class="keyword">import</span> <span class="identifier">itertools</span>
+<span class="keyword">from</span> <span class="identifier">collections</span><span class="punctuation">.</span><span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">Generator</span>
+<span class="keyword">from</span> <span class="identifier">collections</span> <span class="keyword">import</span> <span class="identifier">OrderedDict</span>
+<span class="keyword">from</span> <span class="identifier">functools</span> <span class="keyword">import</span> <span class="identifier">partial</span>
+
+<span class="keyword">from</span> <span class="identifier">urllib</span><span class="punctuation">.</span><span class="identifier">request</span> <span class="keyword">import</span> <span class="identifier">urlopen</span><span class="punctuation">,</span> <span class="identifier">Request</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">externals</span> <span class="keyword">import</span> <span class="identifier">_arff</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">externals</span><span class="punctuation">.</span><span class="identifier">_arff</span> <span class="keyword">import</span> <span class="identifier">ArffSparseDataType</span><span class="punctuation">,</span> <span class="identifier">ArffContainerType</span>
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">get_data_home</span>
+<span class="keyword">from</span> <span class="identifier">urllib</span><span class="punctuation">.</span><span class="identifier">error</span> <span class="keyword">import</span> <span class="identifier">HTTPError</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">Bunch</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">is_scalar_nan</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">get_chunk_n_rows</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">_chunk_generator</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_pandas_support</span>  <span class="comment"># noqa</span>
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'fetch_openml'</span><span class="grouping">]</span>
+
+<span class="identifier">_OPENML_PREFIX</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"https://openml.org/"</span>
+<span class="identifier">_SEARCH_NAME</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"api/v1/json/data/list/data_name/{}/limit/2"</span>
+<span class="identifier">_DATA_INFO</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"api/v1/json/data/{}"</span>
+<span class="identifier">_DATA_FEATURES</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"api/v1/json/data/features/{}"</span>
+<span class="identifier">_DATA_QUALITIES</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"api/v1/json/data/qualities/{}"</span>
+<span class="identifier">_DATA_FILE</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"data/v1/download/{}"</span>
+
+<span class="identifier">OpenmlQualitiesType</span> <span class="arithmetic-assignment">=</span> <span class="identifier">List</span><span class="grouping">[</span><span class="identifier">Dict</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">]</span><span class="grouping">]</span>
+<span class="identifier">OpenmlFeaturesType</span> <span class="arithmetic-assignment">=</span> <span class="identifier">List</span><span class="grouping">[</span><span class="identifier">Dict</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">]</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_local_path</span><span class="grouping">(</span><span class="identifier">openml_path</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">str</span><span class="punctuation">:</span>
+    <span class="keyword">return</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="punctuation">,</span> <span class="string-literal">'openml.org'</span><span class="punctuation">,</span> <span class="identifier">openml_path</span> <span class="arithmetic-operator">+</span> <span class="string-literal">".gz"</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_retry_with_clean_cache</span><span class="grouping">(</span>
+    <span class="identifier">openml_path</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">Callable</span><span class="punctuation">:</span>
+    <span class="comment">"""If the first call to the decorated function fails, the local cached
+    file is removed, and the function is called again. If ``data_home`` is
+    ``None``, then the function is called once.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">decorator</span><span class="grouping">(</span><span class="identifier">f</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="punctuation">@</span><span class="identifier">wraps</span><span class="grouping">(</span><span class="identifier">f</span><span class="grouping">)</span>
+        <span class="keyword">def</span> <span class="identifier">wrapper</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kw</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">data_home</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">f</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kw</span><span class="grouping">)</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">f</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kw</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="identifier">HTTPError</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span>
+            <span class="keyword">except</span> <span class="invalid">E</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="punctuation">:</span>
+                <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Invalid cache, redownloading file"</span><span class="punctuation">,</span> <span class="identifier">RuntimeWarning</span><span class="grouping">)</span>
+                <span class="identifier">local_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_local_path</span><span class="grouping">(</span><span class="identifier">openml_path</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">unlink</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="grouping">)</span>
+                <span class="keyword">return</span> <span class="identifier">f</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kw</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">wrapper</span>
+    <span class="keyword">return</span> <span class="identifier">decorator</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_open_openml_url</span><span class="grouping">(</span><span class="identifier">openml_path</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Returns a resource from OpenML.org. Caches it to data_home if required.
+
+    Parameters
+    ----------
+    openml_path : str
+        OpenML URL that will be accessed. This will be prefixes with
+        _OPENML_PREFIX
+
+    data_home : str
+        Directory to which the files will be cached. If None, no caching will
+        be applied.
+
+    Returns
+    -------
+    result : stream
+        A stream to the OpenML resource
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">is_gzip_encoded</span><span class="grouping">(</span><span class="identifier">_fsrc</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">_fsrc</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">'Content-Encoding', '') == 'gzip'</span>
+
+    <span class="identifier">req</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Request</span><span class="grouping">(</span><span class="identifier">_OPENML_PREFIX</span> <span class="arithmetic-operator">+</span> <span class="identifier">openml_path</span><span class="grouping">)</span>
+    <span class="identifier">req</span><span class="punctuation">.</span><span class="identifier">add_header</span><span class="grouping">(</span><span class="string-literal">'Accept-encoding', 'gzip'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">data_home</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">fsrc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">urlopen</span><span class="grouping">(</span><span class="identifier">req</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">is_gzip_encoded</span><span class="grouping">(</span><span class="identifier">fsrc</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">gzip</span><span class="punctuation">.</span><span class="identifier">GzipFile</span><span class="grouping">(</span><span class="identifier">fileobj</span><span class="arithmetic-assignment">=</span><span class="identifier">fsrc</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">'rb'</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">fsrc</span>
+
+    <span class="identifier">local_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_local_path</span><span class="grouping">(</span><span class="identifier">openml_path</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">makedirs</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">OSError</span><span class="punctuation">:</span>
+            <span class="comment"># potentially, the directory has been created already</span>
+            <span class="keyword">pass</span>
+
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="keyword">with</span> <span class="identifier">closing</span><span class="grouping">(</span><span class="identifier">urlopen</span><span class="grouping">(</span><span class="identifier">req</span><span class="grouping">)</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">fsrc</span><span class="punctuation">:</span>
+                <span class="identifier">opener</span><span class="punctuation">:</span> <span class="identifier">Callable</span>
+                <span class="keyword">if</span> <span class="identifier">is_gzip_encoded</span><span class="grouping">(</span><span class="identifier">fsrc</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">opener</span> <span class="arithmetic-assignment">=</span> <span class="identifier">open</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="identifier">opener</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gzip</span><span class="punctuation">.</span><span class="identifier">GzipFile</span>
+                <span class="keyword">with</span> <span class="identifier">opener</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="punctuation">,</span> <span class="string-literal">'wb'</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">fdst</span><span class="punctuation">:</span>
+                    <span class="identifier">shutil</span><span class="punctuation">.</span><span class="identifier">copyfileobj</span><span class="grouping">(</span><span class="identifier">fsrc</span><span class="punctuation">,</span> <span class="identifier">fdst</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="invalid">E</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">unlink</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="grouping">)</span>
+            <span class="keyword">raise</span>
+
+    <span class="comment"># XXX: First time, decompression will not be necessary (by using fsrc), but</span>
+    <span class="comment"># it will happen nonetheless</span>
+    <span class="keyword">return</span> <span class="identifier">gzip</span><span class="punctuation">.</span><span class="identifier">GzipFile</span><span class="grouping">(</span><span class="identifier">local_path</span><span class="punctuation">,</span> <span class="string-literal">'rb'</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">OpenMLError</span><span class="grouping">(</span><span class="identifier">ValueError</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""HTTP 412 is a specific OpenML error code, indicating a generic error"""</span>
+    <span class="keyword">pass</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_json_content_from_openml_api</span><span class="grouping">(</span>
+    <span class="identifier">url</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="punctuation">,</span>
+    <span class="identifier">error_message</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">Dict</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Loads json data from the openml api
+
+    Parameters
+    ----------
+    url : str
+        The URL to load from. Should be an official OpenML endpoint
+
+    error_message : str or None
+        The error message to raise if an acceptable OpenML error is thrown
+        (acceptable error is, e.g., data id not found. Other errors, like 404's
+        will throw the native error message)
+
+    data_home : str or None
+        Location to cache the response. None if no cache is required.
+
+    Returns
+    -------
+    json_data : json
+        the json result from the OpenML server if the call was successful.
+        An exception otherwise.
+    """</span>
+
+    <span class="punctuation">@</span><span class="identifier">_retry_with_clean_cache</span><span class="grouping">(</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">_load_json</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">with</span> <span class="identifier">closing</span><span class="grouping">(</span><span class="identifier">_open_openml_url</span><span class="grouping">(</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">response</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">json</span><span class="punctuation">.</span><span class="identifier">loads</span><span class="grouping">(</span><span class="identifier">response</span><span class="punctuation">.</span><span class="identifier">read</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">decode</span><span class="grouping">(</span><span class="string-literal">"utf-8"</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">try</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">_load_json</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">except</span> <span class="identifier">HTTPError</span> <span class="keyword">as</span> <span class="identifier">error</span><span class="punctuation">:</span>
+        <span class="comment"># 412 is an OpenML specific error code, indicating a generic error</span>
+        <span class="comment"># (e.g., data not found)</span>
+        <span class="keyword">if</span> <span class="identifier">error</span><span class="punctuation">.</span><span class="identifier">code</span> <span class="relational-operator">!=</span> <span class="int-literal">412</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">error</span>
+
+    <span class="comment"># 412 error, not in except for nicer traceback</span>
+    <span class="keyword">raise</span> <span class="identifier">OpenMLError</span><span class="grouping">(</span><span class="identifier">error_message</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_split_sparse_columns</span><span class="grouping">(</span>
+    <span class="identifier">arff_data</span><span class="punctuation">:</span> <span class="identifier">ArffSparseDataType</span><span class="punctuation">,</span> <span class="identifier">include_columns</span><span class="punctuation">:</span> <span class="identifier">List</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">ArffSparseDataType</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    obtains several columns from sparse arff representation. Additionally, the
+    column indices are re-labelled, given the columns that are not included.
+    (e.g., when including [1, 2, 3], the columns will be relabelled to
+    [0, 1, 2])
+
+    Parameters
+    ----------
+    arff_data : tuple
+        A tuple of three lists of equal size; first list indicating the value,
+        second the x coordinate and the third the y coordinate.
+
+    include_columns : list
+        A list of columns to include.
+
+    Returns
+    -------
+    arff_data_new : tuple
+        Subset of arff data with only the include columns indicated by the
+        include_columns argument.
+    """</span>
+    <span class="identifier">arff_data_new</span><span class="punctuation">:</span> <span class="identifier">ArffSparseDataType</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">reindexed_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">column_idx</span><span class="punctuation">:</span> <span class="identifier">array_idx</span> <span class="keyword">for</span> <span class="identifier">array_idx</span><span class="punctuation">,</span> <span class="identifier">column_idx</span>
+                         <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">include_columns</span><span class="grouping">)</span><span class="grouping">}</span>
+    <span class="keyword">for</span> <span class="identifier">val</span><span class="punctuation">,</span> <span class="identifier">row_idx</span><span class="punctuation">,</span> <span class="identifier">col_idx</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">col_idx</span> <span class="relational-operator">in</span> <span class="identifier">include_columns</span><span class="punctuation">:</span>
+            <span class="identifier">arff_data_new</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">val</span><span class="grouping">)</span>
+            <span class="identifier">arff_data_new</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">row_idx</span><span class="grouping">)</span>
+            <span class="identifier">arff_data_new</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">reindexed_columns</span><span class="grouping">[</span><span class="identifier">col_idx</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">arff_data_new</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_sparse_data_to_array</span><span class="grouping">(</span>
+    <span class="identifier">arff_data</span><span class="punctuation">:</span> <span class="identifier">ArffSparseDataType</span><span class="punctuation">,</span> <span class="identifier">include_columns</span><span class="punctuation">:</span> <span class="identifier">List</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="punctuation">:</span>
+    <span class="comment"># turns the sparse data back into an array (can't use toarray() function,</span>
+    <span class="comment"># as this does only work on numeric data)</span>
+    <span class="identifier">num_obs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+    <span class="identifier">y_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">num_obs</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">include_columns</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">reindexed_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">column_idx</span><span class="punctuation">:</span> <span class="identifier">array_idx</span> <span class="keyword">for</span> <span class="identifier">array_idx</span><span class="punctuation">,</span> <span class="identifier">column_idx</span>
+                         <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">include_columns</span><span class="grouping">)</span><span class="grouping">}</span>
+    <span class="comment"># TODO: improve for efficiency</span>
+    <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">y_shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">val</span><span class="punctuation">,</span> <span class="identifier">row_idx</span><span class="punctuation">,</span> <span class="identifier">col_idx</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">col_idx</span> <span class="relational-operator">in</span> <span class="identifier">include_columns</span><span class="punctuation">:</span>
+            <span class="identifier">y</span><span class="grouping">[</span><span class="identifier">row_idx</span><span class="punctuation">,</span> <span class="identifier">reindexed_columns</span><span class="grouping">[</span><span class="identifier">col_idx</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">val</span>
+    <span class="keyword">return</span> <span class="identifier">y</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_convert_arff_data</span><span class="grouping">(</span>
+    <span class="identifier">arff</span><span class="punctuation">:</span> <span class="identifier">ArffContainerType</span><span class="punctuation">,</span>
+    <span class="identifier">col_slice_x</span><span class="punctuation">:</span> <span class="identifier">List</span><span class="grouping">[</span><span class="identifier">int</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">col_slice_y</span><span class="punctuation">:</span> <span class="identifier">List</span><span class="grouping">[</span><span class="identifier">int</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">shape</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">Tuple</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">Tuple</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    converts the arff object into the appropriate matrix type (np.array or
+    scipy.sparse.csr_matrix) based on the 'data part' (i.e., in the
+    liac-arff dict, the object from the 'data' key)
+
+    Parameters
+    ----------
+    arff : dict
+        As obtained from liac-arff object.
+
+    col_slice_x : list
+        The column indices that are sliced from the original array to return
+        as X data
+
+    col_slice_y : list
+        The column indices that are sliced from the original array to return
+        as y data
+
+    Returns
+    -------
+    X : np.array or scipy.sparse.csr_matrix
+    y : np.array
+    """</span>
+    <span class="identifier">arff_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">arff</span><span class="grouping">[</span><span class="string-literal">'data'</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="punctuation">,</span> <span class="identifier">Generator</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">shape</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"shape must be provided when arr['data'] is a Generator"</span>
+            <span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">count</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="grouping">(</span><span class="identifier">itertools</span><span class="punctuation">.</span><span class="identifier">chain</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">l</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="grouping">)</span><span class="punctuation">,</span>
+                           <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">'float64'</span><span class="punctuation">,</span> <span class="identifier">count</span><span class="arithmetic-assignment">=</span><span class="identifier">count</span><span class="grouping">)</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col_slice_x</span><span class="grouping">]</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col_slice_y</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span>
+    <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="punctuation">,</span> <span class="identifier">tuple</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">arff_data_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_split_sparse_columns</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="punctuation">,</span> <span class="identifier">col_slice_x</span><span class="grouping">)</span>
+        <span class="identifier">num_obs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="identifier">X_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">num_obs</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">col_slice_x</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">coo_matrix</span><span class="grouping">(</span>
+            <span class="grouping">(</span><span class="identifier">arff_data_X</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">arff_data_X</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">arff_data_X</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">X_shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">tocsr</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_sparse_data_to_array</span><span class="grouping">(</span><span class="identifier">arff_data</span><span class="punctuation">,</span> <span class="identifier">col_slice_y</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># This should never happen</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Unexpected Data Type obtained from arff.'</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_feature_to_dtype</span><span class="grouping">(</span><span class="identifier">feature</span><span class="punctuation">:</span> <span class="identifier">Dict</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Map feature to dtype for pandas DataFrame
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'data_type'] == 'string'</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">object</span>
+    <span class="keyword">elif</span> <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'data_type'] == 'nominal'</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="string-literal">'category'</span>
+    <span class="comment"># only numeric, integer, real are left</span>
+    <span class="keyword">elif</span> <span class="grouping">(</span><span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'number_of_missing_values'] != '0'</span> <span class="logical-operator">or</span>
+          <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'data_type'] in ['numeric', 'real'</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># cast to floats when there are any missing values</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span>
+    <span class="keyword">elif</span> <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'data_type'] == 'integer'</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int64</span>
+    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Unsupported feature: {}'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">feature</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_convert_arff_data_dataframe</span><span class="grouping">(</span>
+    <span class="identifier">arff</span><span class="punctuation">:</span> <span class="identifier">ArffContainerType</span><span class="punctuation">,</span> <span class="identifier">columns</span><span class="punctuation">:</span> <span class="identifier">List</span><span class="punctuation">,</span> <span class="identifier">features_dict</span><span class="punctuation">:</span> <span class="identifier">Dict</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">Any</span><span class="grouping">]</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">Tuple</span><span class="punctuation">:</span>
+    <span class="comment">"""Convert the ARFF object into a pandas DataFrame.
+
+    Parameters
+    ----------
+    arff : dict
+        As obtained from liac-arff object.
+
+    columns : list
+        Columns from dataframe to return.
+
+    features_dict : dict
+        Maps feature name to feature info from openml.
+
+    Returns
+    -------
+    result : tuple
+        tuple with the resulting dataframe
+    """</span>
+    <span class="identifier">pd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_pandas_support</span><span class="grouping">(</span><span class="string-literal">'fetch_openml with as_frame=True'</span><span class="grouping">)</span>
+
+    <span class="identifier">attributes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">OrderedDict</span><span class="grouping">(</span><span class="identifier">arff</span><span class="grouping">[</span><span class="string-literal">'attributes'</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">arff_columns</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">attributes</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">arff</span><span class="grouping">[</span><span class="string-literal">'data'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">Generator</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">"arff['data'] must be a generator when converting to pd.DataFrame."</span>
+        <span class="grouping">)</span>
+
+    <span class="comment"># calculate chunksize</span>
+    <span class="identifier">first_row</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="identifier">arff</span><span class="grouping">[</span><span class="string-literal">'data'</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">first_df</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">first_row</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">arff_columns</span><span class="grouping">)</span>
+
+    <span class="identifier">row_bytes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">first_df</span><span class="punctuation">.</span><span class="identifier">memory_usage</span><span class="grouping">(</span><span class="identifier">deep</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">chunksize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_chunk_n_rows</span><span class="grouping">(</span><span class="identifier">row_bytes</span><span class="grouping">)</span>
+
+    <span class="comment"># read arff data with chunks</span>
+    <span class="identifier">columns_to_keep</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">col</span> <span class="keyword">for</span> <span class="identifier">col</span> <span class="relational-operator">in</span> <span class="identifier">arff_columns</span> <span class="keyword">if</span> <span class="identifier">col</span> <span class="relational-operator">in</span> <span class="identifier">columns</span><span class="grouping">]</span>
+    <span class="identifier">dfs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="identifier">dfs</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">first_df</span><span class="grouping">[</span><span class="identifier">columns_to_keep</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">data</span> <span class="relational-operator">in</span> <span class="identifier">_chunk_generator</span><span class="grouping">(</span><span class="identifier">arff</span><span class="grouping">[</span><span class="string-literal">'data'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">chunksize</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">dfs</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">arff_columns</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">columns_to_keep</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">df</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">concat</span><span class="grouping">(</span><span class="identifier">dfs</span><span class="punctuation">,</span> <span class="identifier">ignore_index</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">for</span> <span class="identifier">column</span> <span class="relational-operator">in</span> <span class="identifier">columns_to_keep</span><span class="punctuation">:</span>
+        <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_feature_to_dtype</span><span class="grouping">(</span><span class="identifier">features_dict</span><span class="grouping">[</span><span class="identifier">column</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">dtype</span> <span class="relational-operator">==</span> <span class="string-literal">'category'</span><span class="punctuation">:</span>
+            <span class="identifier">cats_without_missing</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">cat</span> <span class="keyword">for</span> <span class="identifier">cat</span> <span class="relational-operator">in</span> <span class="identifier">attributes</span><span class="grouping">[</span><span class="identifier">column</span><span class="grouping">]</span>
+                                    <span class="keyword">if</span> <span class="identifier">cat</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span>
+                                    <span class="logical-operator">not</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">cat</span><span class="grouping">)</span><span class="grouping">]</span>
+            <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">api</span><span class="punctuation">.</span><span class="identifier">types</span><span class="punctuation">.</span><span class="identifier">CategoricalDtype</span><span class="grouping">(</span><span class="identifier">cats_without_missing</span><span class="grouping">)</span>
+        <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">column</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">df</span><span class="grouping">[</span><span class="identifier">column</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">df</span><span class="punctuation">,</span> <span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_data_info_by_name</span><span class="grouping">(</span>
+    <span class="identifier">name</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">version</span><span class="punctuation">:</span> <span class="identifier">Union</span><span class="grouping">[</span><span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span>
+<span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Utilizes the openml dataset listing api to find a dataset by
+    name/version
+    OpenML api function:
+    https://www.openml.org/api_docs#!/data/get_data_list_data_name_data_name
+
+    Parameters
+    ----------
+    name : str
+        name of the dataset
+
+    version : int or str
+        If version is an integer, the exact name/version will be obtained from
+        OpenML. If version is a string (value: "active") it will take the first
+        version from OpenML that is annotated as active. Any other string
+        values except "active" are treated as integer.
+
+    data_home : str or None
+        Location to cache the response. None if no cache is required.
+
+    Returns
+    -------
+    first_dataset : json
+        json representation of the first dataset object that adhired to the
+        search criteria
+
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">version</span> <span class="relational-operator">==</span> <span class="string-literal">"active"</span><span class="punctuation">:</span>
+        <span class="comment"># situation in which we return the oldest active version</span>
+        <span class="identifier">url</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_SEARCH_NAME</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">name</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="string-literal">"/status/active/"</span>
+        <span class="identifier">error_msg</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"No active dataset {} found."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">name</span><span class="grouping">)</span>
+        <span class="identifier">json_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_json_content_from_openml_api</span><span class="grouping">(</span>
+            <span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">error_msg</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span>
+        <span class="grouping">)</span>
+        <span class="identifier">res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">json_data</span><span class="grouping">[</span><span class="string-literal">'data']['dataset'</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">res</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Multiple active versions of the dataset matching the name"</span>
+                 <span class="string-literal">" {name} exist. Versions may be fundamentally different, "</span>
+                 <span class="string-literal">"returning version"</span>
+                 <span class="string-literal">" {version}."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">version</span><span class="arithmetic-assignment">=</span><span class="identifier">res</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'version'</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">res</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="comment"># an integer version has been provided</span>
+    <span class="identifier">url</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">_SEARCH_NAME</span> <span class="arithmetic-operator">+</span> <span class="string-literal">"/data_version/{}"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">version</span><span class="grouping">)</span>
+    <span class="keyword">try</span><span class="punctuation">:</span>
+        <span class="identifier">json_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_json_content_from_openml_api</span><span class="grouping">(</span>
+            <span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">error_message</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span>
+        <span class="grouping">)</span>
+    <span class="keyword">except</span> <span class="identifier">OpenMLError</span><span class="punctuation">:</span>
+        <span class="comment"># we can do this in 1 function call if OpenML does not require the</span>
+        <span class="comment"># specification of the dataset status (i.e., return datasets with a</span>
+        <span class="comment"># given name / version regardless of active, deactivated, etc. )</span>
+        <span class="comment"># TODO: feature request OpenML.</span>
+        <span class="identifier">url</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"/status/deactivated"</span>
+        <span class="identifier">error_msg</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Dataset {} with version {} not found."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span>
+                                                                   <span class="identifier">version</span><span class="grouping">)</span>
+        <span class="identifier">json_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_json_content_from_openml_api</span><span class="grouping">(</span>
+            <span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">error_msg</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span>
+        <span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">json_data</span><span class="grouping">[</span><span class="string-literal">'data']['dataset'</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_data_description_by_id</span><span class="grouping">(</span>
+    <span class="identifier">data_id</span><span class="punctuation">:</span> <span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">Dict</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">Any</span><span class="grouping">]</span><span class="punctuation">:</span>
+    <span class="comment"># OpenML API function: https://www.openml.org/api_docs#!/data/get_data_id</span>
+    <span class="identifier">url</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_DATA_INFO</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="grouping">)</span>
+    <span class="identifier">error_message</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Dataset with data_id {} not found."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="grouping">)</span>
+    <span class="identifier">json_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_json_content_from_openml_api</span><span class="grouping">(</span>
+        <span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">error_message</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span>
+    <span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">json_data</span><span class="grouping">[</span><span class="string-literal">'data_set_description'</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_data_features</span><span class="grouping">(</span>
+    <span class="identifier">data_id</span><span class="punctuation">:</span> <span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">OpenmlFeaturesType</span><span class="punctuation">:</span>
+    <span class="comment"># OpenML function:</span>
+    <span class="comment"># https://www.openml.org/api_docs#!/data/get_data_features_id</span>
+    <span class="identifier">url</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_DATA_FEATURES</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="grouping">)</span>
+    <span class="identifier">error_message</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Dataset with data_id {} not found."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="grouping">)</span>
+    <span class="identifier">json_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_json_content_from_openml_api</span><span class="grouping">(</span>
+        <span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">error_message</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span>
+    <span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">json_data</span><span class="grouping">[</span><span class="string-literal">'data_features']['feature'</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_data_qualities</span><span class="grouping">(</span>
+    <span class="identifier">data_id</span><span class="punctuation">:</span> <span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">OpenmlQualitiesType</span><span class="punctuation">:</span>
+    <span class="comment"># OpenML API function:</span>
+    <span class="comment"># https://www.openml.org/api_docs#!/data/get_data_qualities_id</span>
+    <span class="identifier">url</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_DATA_QUALITIES</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="grouping">)</span>
+    <span class="identifier">error_message</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Dataset with data_id {} not found."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="grouping">)</span>
+    <span class="identifier">json_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_json_content_from_openml_api</span><span class="grouping">(</span>
+        <span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">error_message</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span>
+    <span class="grouping">)</span>
+    <span class="comment"># the qualities might not be available, but we still try to process</span>
+    <span class="comment"># the data</span>
+    <span class="keyword">return</span> <span class="identifier">json_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">'data_qualities', {}).get('quality'</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_num_samples</span><span class="grouping">(</span><span class="identifier">data_qualities</span><span class="punctuation">:</span> <span class="identifier">OpenmlQualitiesType</span><span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">int</span><span class="punctuation">:</span>
+    <span class="comment">"""Get the number of samples from data qualities.
+
+    Parameters
+    ----------
+    data_qualities : list of dict
+        Used to retrieve the number of instances (samples) in the dataset.
+
+    Returns
+    -------
+    n_samples : int
+        The number of samples in the dataset or -1 if data qualities are
+        unavailable.
+    """</span>
+    <span class="comment"># If the data qualities are unavailable, we return -1</span>
+    <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+
+    <span class="identifier">qualities</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">d</span><span class="grouping">[</span><span class="string-literal">'name']: d['value'</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">d</span> <span class="relational-operator">in</span> <span class="identifier">data_qualities</span><span class="grouping">}</span>
+    <span class="keyword">return</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">float</span><span class="grouping">(</span><span class="identifier">qualities</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">'NumberOfInstances'</span><span class="punctuation">,</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_load_arff_response</span><span class="grouping">(</span>
+    <span class="identifier">url</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="punctuation">,</span>
+    <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="punctuation">,</span> <span class="identifier">encode_nominal</span><span class="punctuation">:</span> <span class="identifier">bool</span><span class="punctuation">,</span>
+    <span class="identifier">parse_arff</span><span class="punctuation">:</span> <span class="identifier">Callable</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">ArffContainerType</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">Tuple</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">md5_checksum</span><span class="punctuation">:</span> <span class="identifier">str</span>
+<span class="grouping">)</span> <span class="misc">-&gt;</span> <span class="identifier">Tuple</span><span class="punctuation">:</span>
+    <span class="comment">"""Load arff data with url and parses arff response with parse_arff"""</span>
+    <span class="identifier">response</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_open_openml_url</span><span class="grouping">(</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+
+    <span class="keyword">with</span> <span class="identifier">closing</span><span class="grouping">(</span><span class="identifier">response</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Note that if the data is dense, no reading is done until the data</span>
+        <span class="comment"># generator is iterated.</span>
+        <span class="identifier">actual_md5_checksum</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hashlib</span><span class="punctuation">.</span><span class="identifier">md5</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">def</span> <span class="identifier">_stream_checksum_generator</span><span class="grouping">(</span><span class="identifier">response</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">line</span> <span class="relational-operator">in</span> <span class="identifier">response</span><span class="punctuation">:</span>
+                <span class="identifier">actual_md5_checksum</span><span class="punctuation">.</span><span class="identifier">update</span><span class="grouping">(</span><span class="identifier">line</span><span class="grouping">)</span>
+                <span class="keyword">yield</span> <span class="identifier">line</span><span class="punctuation">.</span><span class="identifier">decode</span><span class="grouping">(</span><span class="string-literal">'utf-8'</span><span class="grouping">)</span>
+
+        <span class="identifier">stream</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_stream_checksum_generator</span><span class="grouping">(</span><span class="identifier">response</span><span class="grouping">)</span>
+
+        <span class="identifier">arff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_arff</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">stream</span><span class="punctuation">,</span>
+                          <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="punctuation">,</span>
+                          <span class="identifier">encode_nominal</span><span class="arithmetic-assignment">=</span><span class="identifier">encode_nominal</span><span class="grouping">)</span>
+
+        <span class="identifier">parsed_arff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parse_arff</span><span class="grouping">(</span><span class="identifier">arff</span><span class="grouping">)</span>
+
+        <span class="comment"># consume remaining stream, if early exited</span>
+        <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">stream</span><span class="punctuation">:</span>
+            <span class="keyword">pass</span>
+
+        <span class="keyword">if</span> <span class="identifier">actual_md5_checksum</span><span class="punctuation">.</span><span class="identifier">hexdigest</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">md5_checksum</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"md5 checksum of local file for "</span> <span class="arithmetic-operator">+</span> <span class="identifier">url</span> <span class="arithmetic-operator">+</span>
+                             <span class="string-literal">" does not match description. "</span>
+                             <span class="string-literal">"Downloaded file could have been modified / "</span>
+                             <span class="string-literal">"corrupted, clean cache and retry..."</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">parsed_arff</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_download_data_to_bunch</span><span class="grouping">(</span>
+    <span class="identifier">url</span><span class="punctuation">:</span> <span class="identifier">str</span><span class="punctuation">,</span>
+    <span class="identifier">sparse</span><span class="punctuation">:</span> <span class="identifier">bool</span><span class="punctuation">,</span>
+    <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+    <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="punctuation">:</span> <span class="identifier">bool</span><span class="punctuation">,</span>
+    <span class="identifier">features_list</span><span class="punctuation">:</span> <span class="identifier">List</span><span class="punctuation">,</span>
+    <span class="identifier">data_columns</span><span class="punctuation">:</span> <span class="identifier">List</span><span class="grouping">[</span><span class="identifier">int</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">target_columns</span><span class="punctuation">:</span> <span class="identifier">List</span><span class="punctuation">,</span>
+    <span class="identifier">shape</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">Tuple</span><span class="grouping">[</span><span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">md5_checksum</span><span class="punctuation">:</span> <span class="identifier">str</span>
+<span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Download OpenML ARFF and convert to Bunch of data
+    """</span>
+    <span class="comment"># NB: this function is long in order to handle retry for any failure</span>
+    <span class="comment">#     during the streaming parse of the ARFF.</span>
+
+    <span class="comment"># Prepare which columns and data types should be returned for the X and y</span>
+    <span class="identifier">features_dict</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'name'</span><span class="grouping">]</span><span class="punctuation">:</span> <span class="identifier">feature</span> <span class="keyword">for</span> <span class="identifier">feature</span> <span class="relational-operator">in</span> <span class="identifier">features_list</span><span class="grouping">}</span>
+
+    <span class="comment"># XXX: col_slice_y should be all nominal or all numeric</span>
+    <span class="identifier">_verify_target_data_type</span><span class="grouping">(</span><span class="identifier">features_dict</span><span class="punctuation">,</span> <span class="identifier">target_columns</span><span class="grouping">)</span>
+
+    <span class="identifier">col_slice_y</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">int</span><span class="grouping">(</span><span class="identifier">features_dict</span><span class="grouping">[</span><span class="identifier">col_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'index'</span><span class="grouping">]</span><span class="grouping">)</span>
+                   <span class="keyword">for</span> <span class="identifier">col_name</span> <span class="relational-operator">in</span> <span class="identifier">target_columns</span><span class="grouping">]</span>
+
+    <span class="identifier">col_slice_x</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">int</span><span class="grouping">(</span><span class="identifier">features_dict</span><span class="grouping">[</span><span class="identifier">col_name</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'index'</span><span class="grouping">]</span><span class="grouping">)</span>
+                   <span class="keyword">for</span> <span class="identifier">col_name</span> <span class="relational-operator">in</span> <span class="identifier">data_columns</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">col_idx</span> <span class="relational-operator">in</span> <span class="identifier">col_slice_y</span><span class="punctuation">:</span>
+        <span class="identifier">feat</span> <span class="arithmetic-assignment">=</span> <span class="identifier">features_list</span><span class="grouping">[</span><span class="identifier">col_idx</span><span class="grouping">]</span>
+        <span class="identifier">nr_missing</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">feat</span><span class="grouping">[</span><span class="string-literal">'number_of_missing_values'</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">nr_missing</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Target column {} has {} missing values. '</span>
+                             <span class="string-literal">'Missing values are not supported for target '</span>
+                             <span class="string-literal">'columns. '.format(feat['name'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">nr_missing</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Access an ARFF file on the OpenML server. Documentation:</span>
+    <span class="comment"># https://www.openml.org/api_data_docs#!/data/get_download_id</span>
+
+    <span class="keyword">if</span> <span class="identifier">sparse</span> <span class="relational-operator">is</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+        <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_arff</span><span class="punctuation">.</span><span class="identifier">COO</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_arff</span><span class="punctuation">.</span><span class="identifier">DENSE_GEN</span>
+
+    <span class="identifier">frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nominal_attributes</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="identifier">parse_arff</span><span class="punctuation">:</span> <span class="identifier">Callable</span>
+    <span class="identifier">postprocess</span><span class="punctuation">:</span> <span class="identifier">Callable</span>
+    <span class="keyword">if</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="identifier">columns</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_columns</span> <span class="arithmetic-operator">+</span> <span class="identifier">target_columns</span>
+        <span class="identifier">parse_arff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">_convert_arff_data_dataframe</span><span class="punctuation">,</span> <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">columns</span><span class="punctuation">,</span>
+                             <span class="identifier">features_dict</span><span class="arithmetic-assignment">=</span><span class="identifier">features_dict</span><span class="grouping">)</span>
+
+        <span class="keyword">def</span> <span class="identifier">postprocess</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">frame</span><span class="grouping">[</span><span class="identifier">data_columns</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">target_columns</span><span class="grouping">)</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+                <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">frame</span><span class="grouping">[</span><span class="identifier">target_columns</span><span class="grouping">]</span>
+            <span class="keyword">elif</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">target_columns</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">frame</span><span class="grouping">[</span><span class="identifier">target_columns</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">nominal_attributes</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">def</span> <span class="identifier">parse_arff</span><span class="grouping">(</span><span class="identifier">arff</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_convert_arff_data</span><span class="grouping">(</span><span class="identifier">arff</span><span class="punctuation">,</span> <span class="identifier">col_slice_x</span><span class="punctuation">,</span> <span class="identifier">col_slice_y</span><span class="punctuation">,</span> <span class="identifier">shape</span><span class="grouping">)</span>
+            <span class="comment"># nominal attributes is a dict mapping from the attribute name to</span>
+            <span class="comment"># the possible values. Includes also the target column (which will</span>
+            <span class="comment"># be popped off below, before it will be packed in the Bunch</span>
+            <span class="comment"># object)</span>
+            <span class="identifier">nominal_attributes</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span> <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">arff</span><span class="grouping">[</span><span class="string-literal">'attributes'</span><span class="grouping">]</span>
+                                  <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">v</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span> <span class="logical-operator">and</span>
+                                  <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">data_columns</span> <span class="arithmetic-operator">+</span> <span class="identifier">target_columns</span><span class="grouping">}</span>
+            <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">nominal_attributes</span>
+
+        <span class="keyword">def</span> <span class="identifier">postprocess</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">nominal_attributes</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">is_classification</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">col_name</span> <span class="relational-operator">in</span> <span class="identifier">nominal_attributes</span>
+                                 <span class="keyword">for</span> <span class="identifier">col_name</span> <span class="relational-operator">in</span> <span class="identifier">target_columns</span><span class="grouping">}</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">is_classification</span><span class="punctuation">:</span>
+                <span class="comment"># No target</span>
+                <span class="keyword">pass</span>
+            <span class="keyword">elif</span> <span class="identifier">all</span><span class="grouping">(</span><span class="identifier">is_classification</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">hstack</span><span class="grouping">(</span><span class="grouping">[</span>
+                    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span>
+                        <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">nominal_attributes</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="identifier">col_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                   <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">'O'</span><span class="grouping">)</span><span class="punctuation">,</span>
+                        <span class="identifier">y</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="punctuation">:</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">col_name</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">target_columns</span><span class="grouping">)</span>
+                <span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">any</span><span class="grouping">(</span><span class="identifier">is_classification</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Mix of nominal and non-nominal targets is '</span>
+                                 <span class="string-literal">'not currently supported'</span><span class="grouping">)</span>
+
+            <span class="comment"># reshape y back to 1-D array, if there is only 1 target column;</span>
+            <span class="comment"># back to None if there are not target columns</span>
+            <span class="keyword">if</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">nominal_attributes</span>
+
+    <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_retry_with_clean_cache</span><span class="grouping">(</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span><span class="grouping">(</span>
+        <span class="identifier">_load_arff_response</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">,</span>
+                             <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="punctuation">,</span>
+                             <span class="identifier">encode_nominal</span><span class="arithmetic-assignment">=</span><span class="logical-operator">not</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="punctuation">,</span>
+                             <span class="identifier">parse_arff</span><span class="arithmetic-assignment">=</span><span class="identifier">parse_arff</span><span class="punctuation">,</span>
+                             <span class="identifier">md5_checksum</span><span class="arithmetic-assignment">=</span><span class="identifier">md5_checksum</span><span class="grouping">)</span>
+    <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">nominal_attributes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">postprocess</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">out</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">Bunch</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="arithmetic-assignment">=</span><span class="identifier">frame</span><span class="punctuation">,</span>
+                 <span class="identifier">categories</span><span class="arithmetic-assignment">=</span><span class="identifier">nominal_attributes</span><span class="punctuation">,</span>
+                 <span class="identifier">feature_names</span><span class="arithmetic-assignment">=</span><span class="identifier">data_columns</span><span class="punctuation">,</span>
+                 <span class="identifier">target_names</span><span class="arithmetic-assignment">=</span><span class="identifier">target_columns</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_verify_target_data_type</span><span class="grouping">(</span><span class="identifier">features_dict</span><span class="punctuation">,</span> <span class="identifier">target_columns</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment"># verifies the data type of the y array in case there are multiple targets</span>
+    <span class="comment"># (throws an error if these targets do not comply with sklearn support)</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">target_columns</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'target_column should be list, '</span>
+                         <span class="string-literal">'got: %s'</span> <span class="arithmetic-operator">%</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">target_columns</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">found_types</span> <span class="arithmetic-assignment">=</span> <span class="identifier">set</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">target_column</span> <span class="relational-operator">in</span> <span class="identifier">target_columns</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">target_column</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">features_dict</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">KeyError</span><span class="grouping">(</span><span class="string-literal">'Could not find target_column={}'</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">features_dict</span><span class="grouping">[</span><span class="identifier">target_column</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'data_type'</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="string-literal">"numeric"</span><span class="punctuation">:</span>
+            <span class="identifier">found_types</span><span class="punctuation">.</span><span class="identifier">add</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">found_types</span><span class="punctuation">.</span><span class="identifier">add</span><span class="grouping">(</span><span class="identifier">object</span><span class="grouping">)</span>
+
+        <span class="comment"># note: we compare to a string, not boolean</span>
+        <span class="keyword">if</span> <span class="identifier">features_dict</span><span class="grouping">[</span><span class="identifier">target_column</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'is_ignore'] == 'true'</span><span class="punctuation">:</span>
+            <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'target_column={} has flag is_ignore.'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                <span class="identifier">target_column</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">features_dict</span><span class="grouping">[</span><span class="identifier">target_column</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">'is_row_identifier'] == 'true'</span><span class="punctuation">:</span>
+            <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'target_column={} has flag is_row_identifier.'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                <span class="identifier">target_column</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">found_types</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Can only handle homogeneous multi-target datasets, '</span>
+                         <span class="string-literal">'i.e., all targets are either numeric or '</span>
+                         <span class="string-literal">'categorical.'</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_valid_data_column_names</span><span class="grouping">(</span><span class="identifier">features_list</span><span class="punctuation">,</span> <span class="identifier">target_columns</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment"># logic for determining on which columns can be learned. Note that from the</span>
+    <span class="comment"># OpenML guide follows that columns that have the `is_row_identifier` or</span>
+    <span class="comment"># `is_ignore` flag, these can not be learned on. Also target columns are</span>
+    <span class="comment"># excluded.</span>
+    <span class="identifier">valid_data_column_names</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">feature</span> <span class="relational-operator">in</span> <span class="identifier">features_list</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'name'</span><span class="grouping">]</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">target_columns</span>
+                <span class="logical-operator">and</span> <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'is_ignore'] != 'true'</span>
+                <span class="logical-operator">and</span> <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'is_row_identifier'] != 'true'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">valid_data_column_names</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'name'</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">valid_data_column_names</span>
+
+
+<span class="keyword">def</span> <span class="identifier">fetch_openml</span><span class="grouping">(</span>
+    <span class="identifier">name</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+    <span class="identifier">version</span><span class="punctuation">:</span> <span class="identifier">Union</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'active'</span><span class="punctuation">,</span>
+    <span class="identifier">data_id</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">int</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">data_home</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">str</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">target_column</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">Union</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">List</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'default-target'</span><span class="punctuation">,</span>
+    <span class="identifier">cache</span><span class="punctuation">:</span> <span class="identifier">bool</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span><span class="punctuation">,</span>
+    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">y</span><span class="punctuation">:</span> <span class="identifier">bool</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span><span class="punctuation">,</span>
+    <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="punctuation">:</span> <span class="identifier">Union</span><span class="grouping">[</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">bool</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'auto'</span>
+<span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Fetch dataset from openml by name or dataset id.
+
+    Datasets are uniquely identified by either an integer ID or by a
+    combination of name and version (i.e. there might be multiple
+    versions of the 'iris' dataset). Please give either name or data_id
+    (not both). In case a name is given, a version can also be
+    provided.
+
+    Read more in the :ref:`User Guide &lt;openml&gt;`.
+
+    .. versionadded:: 0.20
+
+    .. note:: EXPERIMENTAL
+
+        The API is experimental (particularly the return value structure),
+        and might have small backward-incompatible changes without notice
+        or warning in future releases.
+
+    Parameters
+    ----------
+    name : str, default=None
+        String identifier of the dataset. Note that OpenML can have multiple
+        datasets with the same name.
+
+    version : int or 'active', default='active'
+        Version of the dataset. Can only be provided if also ``name`` is given.
+        If 'active' the oldest version that's still active is used. Since
+        there may be more than one active version of a dataset, and those
+        versions may fundamentally be different from one another, setting an
+        exact version is highly recommended.
+
+    data_id : int, default=None
+        OpenML ID of the dataset. The most specific way of retrieving a
+        dataset. If data_id is not given, name (and potential version) are
+        used to obtain a dataset.
+
+    data_home : str, default=None
+        Specify another download and cache folder for the data sets. By default
+        all scikit-learn data is stored in '~/scikit_learn_data' subfolders.
+
+    target_column : str, list or None, default='default-target'
+        Specify the column name in the data to use as target. If
+        'default-target', the standard target column a stored on the server
+        is used. If ``None``, all columns are returned as data and the
+        target is ``None``. If list (of strings), all columns with these names
+        are returned as multi-target (Note: not all scikit-learn classifiers
+        can handle all types of multi-output combinations)
+
+    cache : bool, default=True
+        Whether to cache downloaded datasets using joblib.
+
+    return_X_y : bool, default=False
+        If True, returns ``(data, target)`` instead of a Bunch object. See
+        below for more information about the `data` and `target` objects.
+
+    as_frame : bool or 'auto', default='auto'
+        If True, the data is a pandas DataFrame including columns with
+        appropriate dtypes (numeric, string or categorical). The target is
+        a pandas DataFrame or Series depending on the number of target_columns.
+        The Bunch will contain a ``frame`` attribute with the target and the
+        data. If ``return_X_y`` is True, then ``(data, target)`` will be pandas
+        DataFrames or Series as describe above.
+
+        If as_frame is 'auto', the data and target will be converted to
+        DataFrame or Series as if as_frame is set to True, unless the dataset
+        is stored in sparse format.
+
+        .. versionchanged:: 0.24
+           The default value of `as_frame` changed from `False` to `'auto'`
+           in 0.24.
+
+    Returns
+    -------
+
+    data : :class:`~sklearn.utils.Bunch`
+        Dictionary-like object, with the following attributes.
+
+        data : np.array, scipy.sparse.csr_matrix of floats, or pandas DataFrame
+            The feature matrix. Categorical features are encoded as ordinals.
+        target : np.array, pandas Series or DataFrame
+            The regression target or classification labels, if applicable.
+            Dtype is float if numeric, and object if categorical. If
+            ``as_frame`` is True, ``target`` is a pandas object.
+        DESCR : str
+            The full description of the dataset
+        feature_names : list
+            The names of the dataset columns
+        target_names: list
+            The names of the target columns
+
+        .. versionadded:: 0.22
+
+        categories : dict or None
+            Maps each categorical feature name to a list of values, such
+            that the value encoded as i is ith in the list. If ``as_frame``
+            is True, this is None.
+        details : dict
+            More metadata from OpenML
+        frame : pandas DataFrame
+            Only present when `as_frame=True`. DataFrame with ``data`` and
+            ``target``.
+
+    (data, target) : tuple if ``return_X_y`` is True
+
+        .. note:: EXPERIMENTAL
+
+            This interface is **experimental** and subsequent releases may
+            change attributes without notice (although there should only be
+            minor changes to ``data`` and ``target``).
+
+        Missing values in the 'data' are represented as NaN's. Missing values
+        in 'target' are represented as NaN's (numerical target) or None
+        (categorical target)
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">cache</span> <span class="relational-operator">is</span> <span class="bool-literal">False</span><span class="punctuation">:</span>
+        <span class="comment"># no caching will be applied</span>
+        <span class="identifier">data_home</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">data_home</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_data_home</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span><span class="grouping">)</span>
+        <span class="identifier">data_home</span> <span class="arithmetic-assignment">=</span> <span class="identifier">join</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="punctuation">,</span> <span class="string-literal">'openml'</span><span class="grouping">)</span>
+
+    <span class="comment"># check valid function arguments. data_id XOR (name, version) should be</span>
+    <span class="comment"># provided</span>
+    <span class="keyword">if</span> <span class="identifier">name</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="comment"># OpenML is case-insensitive, but the caching mechanism is not</span>
+        <span class="comment"># convert all data names (str) to lower case</span>
+        <span class="identifier">name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">name</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">data_id</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Dataset data_id={} and name={} passed, but you can only "</span>
+                <span class="string-literal">"specify a numeric data_id or a name, not "</span>
+                <span class="string-literal">"both."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">data_info</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_data_info_by_name</span><span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">version</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+        <span class="identifier">data_id</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data_info</span><span class="grouping">[</span><span class="string-literal">'did'</span><span class="grouping">]</span>
+    <span class="keyword">elif</span> <span class="identifier">data_id</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="comment"># from the previous if statement, it is given that name is None</span>
+        <span class="keyword">if</span> <span class="identifier">version</span> <span class="relational-operator">!=</span> <span class="string-literal">"active"</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Dataset data_id={} and version={} passed, but you can only "</span>
+                <span class="string-literal">"specify a numeric data_id or a version, not "</span>
+                <span class="string-literal">"both."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">"Neither name nor data_id are provided. Please provide name or "</span>
+            <span class="string-literal">"data_id."</span><span class="grouping">)</span>
+
+    <span class="identifier">data_description</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_data_description_by_id</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'status'</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="string-literal">"active"</span><span class="punctuation">:</span>
+        <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Version {} of dataset {} is inactive, meaning that issues have "</span>
+             <span class="string-literal">"been found in the dataset. Try using a newer version from "</span>
+             <span class="string-literal">"this URL: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                <span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'version'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                <span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'name'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                <span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'url'</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="string-literal">'error'</span> <span class="relational-operator">in</span> <span class="identifier">data_description</span><span class="punctuation">:</span>
+        <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"OpenML registered a problem with the dataset. It might be "</span>
+             <span class="string-literal">"unusable. Error: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'error'</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="string-literal">'warning'</span> <span class="relational-operator">in</span> <span class="identifier">data_description</span><span class="punctuation">:</span>
+        <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"OpenML raised a warning on the dataset. It might be "</span>
+             <span class="string-literal">"unusable. Warning: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'warning'</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">p</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+    <span class="keyword">if</span> <span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'format'].lower() == 'sparse_arff'</span><span class="punctuation">:</span>
+        <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">p</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">if</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+        <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="logical-operator">not</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">p</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span>
+
+    <span class="keyword">if</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span> <span class="logical-operator">and</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">p</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Cannot return dataframe with sparse data'</span><span class="grouping">)</span>
+
+    <span class="comment"># download data features, meta-info about column types</span>
+    <span class="identifier">features_list</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_data_features</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="keyword">for</span> <span class="identifier">feature</span> <span class="relational-operator">in</span> <span class="identifier">features_list</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="string-literal">'true' in (feature['is_ignore'], feature['is_row_identifier'</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">continue</span>
+            <span class="keyword">if</span> <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'data_type'] == 'string'</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'STRING attributes are not supported for '</span>
+                                 <span class="string-literal">'array representation. Try as_frame=True'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">target_column</span> <span class="relational-operator">==</span> <span class="string-literal">"default-target"</span><span class="punctuation">:</span>
+        <span class="comment"># determines the default target based on the data feature results</span>
+        <span class="comment"># (which is currently more reliable than the data description;</span>
+        <span class="comment"># see issue: https://github.com/openml/OpenML/issues/768)</span>
+        <span class="identifier">target_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'name'</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">feature</span> <span class="relational-operator">in</span> <span class="identifier">features_list</span>
+                          <span class="keyword">if</span> <span class="identifier">feature</span><span class="grouping">[</span><span class="string-literal">'is_target'] == 'true'</span><span class="grouping">]</span>
+    <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">target_column</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># for code-simplicity, make target_column by default a list</span>
+        <span class="identifier">target_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">target_column</span><span class="grouping">]</span>
+    <span class="keyword">elif</span> <span class="identifier">target_column</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">target_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">target_column</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">target_columns</span> <span class="arithmetic-assignment">=</span> <span class="identifier">target_column</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">"Did not recognize type of target_column"</span>
+                        <span class="string-literal">"Should be str, list or None. Got: "</span>
+                        <span class="string-literal">"{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">type</span><span class="grouping">(</span><span class="identifier">target_column</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">data_columns</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_valid_data_column_names</span><span class="grouping">(</span><span class="identifier">features_list</span><span class="punctuation">,</span>
+                                            <span class="identifier">target_columns</span><span class="grouping">)</span>
+
+    <span class="identifier">shape</span><span class="punctuation">:</span> <span class="identifier">Optional</span><span class="grouping">[</span><span class="identifier">Tuple</span><span class="grouping">[</span><span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">]</span><span class="grouping">]</span>
+    <span class="comment"># determine arff encoding to return</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">p</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="comment"># The shape must include the ignored features to keep the right indexes</span>
+        <span class="comment"># during the arff data conversion.</span>
+        <span class="identifier">data_qualities</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_data_qualities</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span>
+        <span class="identifier">shape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_num_samples</span><span class="grouping">(</span><span class="identifier">data_qualities</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">features_list</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">shape</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="comment"># obtain the data</span>
+    <span class="identifier">url</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_DATA_FILE</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_description</span><span class="grouping">[</span><span class="string-literal">'file_id'</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">bunch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_download_data_to_bunch</span><span class="grouping">(</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">p</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="punctuation">,</span>
+                                    <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">(</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                    <span class="identifier">features_list</span><span class="arithmetic-assignment">=</span><span class="identifier">features_list</span><span class="punctuation">,</span> <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">shape</span><span class="punctuation">,</span>
+                                    <span class="identifier">target_columns</span><span class="arithmetic-assignment">=</span><span class="identifier">target_columns</span><span class="punctuation">,</span>
+                                    <span class="identifier">data_columns</span><span class="arithmetic-assignment">=</span><span class="identifier">data_columns</span><span class="punctuation">,</span>
+                                    <span class="identifier">md5_checksum</span><span class="arithmetic-assignment">=</span><span class="identifier">data_description</span><span class="grouping">[</span>
+                                        <span class="string-literal">"md5_checksum"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">X</span><span class="invalid">_</span><span class="invalid">y</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">bunch</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">bunch</span><span class="punctuation">.</span><span class="identifier">target</span>
+
+    <span class="identifier">description</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}\n\nDownloaded from openml.org."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+        <span class="identifier">data_description</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="string-literal">'description'</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">bunch</span><span class="punctuation">.</span><span class="identifier">update</span><span class="grouping">(</span>
+        <span class="identifier">DESCR</span><span class="arithmetic-assignment">=</span><span class="identifier">description</span><span class="punctuation">,</span> <span class="identifier">details</span><span class="arithmetic-assignment">=</span><span class="identifier">data_description</span><span class="punctuation">,</span>
+        <span class="identifier">url</span><span class="arithmetic-assignment">=</span><span class="string-literal">"https://www.openml.org/d/{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">bunch</span>
+
+    </pre>
+  </body>
+</html>

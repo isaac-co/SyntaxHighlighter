@@ -1,0 +1,365 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+Distribution functions used in GLM
+"""</span>
+
+<span class="comment"># Author: Christian Lorentzen &lt;lorentzen.ch@googlemail.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">ABCMeta</span><span class="punctuation">,</span> <span class="identifier">abstractmethod</span>
+<span class="keyword">from</span> <span class="identifier">collections</span> <span class="keyword">import</span> <span class="identifier">namedtuple</span>
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">xlogy</span>
+
+
+<span class="identifier">DistributionBoundary</span> <span class="arithmetic-assignment">=</span> <span class="identifier">namedtuple</span><span class="grouping">(</span><span class="string-literal">"DistributionBoundary"</span><span class="punctuation">,</span>
+                                  <span class="grouping">(</span><span class="string-literal">"value", "inclusive"</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">ExponentialDispersionModel</span><span class="grouping">(</span><span class="identifier">metaclass</span><span class="arithmetic-assignment">=</span><span class="identifier">ABCMeta</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">r</span><span class="comment">"""Base class for reproductive Exponential Dispersion Models (EDM).
+
+    The pdf of :math:`Y\sim \mathrm{EDM}(y_\textrm{pred}, \phi)` is given by
+
+    .. math:: p(y| \theta, \phi) = c(y, \phi)
+        \exp\left(\frac{\theta y-A(\theta)}{\phi}\right)
+        = \tilde{c}(y, \phi)
+            \exp\left(-\frac{d(y, y_\textrm{pred})}{2\phi}\right)
+
+    with mean :math:`\mathrm{E}[Y] = A'(\theta) = y_\textrm{pred}`,
+    variance :math:`\mathrm{Var}[Y] = \phi \cdot v(y_\textrm{pred})`,
+    unit variance :math:`v(y_\textrm{pred})` and
+    unit deviance :math:`d(y,y_\textrm{pred})`.
+
+    Methods
+    -------
+    deviance
+    deviance_derivative
+    in_y_range
+    unit_deviance
+    unit_deviance_derivative
+    unit_variance
+
+    References
+    ----------
+    https://en.wikipedia.org/wiki/Exponential_dispersion_model.
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">in_y_range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Returns ``True`` if y is in the valid range of Y~EDM.
+
+        Parameters
+        ----------
+        y : array of shape (n_samples,)
+            Target values.
+        """</span>
+        <span class="comment"># Note that currently supported distributions have +inf upper bound</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lower_bound</span><span class="punctuation">,</span> <span class="identifier">DistributionBoundary</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">'_lower_bound attribute must be of type '</span>
+                            <span class="string-literal">'DistributionBoundary'</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lower_bound</span><span class="punctuation">.</span><span class="identifier">inclusive</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">greater_equal</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lower_bound</span><span class="punctuation">.</span><span class="identifier">value</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">greater</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lower_bound</span><span class="punctuation">.</span><span class="identifier">value</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">unit_variance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">r</span><span class="comment">"""Compute the unit variance function.
+
+        The unit variance :math:`v(y_\textrm{pred})` determines the variance as
+        a function of the mean :math:`y_\textrm{pred}` by
+        :math:`\mathrm{Var}[Y_i] = \phi/s_i*v(y_\textrm{pred}_i)`.
+        It can also be derived from the unit deviance
+        :math:`d(y,y_\textrm{pred})` as
+
+        .. math:: v(y_\textrm{pred}) = \frac{2}{
+            \frac{\partial^2 d(y,y_\textrm{pred})}{
+            \partialy_\textrm{pred}^2}}\big|_{y=y_\textrm{pred}}
+
+        See also :func:`variance`.
+
+        Parameters
+        ----------
+        y_pred : array of shape (n_samples,)
+            Predicted mean.
+        """</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">unit_deviance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">check_input</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">r</span><span class="comment">"""Compute the unit deviance.
+
+        The unit_deviance :math:`d(y,y_\textrm{pred})` can be defined by the
+        log-likelihood as
+        :math:`d(y,y_\textrm{pred}) = -2\phi\cdot
+        \left(loglike(y,y_\textrm{pred},\phi) - loglike(y,y,\phi)\right).`
+
+        Parameters
+        ----------
+        y : array of shape (n_samples,)
+            Target values.
+
+        y_pred : array of shape (n_samples,)
+            Predicted mean.
+
+        check_input : bool, default=False
+            If True raise an exception on invalid y or y_pred values, otherwise
+            they will be propagated as NaN.
+        Returns
+        -------
+        deviance: array of shape (n_samples,)
+            Computed deviance
+        """</span>
+
+    <span class="keyword">def</span> <span class="identifier">unit_deviance_derivative</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">r</span><span class="comment">"""Compute the derivative of the unit deviance w.r.t. y_pred.
+
+        The derivative of the unit deviance is given by
+        :math:`\frac{\partial}{\partialy_\textrm{pred}}d(y,y_\textrm{pred})
+             = -2\frac{y-y_\textrm{pred}}{v(y_\textrm{pred})}`
+        with unit variance :math:`v(y_\textrm{pred})`.
+
+        Parameters
+        ----------
+        y : array of shape (n_samples,)
+            Target values.
+
+        y_pred : array of shape (n_samples,)
+            Predicted mean.
+        """</span>
+        <span class="keyword">return</span> <span class="arithmetic-operator">-</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unit_variance</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">deviance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">r</span><span class="comment">"""Compute the deviance.
+
+        The deviance is a weighted sum of the per sample unit deviances,
+        :math:`D = \sum_i s_i \cdot d(y_i, y_\textrm{pred}_i)`
+        with weights :math:`s_i` and unit deviance
+        :math:`d(y,y_\textrm{pred})`.
+        In terms of the log-likelihood it is :math:`D = -2\phi\cdot
+        \left(loglike(y,y_\textrm{pred},\frac{phi}{s})
+        - loglike(y,y,\frac{phi}{s})\right)`.
+
+        Parameters
+        ----------
+        y : array of shape (n_samples,)
+            Target values.
+
+        y_pred : array of shape (n_samples,)
+            Predicted mean.
+
+        weights : {int, array of shape (n_samples,)}, default=1
+            Weights or exposure to which variance is inverse proportional.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">weights</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unit_deviance</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">deviance_derivative</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">r</span><span class="comment">"""Compute the derivative of the deviance w.r.t. y_pred.
+
+        It gives :math:`\frac{\partial}{\partial y_\textrm{pred}}
+        D(y, \y_\textrm{pred}; weights)`.
+
+        Parameters
+        ----------
+        y : array, shape (n_samples,)
+            Target values.
+
+        y_pred : array, shape (n_samples,)
+            Predicted mean.
+
+        weights : {int, array of shape (n_samples,)}, default=1
+            Weights or exposure to which variance is inverse proportional.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">weights</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unit_deviance_derivative</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">TweedieDistribution</span><span class="grouping">(</span><span class="identifier">ExponentialDispersionModel</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">r</span><span class="comment">"""A class for the Tweedie distribution.
+
+    A Tweedie distribution with mean :math:`y_\textrm{pred}=\mathrm{E}[Y]`
+    is uniquely defined by it's mean-variance relationship
+    :math:`\mathrm{Var}[Y] \propto y_\textrm{pred}^power`.
+
+    Special cases are:
+
+    ===== ================
+    Power Distribution
+    ===== ================
+    0     Normal
+    1     Poisson
+    (1,2) Compound Poisson
+    2     Gamma
+    3     Inverse Gaussian
+
+    Parameters
+    ----------
+    power : float, default=0
+            The variance power of the `unit_variance`
+            :math:`v(y_\textrm{pred}) = y_\textrm{pred}^{power}`.
+            For ``0&lt;power&lt;1``, no distribution exists.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">power</span> <span class="arithmetic-assignment">=</span> <span class="identifier">power</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">power</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_power</span>
+
+    <span class="punctuation">@</span><span class="identifier">power</span><span class="punctuation">.</span><span class="identifier">setter</span>
+    <span class="keyword">def</span> <span class="identifier">power</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">power</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># We use a property with a setter, to update lower and</span>
+        <span class="comment"># upper bound when the power parameter is updated e.g. in grid</span>
+        <span class="comment"># search.</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">power</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Real</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">'power must be a real number, input was {0}'</span>
+                            <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">power</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">power</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="comment"># Extreme Stable or Normal distribution</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lower_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DistributionBoundary</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">Inf</span><span class="punctuation">,</span> <span class="identifier">inclusive</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="int-literal">0</span> <span class="relational-operator">&lt;</span> <span class="identifier">power</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Tweedie distribution is only defined for '</span>
+                             <span class="string-literal">'power&lt;=0 and power&gt;=1.'</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="int-literal">1</span> <span class="relational-operator">&lt;=</span> <span class="identifier">power</span> <span class="relational-operator">&lt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="comment"># Poisson or Compound Poisson distribution</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lower_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DistributionBoundary</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">inclusive</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">power</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="comment"># Gamma, Positive Stable, Inverse Gaussian distributions</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_lower_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DistributionBoundary</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">inclusive</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># pragma: no cover</span>
+            <span class="comment"># this branch should be unreachable.</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_power</span> <span class="arithmetic-assignment">=</span> <span class="identifier">power</span>
+
+    <span class="keyword">def</span> <span class="identifier">unit_variance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute the unit variance of a Tweedie distribution
+        v(y_\textrm{pred})=y_\textrm{pred}**power.
+
+        Parameters
+        ----------
+        y_pred : array of shape (n_samples,)
+            Predicted mean.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">unit_deviance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">check_input</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">r</span><span class="comment">"""Compute the unit deviance.
+
+        The unit_deviance :math:`d(y,y_\textrm{pred})` can be defined by the
+        log-likelihood as
+        :math:`d(y,y_\textrm{pred}) = -2\phi\cdot
+        \left(loglike(y,y_\textrm{pred},\phi) - loglike(y,y,\phi)\right).`
+
+        Parameters
+        ----------
+        y : array of shape (n_samples,)
+            Target values.
+
+        y_pred : array of shape (n_samples,)
+            Predicted mean.
+
+        check_input : bool, default=False
+            If True raise an exception on invalid y or y_pred values, otherwise
+            they will be propagated as NaN.
+        Returns
+        -------
+        deviance: array of shape (n_samples,)
+            Computed deviance
+        """</span>
+        <span class="identifier">p</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">power</span>
+
+        <span class="keyword">if</span> <span class="identifier">check_input</span><span class="punctuation">:</span>
+            <span class="identifier">message</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Mean Tweedie deviance error with power={} can only be "</span>
+                       <span class="string-literal">"used on "</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">p</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">p</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="comment"># 'Extreme stable', y any realy number, y_pred &gt; 0</span>
+                <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">y_pred</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">message</span> <span class="arithmetic-operator">+</span> <span class="string-literal">"strictly positive y_pred."</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">p</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="comment"># Normal, y and y_pred can be any real number</span>
+                <span class="keyword">pass</span>
+            <span class="keyword">elif</span> <span class="int-literal">0</span> <span class="relational-operator">&lt;</span> <span class="identifier">p</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Tweedie deviance is only defined for "</span>
+                                 <span class="string-literal">"power&lt;=0 and power&gt;=1."</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="int-literal">1</span> <span class="relational-operator">&lt;=</span> <span class="identifier">p</span> <span class="relational-operator">&lt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+                <span class="comment"># Poisson and Compount poisson distribution, y &gt;= 0, y_pred &gt; 0</span>
+                <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">y</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">y_pred</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">message</span> <span class="arithmetic-operator">+</span> <span class="string-literal">"non-negative y and strictly "</span>
+                                     <span class="string-literal">"positive y_pred."</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">p</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+                <span class="comment"># Gamma and Extreme stable distribution, y and y_pred &gt; 0</span>
+                <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">y</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">y_pred</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">message</span>
+                                     <span class="arithmetic-operator">+</span> <span class="string-literal">"strictly positive y and y_pred."</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># pragma: nocover</span>
+                <span class="comment"># Unreachable statement</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span>
+
+        <span class="keyword">if</span> <span class="identifier">p</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="comment"># 'Extreme stable', y any realy number, y_pred &gt; 0</span>
+            <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span><span class="grouping">)</span>
+                       <span class="arithmetic-operator">-</span> <span class="identifier">y</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span>
+                       <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">elif</span> <span class="identifier">p</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="comment"># Normal distribution, y and y_pred any real number</span>
+            <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_pred</span><span class="grouping">)</span><span class="arithmetic-operator">**</span><span class="int-literal">2</span>
+        <span class="keyword">elif</span> <span class="identifier">p</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Tweedie deviance is only defined for power&lt;=0 "</span>
+                             <span class="string-literal">"and power&gt;=1."</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">p</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="comment"># Poisson distribution</span>
+            <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">xlogy</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-operator">/</span><span class="identifier">y_pred</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">y</span> <span class="arithmetic-operator">+</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">p</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="comment"># Gamma distribution</span>
+            <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="arithmetic-operator">/</span><span class="identifier">y</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">y</span><span class="arithmetic-operator">/</span><span class="identifier">y_pred</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span><span class="grouping">)</span>
+                       <span class="arithmetic-operator">-</span> <span class="identifier">y</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span>
+                       <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">2</span><span class="arithmetic-operator">-</span><span class="identifier">p</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">dev</span>
+
+
+<span class="keyword">class</span> <span class="identifier">NormalDistribution</span><span class="grouping">(</span><span class="identifier">TweedieDistribution</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Class for the Normal (aka Gaussian) distribution."""</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">PoissonDistribution</span><span class="grouping">(</span><span class="identifier">TweedieDistribution</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Class for the scaled Poisson distribution."""</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">GammaDistribution</span><span class="grouping">(</span><span class="identifier">TweedieDistribution</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Class for the Gamma distribution."""</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">InverseGaussianDistribution</span><span class="grouping">(</span><span class="identifier">TweedieDistribution</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Class for the scaled InverseGaussianDistribution distribution."""</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="grouping">)</span>
+
+
+<span class="identifier">EDM_DISTRIBUTIONS</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span>
+    <span class="string-literal">'normal'</span><span class="punctuation">:</span> <span class="identifier">NormalDistribution</span><span class="punctuation">,</span>
+    <span class="string-literal">'poisson'</span><span class="punctuation">:</span> <span class="identifier">PoissonDistribution</span><span class="punctuation">,</span>
+    <span class="string-literal">'gamma'</span><span class="punctuation">:</span> <span class="identifier">GammaDistribution</span><span class="punctuation">,</span>
+    <span class="string-literal">'inverse-gaussian'</span><span class="punctuation">:</span> <span class="identifier">InverseGaussianDistribution</span><span class="punctuation">,</span>
+<span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,309 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Ashim Bhattarai &lt;ashimb9@gmail.com&gt;</span>
+<span class="comment">#          Thomas J Fan &lt;thomasjpfan@gmail.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_BaseImputer</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">FLOAT_DTYPES</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">pairwise_distances_chunked</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">_NAN_METRICS</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span><span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_get_weights</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span><span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_check_weights</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">is_scalar_nan</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="keyword">import</span> <span class="identifier">_get_mask</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+
+
+<span class="keyword">class</span> <span class="identifier">KNNImputer</span><span class="grouping">(</span><span class="identifier">_BaseImputer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Imputation for completing missing values using k-Nearest Neighbors.
+
+    Each sample's missing values are imputed using the mean value from
+    `n_neighbors` nearest neighbors found in the training set. Two samples are
+    close if the features that neither is missing are close.
+
+    Read more in the :ref:`User Guide &lt;knnimpute&gt;`.
+
+    .. versionadded:: 0.22
+
+    Parameters
+    ----------
+    missing_values : int, float, str, np.nan or None, default=np.nan
+        The placeholder for the missing values. All occurrences of
+        `missing_values` will be imputed. For pandas' dataframes with
+        nullable integer dtypes with missing values, `missing_values`
+        should be set to np.nan, since `pd.NA` will be converted to np.nan.
+
+    n_neighbors : int, default=5
+        Number of neighboring samples to use for imputation.
+
+    weights : {'uniform', 'distance'} or callable, default='uniform'
+        Weight function used in prediction.  Possible values:
+
+        - 'uniform' : uniform weights. All points in each neighborhood are
+          weighted equally.
+        - 'distance' : weight points by the inverse of their distance.
+          in this case, closer neighbors of a query point will have a
+          greater influence than neighbors which are further away.
+        - callable : a user-defined function which accepts an
+          array of distances, and returns an array of the same shape
+          containing the weights.
+
+    metric : {'nan_euclidean'} or callable, default='nan_euclidean'
+        Distance metric for searching neighbors. Possible values:
+
+        - 'nan_euclidean'
+        - callable : a user-defined function which conforms to the definition
+          of ``_pairwise_callable(X, Y, metric, **kwds)``. The function
+          accepts two arrays, X and Y, and a `missing_values` keyword in
+          `kwds` and returns a scalar distance value.
+
+    copy : bool, default=True
+        If True, a copy of X will be created. If False, imputation will
+        be done in-place whenever possible.
+
+    add_indicator : bool, default=False
+        If True, a :class:`MissingIndicator` transform will stack onto the
+        output of the imputer's transform. This allows a predictive estimator
+        to account for missingness despite imputation. If a feature has no
+        missing values at fit/train time, the feature won't appear on the
+        missing indicator even if there are missing values at transform/test
+        time.
+
+    Attributes
+    ----------
+    indicator_ : :class:`~sklearn.impute.MissingIndicator`
+        Indicator used to add binary indicators for missing values.
+        ``None`` if add_indicator is False.
+
+    References
+    ----------
+    * Olga Troyanskaya, Michael Cantor, Gavin Sherlock, Pat Brown, Trevor
+      Hastie, Robert Tibshirani, David Botstein and Russ B. Altman, Missing
+      value estimation methods for DNA microarrays, BIOINFORMATICS Vol. 17
+      no. 6, 2001 Pages 520-525.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.impute import KNNImputer
+    &gt;&gt;&gt; X = [[1, 2, np.nan], [3, 4, 3], [np.nan, 6, 5], [8, 8, 7]]
+    &gt;&gt;&gt; imputer = KNNImputer(n_neighbors=2)
+    &gt;&gt;&gt; imputer.fit_transform(X)
+    array([[1. , 2. , 4. ],
+           [3. , 4. , 3. ],
+           [5.5, 6. , 5. ],
+           [8. , 8. , 7. ]])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">missing_values</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nan</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span>
+                 <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="string-literal">"uniform", metric="nan_euclidean"</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">add_indicator</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">missing_values</span><span class="arithmetic-assignment">=</span><span class="identifier">missing_values</span><span class="punctuation">,</span>
+            <span class="identifier">add_indicator</span><span class="arithmetic-assignment">=</span><span class="identifier">add_indicator</span>
+        <span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_neighbors</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">weights</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metric</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy</span>
+
+    <span class="keyword">def</span> <span class="identifier">_calc_impute</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">dist_pot_donors</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                     <span class="identifier">fit_X_col</span><span class="punctuation">,</span> <span class="identifier">mask_fit_X_col</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Helper function to impute a single column.
+
+        Parameters
+        ----------
+        dist_pot_donors : ndarray of shape (n_receivers, n_potential_donors)
+            Distance matrix between the receivers and potential donors from
+            training set. There must be at least one non-nan distance between
+            a receiver and a potential donor.
+
+        n_neighbors : int
+            Number of neighbors to consider.
+
+        fit_X_col : ndarray of shape (n_potential_donors,)
+            Column of potential donors from training set.
+
+        mask_fit_X_col : ndarray of shape (n_potential_donors,)
+            Missing mask for fit_X_col.
+
+        Returns
+        -------
+        imputed_values: ndarray of shape (n_receivers,)
+            Imputed values for receiver.
+        """</span>
+        <span class="comment"># Get donors</span>
+        <span class="identifier">donors_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argpartition</span><span class="grouping">(</span><span class="identifier">dist_pot_donors</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span>
+                                     <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="identifier">n_neighbors</span><span class="grouping">]</span>
+
+        <span class="comment"># Get weight matrix from from distance matrix</span>
+        <span class="identifier">donors_dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dist_pot_donors</span><span class="grouping">[</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">donors_idx</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">donors_idx</span><span class="grouping">]</span>
+
+        <span class="identifier">weight_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_weights</span><span class="grouping">(</span><span class="identifier">donors_dist</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">weights</span><span class="grouping">)</span>
+
+        <span class="comment"># fill nans with zeros</span>
+        <span class="keyword">if</span> <span class="identifier">weight_matrix</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">weight_matrix</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">weight_matrix</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+
+        <span class="comment"># Retrieve donor values and calculate kNN average</span>
+        <span class="identifier">donors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_X_col</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">donors_idx</span><span class="grouping">)</span>
+        <span class="identifier">donors_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask_fit_X_col</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">donors_idx</span><span class="grouping">)</span>
+        <span class="identifier">donors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ma</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">donors</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="arithmetic-assignment">=</span><span class="identifier">donors_mask</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ma</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">donors</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">weight_matrix</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">data</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the imputer on X.
+
+        Parameters
+        ----------
+        X : array-like shape of (n_samples, n_features)
+            Input data, where `n_samples` is the number of samples and
+            `n_features` is the number of features.
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="comment"># Check data integrity and calling arguments</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"allow-nan"</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">_NAN_METRICS</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">"The selected metric does not support NaN values"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Expected n_neighbors &gt; 0. Got {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">FLOAT_DTYPES</span><span class="punctuation">,</span>
+                                <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="punctuation">,</span>
+                                <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">)</span>
+
+        <span class="identifier">_check_weights</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">weights</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask_fit_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="grouping">)</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_fit_indicator</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask_fit_X</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Impute all missing values in X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The input data to complete.
+
+        Returns
+        -------
+        X : array-like of shape (n_samples, n_output_features)
+            The imputed dataset. `n_output_features` is the number of features
+            that is not always missing during `fit`.
+        """</span>
+
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"allow-nan"</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">FLOAT_DTYPES</span><span class="punctuation">,</span>
+                                <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="punctuation">,</span>
+                                <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_mask</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="grouping">)</span>
+        <span class="identifier">mask_fit_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask_fit_X</span>
+        <span class="identifier">valid_mask</span> <span class="arithmetic-assignment">=</span> <span class="bitwise-operator">~</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">mask_fit_X</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="identifier">X_indicator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_transform_indicator</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span>
+
+        <span class="comment"># Removes columns where the training data is all nan</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># No missing values in X</span>
+            <span class="comment"># Remove columns where the training data is all nan</span>
+            <span class="keyword">return</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">valid_mask</span><span class="grouping">]</span>
+
+        <span class="identifier">row_missing_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">non_missing_fix_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_not</span><span class="grouping">(</span><span class="identifier">mask_fit_X</span><span class="grouping">)</span>
+
+        <span class="comment"># Maps from indices from X to indices in dist matrix</span>
+        <span class="identifier">dist_idx_map</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+        <span class="identifier">dist_idx_map</span><span class="grouping">[</span><span class="identifier">row_missing_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">row_missing_idx</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">def</span> <span class="identifier">process_chunk</span><span class="grouping">(</span><span class="identifier">dist_chunk</span><span class="punctuation">,</span> <span class="identifier">start</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">row_missing_chunk</span> <span class="arithmetic-assignment">=</span> <span class="identifier">row_missing_idx</span><span class="grouping">[</span><span class="identifier">start</span><span class="punctuation">:</span><span class="identifier">start</span> <span class="arithmetic-operator">+</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">dist_chunk</span><span class="grouping">)</span><span class="grouping">]</span>
+
+            <span class="comment"># Find and impute missing by column</span>
+            <span class="keyword">for</span> <span class="identifier">col</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">valid_mask</span><span class="grouping">[</span><span class="identifier">col</span><span class="grouping">]</span><span class="punctuation">:</span>
+                    <span class="comment"># column was all missing during training</span>
+                    <span class="keyword">continue</span>
+
+                <span class="identifier">col_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">row_missing_chunk</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">col_mask</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="comment"># column has no missing values</span>
+                    <span class="keyword">continue</span>
+
+                <span class="identifier">potential_donors_idx</span><span class="punctuation">,</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nonzero</span><span class="grouping">(</span><span class="identifier">non_missing_fix_X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span><span class="grouping">)</span>
+
+                <span class="comment"># receivers_idx are indices in X</span>
+                <span class="identifier">receivers_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">row_missing_chunk</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">col_mask</span><span class="grouping">)</span><span class="grouping">]</span>
+
+                <span class="comment"># distances for samples that needed imputation for column</span>
+                <span class="identifier">dist_subset</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">dist_chunk</span><span class="grouping">[</span><span class="identifier">dist_idx_map</span><span class="grouping">[</span><span class="identifier">receivers_idx</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">start</span><span class="grouping">]</span>
+                               <span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">potential_donors_idx</span><span class="grouping">]</span><span class="grouping">)</span>
+
+                <span class="comment"># receivers with all nan distances impute with mean</span>
+                <span class="identifier">all_nan_dist_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">dist_subset</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+                <span class="identifier">all_nan_receivers_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">receivers_idx</span><span class="grouping">[</span><span class="identifier">all_nan_dist_mask</span><span class="grouping">]</span>
+
+                <span class="keyword">if</span> <span class="identifier">all_nan_receivers_idx</span><span class="punctuation">.</span><span class="identifier">size</span><span class="punctuation">:</span>
+                    <span class="identifier">col_mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ma</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                           <span class="identifier">mask</span><span class="arithmetic-assignment">=</span><span class="identifier">mask_fit_X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span>
+                    <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">all_nan_receivers_idx</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">col_mean</span>
+
+                    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">all_nan_receivers_idx</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">receivers_idx</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="comment"># all receivers imputed with mean</span>
+                        <span class="keyword">continue</span>
+
+                    <span class="comment"># receivers with at least one defined distance</span>
+                    <span class="identifier">receivers_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">receivers_idx</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">all_nan_dist_mask</span><span class="grouping">]</span>
+                    <span class="identifier">dist_subset</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">dist_chunk</span><span class="grouping">[</span><span class="identifier">dist_idx_map</span><span class="grouping">[</span><span class="identifier">receivers_idx</span><span class="grouping">]</span>
+                                              <span class="arithmetic-operator">-</span> <span class="identifier">start</span><span class="grouping">]</span>
+                                   <span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">potential_donors_idx</span><span class="grouping">]</span><span class="grouping">)</span>
+
+                <span class="identifier">n_neighbors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">potential_donors_idx</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_calc_impute</span><span class="grouping">(</span>
+                    <span class="identifier">dist_subset</span><span class="punctuation">,</span>
+                    <span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_X</span><span class="grouping">[</span><span class="identifier">potential_donors_idx</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">mask_fit_X</span><span class="grouping">[</span><span class="identifier">potential_donors_idx</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">receivers_idx</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">value</span>
+
+        <span class="comment"># process in fixed-memory chunks</span>
+        <span class="identifier">gen</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pairwise_distances_chunked</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">row_missing_idx</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_X</span><span class="punctuation">,</span>
+            <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">metric</span><span class="punctuation">,</span>
+            <span class="identifier">missing_values</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="punctuation">,</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="punctuation">,</span>
+            <span class="identifier">reduce_func</span><span class="arithmetic-assignment">=</span><span class="identifier">process_chunk</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">chunk</span> <span class="relational-operator">in</span> <span class="identifier">gen</span><span class="punctuation">:</span>
+            <span class="comment"># process_chunk modifies X in place. No return value.</span>
+            <span class="keyword">pass</span>
+
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_concatenate_indicator</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">valid_mask</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">X_indicator</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

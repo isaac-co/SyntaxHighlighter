@@ -1,0 +1,236 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Permutation importance for estimators."""</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">joblib</span> <span class="keyword">import</span> <span class="identifier">Parallel</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">check_scoring</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">_scorer</span> <span class="keyword">import</span> <span class="identifier">_check_multimetric_scoring</span><span class="punctuation">,</span> <span class="identifier">_MultimetricScorer</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">model_selection</span><span class="punctuation">.</span><span class="identifier">_validation</span> <span class="keyword">import</span> <span class="identifier">_aggregate_score_dicts</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">Bunch</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_weights_scorer</span><span class="grouping">(</span><span class="identifier">scorer</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">scorer</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">scorer</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_calculate_permutation_scores</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">col_idx</span><span class="punctuation">,</span>
+                                  <span class="identifier">random_state</span><span class="punctuation">,</span> <span class="identifier">n_repeats</span><span class="punctuation">,</span> <span class="identifier">scorer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Calculate score when `col_idx` is permuted."""</span>
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="comment"># Work on a copy of X to to ensure thread-safety in case of threading based</span>
+    <span class="comment"># parallelism. Furthermore, making a copy is also useful when the joblib</span>
+    <span class="comment"># backend is 'loky' (default) or the old 'multiprocessing': in those cases,</span>
+    <span class="comment"># if X is large it will be automatically be backed by a readonly memory map</span>
+    <span class="comment"># (memmap). X.copy() on the other hand is always guaranteed to return a</span>
+    <span class="comment"># writable data-structure whose columns can be shuffled inplace.</span>
+    <span class="identifier">X_permuted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="identifier">shuffling_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_repeats</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">shuffle</span><span class="grouping">(</span><span class="identifier">shuffling_idx</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X_permuted</span><span class="punctuation">,</span> <span class="string-literal">"iloc"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">col</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_permuted</span><span class="punctuation">.</span><span class="identifier">iloc</span><span class="grouping">[</span><span class="identifier">shuffling_idx</span><span class="punctuation">,</span> <span class="identifier">col_idx</span><span class="grouping">]</span>
+            <span class="identifier">col</span><span class="punctuation">.</span><span class="identifier">index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_permuted</span><span class="punctuation">.</span><span class="identifier">index</span>
+            <span class="identifier">X_permuted</span><span class="punctuation">.</span><span class="identifier">iloc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">col</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">X_permuted</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_permuted</span><span class="grouping">[</span><span class="identifier">shuffling_idx</span><span class="punctuation">,</span> <span class="identifier">col_idx</span><span class="grouping">]</span>
+        <span class="identifier">scores</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span>
+            <span class="identifier">_weights_scorer</span><span class="grouping">(</span><span class="identifier">scorer</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X_permuted</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+        <span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_aggregate_score_dicts</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">scores</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_create_importances_bunch</span><span class="grouping">(</span><span class="identifier">baseline_score</span><span class="punctuation">,</span> <span class="identifier">permuted_score</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute the importances as the decrease in score.
+
+    Parameters
+    ----------
+    baseline_score : ndarray of shape (n_features,)
+        The baseline score without permutation.
+    permuted_score : ndarray of shape (n_features, n_repeats)
+        The permuted scores for the `n` repetitions.
+
+    Returns
+    -------
+    importances : :class:`~sklearn.utils.Bunch`
+        Dictionary-like object, with the following attributes.
+        importances_mean : ndarray, shape (n_features, )
+            Mean of feature importance over `n_repeats`.
+        importances_std : ndarray, shape (n_features, )
+            Standard deviation over `n_repeats`.
+        importances : ndarray, shape (n_features, n_repeats)
+            Raw permutation importance scores.
+    """</span>
+    <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">baseline_score</span> <span class="arithmetic-operator">-</span> <span class="identifier">permuted_score</span>
+    <span class="keyword">return</span> <span class="identifier">Bunch</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">n</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span>
+                 <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">d</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span>
+                 <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">permutation_importance</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_repeats</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span>
+                           <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Permutation importance for feature evaluation [BRE]_.
+
+    The :term:`estimator` is required to be a fitted estimator. `X` can be the
+    data set used to train the estimator or a hold-out set. The permutation
+    importance of a feature is calculated as follows. First, a baseline metric,
+    defined by :term:`scoring`, is evaluated on a (potentially different)
+    dataset defined by the `X`. Next, a feature column from the validation set
+    is permuted and the metric is evaluated again. The permutation importance
+    is defined to be the difference between the baseline metric and metric from
+    permutating the feature column.
+
+    Read more in the :ref:`User Guide &lt;permutation_importance&gt;`.
+
+    Parameters
+    ----------
+    estimator : object
+        An estimator that has already been :term:`fitted` and is compatible
+        with :term:`scorer`.
+
+    X : ndarray or DataFrame, shape (n_samples, n_features)
+        Data on which permutation importance will be computed.
+
+    y : array-like or None, shape (n_samples, ) or (n_samples, n_classes)
+        Targets for supervised or `None` for unsupervised.
+
+    scoring : str, callable, list, tuple, or dict, default=None
+        Scorer to use.
+        If `scoring` represents a single score, one can use:
+
+        - a single string (see :ref:`scoring_parameter`);
+        - a callable (see :ref:`scoring`) that returns a single value.
+
+        If `scoring` represents multiple scores, one can use:
+
+        - a list or tuple of unique strings;
+        - a callable returning a dictionary where the keys are the metric
+          names and the values are the metric scores;
+        - a dictionary with metric names as keys and callables a values.
+
+        Passing multiple scores to `scoring` is more efficient than calling
+        `permutation_importance` for each of the scores as it reuses
+        predictions to avoid redundant computation.
+
+        If None, the estimator's default scorer is used.
+
+    n_repeats : int, default=5
+        Number of times to permute a feature.
+
+    n_jobs : int or None, default=None
+        Number of jobs to run in parallel. The computation is done by computing
+        permutation score for each columns and parallelized over the columns.
+        `None` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        `-1` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    random_state : int, RandomState instance, default=None
+        Pseudo-random number generator to control the permutations of each
+        feature.
+        Pass an int to get reproducible results across function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights used in scoring.
+
+        .. versionadded:: 0.24
+
+    Returns
+    -------
+    result : :class:`~sklearn.utils.Bunch` or dict of such instances
+        Dictionary-like object, with the following attributes.
+
+        importances_mean : ndarray of shape (n_features, )
+            Mean of feature importance over `n_repeats`.
+        importances_std : ndarray of shape (n_features, )
+            Standard deviation over `n_repeats`.
+        importances : ndarray of shape (n_features, n_repeats)
+            Raw permutation importance scores.
+
+        If there are multiple scoring metrics in the scoring parameter
+        `result` is a dict with scorer names as keys (e.g. 'roc_auc') and
+        `Bunch` objects like above as values.
+
+    References
+    ----------
+    .. [BRE] L. Breiman, "Random Forests", Machine Learning, 45(1), 5-32,
+             2001. https://doi.org/10.1023/A:1010933404324
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.linear_model import LogisticRegression
+    &gt;&gt;&gt; from sklearn.inspection import permutation_importance
+    &gt;&gt;&gt; X = [[1, 9, 9],[1, 9, 9],[1, 9, 9],
+    ...      [0, 9, 9],[0, 9, 9],[0, 9, 9]]
+    &gt;&gt;&gt; y = [1, 1, 1, 0, 0, 0]
+    &gt;&gt;&gt; clf = LogisticRegression().fit(X, y)
+    &gt;&gt;&gt; result = permutation_importance(clf, X, y, n_repeats=10,
+    ...                                 random_state=0)
+    &gt;&gt;&gt; result.importances_mean
+    array([0.4666..., 0.       , 0.       ])
+    &gt;&gt;&gt; result.importances_std
+    array([0.2211..., 0.       , 0.       ])
+    """</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">"iloc"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+
+    <span class="comment"># Precompute random seed from the random state to be used</span>
+    <span class="comment"># to get a fresh independent RandomState instance for each</span>
+    <span class="comment"># parallel call to _calculate_permutation_scores, irrespective of</span>
+    <span class="comment"># the fact that variables are shared or not depending on the active</span>
+    <span class="comment"># joblib backend (sequential, thread-based or process-based).</span>
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+    <span class="identifier">random_seed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">randint</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">iinfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int32</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">max</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scoring</span>
+    <span class="keyword">elif</span> <span class="identifier">scoring</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_scoring</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="arithmetic-assignment">=</span><span class="identifier">scoring</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">scorers_dict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_multimetric_scoring</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="grouping">)</span>
+        <span class="identifier">scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_MultimetricScorer</span><span class="grouping">(</span><span class="arithmetic-operator">**</span><span class="identifier">scorers_dict</span><span class="grouping">)</span>
+
+    <span class="identifier">baseline_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_weights_scorer</span><span class="grouping">(</span><span class="identifier">scorer</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span>
+                                     <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="grouping">(</span>
+        <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span><span class="grouping">(</span><span class="identifier">_calculate_permutation_scores</span><span class="grouping">)</span><span class="grouping">(</span>
+            <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">col_idx</span><span class="punctuation">,</span> <span class="identifier">random_seed</span><span class="punctuation">,</span>
+            <span class="identifier">n_repeats</span><span class="punctuation">,</span> <span class="identifier">scorer</span>
+        <span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">col_idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">baseline_score</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="identifier">name</span><span class="punctuation">:</span> <span class="identifier">_create_importances_bunch</span><span class="grouping">(</span>
+                <span class="identifier">baseline_score</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span><span class="punctuation">,</span>
+                <span class="comment"># unpack the permuted scores</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span>
+                    <span class="identifier">scores</span><span class="grouping">[</span><span class="identifier">col_idx</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">col_idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="grouping">]</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">name</span> <span class="relational-operator">in</span> <span class="identifier">baseline_score</span>
+        <span class="grouping">}</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">_create_importances_bunch</span><span class="grouping">(</span><span class="identifier">baseline_score</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

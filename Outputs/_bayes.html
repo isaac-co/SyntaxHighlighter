@@ -1,0 +1,719 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+Various bayesian regression
+"""</span>
+
+<span class="comment"># Authors: V. Michel, F. Pedregosa, A. Gramfort</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">math</span> <span class="keyword">import</span> <span class="identifier">log</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">LinearModel</span><span class="punctuation">,</span> <span class="identifier">_rescale_data</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">RegressorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_deprecate_normalize</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">fast_logdet</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">pinvh</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+
+
+<span class="comment">###############################################################################</span>
+<span class="comment"># BayesianRidge regression</span>
+
+<span class="keyword">class</span> <span class="identifier">BayesianRidge</span><span class="grouping">(</span><span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">LinearModel</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Bayesian ridge regression.
+
+    Fit a Bayesian ridge model. See the Notes section for details on this
+    implementation and the optimization of the regularization parameters
+    lambda (precision of the weights) and alpha (precision of the noise).
+
+    Read more in the :ref:`User Guide &lt;bayesian_regression&gt;`.
+
+    Parameters
+    ----------
+    n_iter : int, default=300
+        Maximum number of iterations. Should be greater than or equal to 1.
+
+    tol : float, default=1e-3
+        Stop the algorithm if w has converged.
+
+    alpha_1 : float, default=1e-6
+        Hyper-parameter : shape parameter for the Gamma distribution prior
+        over the alpha parameter.
+
+    alpha_2 : float, default=1e-6
+        Hyper-parameter : inverse scale parameter (rate parameter) for the
+        Gamma distribution prior over the alpha parameter.
+
+    lambda_1 : float, default=1e-6
+        Hyper-parameter : shape parameter for the Gamma distribution prior
+        over the lambda parameter.
+
+    lambda_2 : float, default=1e-6
+        Hyper-parameter : inverse scale parameter (rate parameter) for the
+        Gamma distribution prior over the lambda parameter.
+
+    alpha_init : float, default=None
+        Initial value for alpha (precision of the noise).
+        If not set, alpha_init is 1/Var(y).
+
+            .. versionadded:: 0.22
+
+    lambda_init : float, default=None
+        Initial value for lambda (precision of the weights).
+        If not set, lambda_init is 1.
+
+            .. versionadded:: 0.22
+
+    compute_score : bool, default=False
+        If True, compute the log marginal likelihood at each iteration of the
+        optimization.
+
+    fit_intercept : bool, default=True
+        Whether to calculate the intercept for this model.
+        The intercept is not treated as a probabilistic parameter
+        and thus has no associated variance. If set
+        to False, no intercept will be used in calculations
+        (i.e. data is expected to be centered).
+
+    normalize : bool, default=False
+        This parameter is ignored when ``fit_intercept`` is set to False.
+        If True, the regressors X will be normalized before regression by
+        subtracting the mean and dividing by the l2-norm.
+        If you wish to standardize, please use
+        :class:`~sklearn.preprocessing.StandardScaler` before calling ``fit``
+        on an estimator with ``normalize=False``.
+
+        .. deprecated:: 1.0
+            ``normalize`` was deprecated in version 1.0 and will be removed in
+            1.2.
+
+    copy_X : bool, default=True
+        If True, X will be copied; else, it may be overwritten.
+
+    verbose : bool, default=False
+        Verbose mode when fitting the model.
+
+
+    Attributes
+    ----------
+    coef_ : array-like of shape (n_features,)
+        Coefficients of the regression model (mean of distribution)
+
+    intercept_ : float
+        Independent term in decision function. Set to 0.0 if
+        ``fit_intercept = False``.
+
+    alpha_ : float
+       Estimated precision of the noise.
+
+    lambda_ : float
+       Estimated precision of the weights.
+
+    sigma_ : array-like of shape (n_features, n_features)
+        Estimated variance-covariance matrix of the weights
+
+    scores_ : array-like of shape (n_iter_+1,)
+        If computed_score is True, value of the log marginal likelihood (to be
+        maximized) at each iteration of the optimization. The array starts
+        with the value of the log marginal likelihood obtained for the initial
+        values of alpha and lambda and ends with the value obtained for the
+        estimated alpha and lambda.
+
+    n_iter_ : int
+        The actual number of iterations to reach the stopping criterion.
+
+    X_offset_ : float
+        If `normalize=True`, offset subtracted for centering data to a
+        zero mean.
+
+    X_scale_ : float
+        If `normalize=True`, parameter used to scale data to a unit
+        standard deviation.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn import linear_model
+    &gt;&gt;&gt; clf = linear_model.BayesianRidge()
+    &gt;&gt;&gt; clf.fit([[0,0], [1, 1], [2, 2]], [0, 1, 2])
+    BayesianRidge()
+    &gt;&gt;&gt; clf.predict([[1, 1]])
+    array([1.])
+
+    Notes
+    -----
+    There exist several strategies to perform Bayesian ridge regression. This
+    implementation is based on the algorithm described in Appendix A of
+    (Tipping, 2001) where updates of the regularization parameters are done as
+    suggested in (MacKay, 1992). Note that according to A New
+    View of Automatic Relevance Determination (Wipf and Nagarajan, 2008) these
+    update rules do not guarantee that the marginal likelihood is increasing
+    between two consecutive iterations of the optimization.
+
+    References
+    ----------
+    D. J. C. MacKay, Bayesian Interpolation, Computation and Neural Systems,
+    Vol. 4, No. 3, 1992.
+
+    M. E. Tipping, Sparse Bayesian Learning and the Relevance Vector Machine,
+    Journal of Machine Learning Research, Vol. 1, 2001.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">300</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">alpha_1</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="identifier">alpha_2</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span>
+                 <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="identifier">alpha_init</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">compute_score</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">normalize</span><span class="arithmetic-assignment">=</span><span class="string-literal">'deprecated'</span><span class="punctuation">,</span> <span class="identifier">copy_X</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_2</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">compute_score</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_intercept</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">normalize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">normalize</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy_X</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Training data
+        y : ndarray of shape (n_samples,)
+            Target values. Will be cast to X's dtype if necessary
+
+        sample_weight : ndarray of shape (n_samples,), default=None
+            Individual weights for each sample
+
+            .. versionadded:: 0.20
+               parameter *sample_weight* support to BayesianRidge.
+
+        Returns
+        -------
+        self : returns an instance of self.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_deprecate_normalize</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">normalize</span><span class="punctuation">,</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+            <span class="identifier">estimator_name</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span>
+        <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'n_iter should be greater than or equal to 1.'</span>
+                             <span class="string-literal">' Got {!r}.'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span>
+                                                 <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">X_offset_</span><span class="punctuation">,</span> <span class="identifier">y_offset_</span><span class="punctuation">,</span> <span class="identifier">X_scale_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_preprocess_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalize</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X</span><span class="punctuation">,</span>
+            <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="comment"># Sample weight can be implemented via a simple rescaling.</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_rescale_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_offset_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_offset_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_scale_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_scale_</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+        <span class="comment"># Initialization of the values of the parameters</span>
+        <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+        <span class="comment"># Add `eps` in the denominator to omit division by zero if `np.var(y)`</span>
+        <span class="comment"># is zero</span>
+        <span class="identifier">alpha_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_init</span>
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span>
+        <span class="keyword">if</span> <span class="identifier">alpha_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">alpha_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">var</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">eps</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+
+        <span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span>
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span>
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span>
+        <span class="identifier">alpha_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_1</span>
+        <span class="identifier">alpha_2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_2</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">coef_old_</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="identifier">XT_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vh</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">full_matrices</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">eigen_vals_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">S</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span>
+
+        <span class="comment"># Convergence loop of the bayesian ridge regression</span>
+        <span class="keyword">for</span> <span class="identifier">iter_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+            <span class="comment"># update posterior mean coef_ based on alpha_ and lambda_ and</span>
+            <span class="comment"># compute corresponding rmse</span>
+            <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">rmse_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_coef_</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span>
+                                              <span class="identifier">XT_y</span><span class="punctuation">,</span> <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">Vh</span><span class="punctuation">,</span> <span class="identifier">eigen_vals_</span><span class="punctuation">,</span>
+                                              <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_score</span><span class="punctuation">:</span>
+                <span class="comment"># compute the log marginal likelihood</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_log_marginal_likelihood</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span>
+                                                  <span class="identifier">eigen_vals_</span><span class="punctuation">,</span>
+                                                  <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span>
+                                                  <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">rmse_</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span>
+
+            <span class="comment"># Update alpha and lambda according to (MacKay, 1992)</span>
+            <span class="identifier">gamma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">eigen_vals_</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span>
+                            <span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-operator">+</span> <span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">eigen_vals_</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">gamma_</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span>
+                       <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">coef_</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">alpha_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">gamma_</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_1</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span>
+                      <span class="grouping">(</span><span class="identifier">rmse_</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_2</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="comment"># Check for convergence</span>
+            <span class="keyword">if</span> <span class="identifier">iter_</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span> <span class="logical-operator">and</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">coef_old_</span> <span class="arithmetic-operator">-</span> <span class="identifier">coef_</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">verbose</span><span class="punctuation">:</span>
+                    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Convergence after ", str(iter_), " iterations"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="identifier">coef_old_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">coef_</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">iter_</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+
+        <span class="comment"># return regularization parameters and corresponding posterior mean,</span>
+        <span class="comment"># log marginal likelihood and posterior covariance</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">rmse_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_coef_</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span>
+                                               <span class="identifier">XT_y</span><span class="punctuation">,</span> <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">Vh</span><span class="punctuation">,</span> <span class="identifier">eigen_vals_</span><span class="punctuation">,</span>
+                                               <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_score</span><span class="punctuation">:</span>
+            <span class="comment"># compute the log marginal likelihood</span>
+            <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_log_marginal_likelihood</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span>
+                                              <span class="identifier">eigen_vals_</span><span class="punctuation">,</span>
+                                              <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span>
+                                              <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">rmse_</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span><span class="grouping">)</span>
+
+        <span class="comment"># posterior covariance is given by 1/alpha_ * scaled_sigma_</span>
+        <span class="identifier">scaled_sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">Vh</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span>
+                               <span class="identifier">Vh</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">eigen_vals_</span> <span class="arithmetic-operator">+</span>
+                                     <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-operator">/</span> <span class="identifier">alpha_</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">alpha_</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">scaled_sigma_</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_intercept</span><span class="grouping">(</span><span class="identifier">X_offset_</span><span class="punctuation">,</span> <span class="identifier">y_offset_</span><span class="punctuation">,</span> <span class="identifier">X_scale_</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict using the linear model.
+
+        In addition to the mean of the predictive distribution, also its
+        standard deviation can be returned.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Samples.
+
+        return_std : bool, default=False
+            Whether to return the standard deviation of posterior prediction.
+
+        Returns
+        -------
+        y_mean : array-like of shape (n_samples,)
+            Mean of predictive distribution of query points.
+
+        y_std : array-like of shape (n_samples,)
+            Standard deviation of predictive distribution of query points.
+        """</span>
+        <span class="identifier">y_mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">d</span> <span class="relational-operator">is</span> <span class="bool-literal">False</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">y_mean</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalize</span><span class="punctuation">:</span>
+                <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_offset_</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_scale_</span>
+            <span class="identifier">sigmas_squared_data</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sigma_</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">y_std</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">sigmas_squared_data</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">y_mean</span><span class="punctuation">,</span> <span class="identifier">y_std</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_coef_</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">XT_y</span><span class="punctuation">,</span> <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">Vh</span><span class="punctuation">,</span>
+                      <span class="identifier">eigen_vals_</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Update posterior mean and compute corresponding rmse.
+
+        Posterior mean is given by coef_ = scaled_sigma_ * X.T * y where
+        scaled_sigma_ = (lambda_/alpha_ * np.eye(n_features)
+                         + np.dot(X.T, X))^-1
+        """</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+            <span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">multi_dot</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">Vh</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span>
+                                         <span class="identifier">Vh</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">eigen_vals_</span> <span class="arithmetic-operator">+</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-operator">/</span>
+                                               <span class="identifier">alpha_</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                         <span class="identifier">XT_y</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">multi_dot</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span>
+                                         <span class="identifier">U</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">eigen_vals_</span> <span class="arithmetic-operator">+</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-operator">/</span>
+                                              <span class="identifier">alpha_</span><span class="grouping">)</span><span class="grouping">[</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                         <span class="identifier">U</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">rmse_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">coef_</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">rmse_</span>
+
+    <span class="keyword">def</span> <span class="identifier">_log_marginal_likelihood</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">eigen_vals</span><span class="punctuation">,</span>
+                                 <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">coef</span><span class="punctuation">,</span> <span class="identifier">rmse</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Log marginal likelihood."""</span>
+        <span class="identifier">alpha_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_1</span>
+        <span class="identifier">alpha_2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_2</span>
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span>
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span>
+
+        <span class="comment"># compute the log of the determinant of the posterior covariance.</span>
+        <span class="comment"># posterior covariance is given by</span>
+        <span class="comment"># sigma = (lambda_ * np.eye(n_features) + alpha_ * np.dot(X.T, X))^-1</span>
+        <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+            <span class="identifier">logdet_sigma</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-operator">+</span> <span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">eigen_vals</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">logdet_sigma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">full</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span>
+                                   <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+            <span class="identifier">logdet_sigma</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_samples</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">eigen_vals</span>
+            <span class="identifier">logdet_sigma</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">logdet_sigma</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span>
+        <span class="identifier">score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">alpha_1</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="identifier">alpha_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">alpha_2</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_</span>
+        <span class="identifier">score</span> <span class="arithmetic-assignment">+=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+                        <span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="identifier">alpha_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+                        <span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">rmse</span> <span class="arithmetic-operator">-</span>
+                        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">coef</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+                        <span class="identifier">logdet_sigma</span> <span class="arithmetic-operator">-</span>
+                        <span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">score</span>
+
+
+<span class="comment">###############################################################################</span>
+<span class="comment"># ARD (Automatic Relevance Determination) regression</span>
+
+
+<span class="keyword">class</span> <span class="identifier">ARDRegression</span><span class="grouping">(</span><span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">LinearModel</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Bayesian ARD regression.
+
+    Fit the weights of a regression model, using an ARD prior. The weights of
+    the regression model are assumed to be in Gaussian distributions.
+    Also estimate the parameters lambda (precisions of the distributions of the
+    weights) and alpha (precision of the distribution of the noise).
+    The estimation is done by an iterative procedures (Evidence Maximization)
+
+    Read more in the :ref:`User Guide &lt;bayesian_regression&gt;`.
+
+    Parameters
+    ----------
+    n_iter : int, default=300
+        Maximum number of iterations.
+
+    tol : float, default=1e-3
+        Stop the algorithm if w has converged.
+
+    alpha_1 : float, default=1e-6
+        Hyper-parameter : shape parameter for the Gamma distribution prior
+        over the alpha parameter.
+
+    alpha_2 : float, default=1e-6
+        Hyper-parameter : inverse scale parameter (rate parameter) for the
+        Gamma distribution prior over the alpha parameter.
+
+    lambda_1 : float, default=1e-6
+        Hyper-parameter : shape parameter for the Gamma distribution prior
+        over the lambda parameter.
+
+    lambda_2 : float, default=1e-6
+        Hyper-parameter : inverse scale parameter (rate parameter) for the
+        Gamma distribution prior over the lambda parameter.
+
+    compute_score : bool, default=False
+        If True, compute the objective function at each step of the model.
+
+    threshold_lambda : float, default=10 000
+        threshold for removing (pruning) weights with high precision from
+        the computation.
+
+    fit_intercept : bool, default=True
+        whether to calculate the intercept for this model. If set
+        to false, no intercept will be used in calculations
+        (i.e. data is expected to be centered).
+
+    normalize : bool, default=False
+        This parameter is ignored when ``fit_intercept`` is set to False.
+        If True, the regressors X will be normalized before regression by
+        subtracting the mean and dividing by the l2-norm.
+        If you wish to standardize, please use
+        :class:`~sklearn.preprocessing.StandardScaler` before calling ``fit``
+        on an estimator with ``normalize=False``.
+
+        .. deprecated:: 1.0
+            ``normalize`` was deprecated in version 1.0 and will be removed in
+            1.2.
+
+    copy_X : bool, default=True
+        If True, X will be copied; else, it may be overwritten.
+
+    verbose : bool, default=False
+        Verbose mode when fitting the model.
+
+    Attributes
+    ----------
+    coef_ : array-like of shape (n_features,)
+        Coefficients of the regression model (mean of distribution)
+
+    alpha_ : float
+       estimated precision of the noise.
+
+    lambda_ : array-like of shape (n_features,)
+       estimated precisions of the weights.
+
+    sigma_ : array-like of shape (n_features, n_features)
+        estimated variance-covariance matrix of the weights
+
+    scores_ : float
+        if computed, value of the objective function (to be maximized)
+
+    intercept_ : float
+        Independent term in decision function. Set to 0.0 if
+        ``fit_intercept = False``.
+
+    X_offset_ : float
+        If `normalize=True`, offset subtracted for centering data to a
+        zero mean.
+
+    X_scale_ : float
+        If `normalize=True`, parameter used to scale data to a unit
+        standard deviation.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn import linear_model
+    &gt;&gt;&gt; clf = linear_model.ARDRegression()
+    &gt;&gt;&gt; clf.fit([[0,0], [1, 1], [2, 2]], [0, 1, 2])
+    ARDRegression()
+    &gt;&gt;&gt; clf.predict([[1, 1]])
+    array([1.])
+
+    Notes
+    -----
+    For an example, see :ref:`examples/linear_model/plot_ard.py
+    &lt;sphx_glr_auto_examples_linear_model_plot_ard.py&gt;`.
+
+    References
+    ----------
+    D. J. C. MacKay, Bayesian nonlinear modeling for the prediction
+    competition, ASHRAE Transactions, 1994.
+
+    R. Salakhutdinov, Lecture notes on Statistical Machine Learning,
+    http://www.utstat.toronto.edu/~rsalakhu/sta4273/notes/Lecture2.pdf#page=15
+    Their beta is our ``self.alpha_``
+    Their alpha is our ``self.lambda_``
+    ARD is a little different than the slide: only dimensions/features for
+    which ``self.lambda_ &lt; self.threshold_lambda`` are kept and the rest are
+    discarded.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">300</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">alpha_1</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="identifier">alpha_2</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span>
+                 <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="identifier">compute_score</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">threshold_lambda</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">+</span><span class="int-literal">4</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">normalize</span><span class="arithmetic-assignment">=</span><span class="string-literal">'deprecated'</span><span class="punctuation">,</span> <span class="identifier">copy_X</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_intercept</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">normalize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">normalize</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_2</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">compute_score</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold_lambda</span> <span class="arithmetic-assignment">=</span> <span class="identifier">threshold_lambda</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy_X</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the ARDRegression model according to the given training data
+        and parameters.
+
+        Iterative procedure to maximize the evidence
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples and
+            n_features is the number of features.
+        y : array-like of shape (n_samples,)
+            Target values (integers). Will be cast to X's dtype if necessary
+
+        Returns
+        -------
+        self : returns an instance of self.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_deprecate_normalize</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">normalize</span><span class="punctuation">,</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+            <span class="identifier">estimator_name</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span>
+        <span class="grouping">)</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                   <span class="identifier">ensure_min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">X_offset_</span><span class="punctuation">,</span> <span class="identifier">y_offset_</span><span class="punctuation">,</span> <span class="identifier">X_scale_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_preprocess_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalize</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_offset_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_offset_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_scale_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_scale_</span>
+
+        <span class="comment"># Launch the convergence loop</span>
+        <span class="identifier">keep_lambda</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span>
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span>
+        <span class="identifier">alpha_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_1</span>
+        <span class="identifier">alpha_2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_2</span>
+        <span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span>
+
+        <span class="comment"># Initialization of the values of the parameters</span>
+        <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+        <span class="comment"># Add `eps` in the denominator to omit division by zero if `np.var(y)`</span>
+        <span class="comment"># is zero</span>
+        <span class="identifier">alpha_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">var</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">eps</span><span class="grouping">)</span>
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">coef_old_</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="keyword">def</span> <span class="identifier">update_coeff</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="punctuation">,</span> <span class="identifier">sigma_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">coef_</span><span class="grouping">[</span><span class="identifier">keep_lambda</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">multi_dot</span><span class="grouping">(</span><span class="grouping">[</span>
+                <span class="identifier">sigma_</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">coef_</span>
+
+        <span class="identifier">update_sigma</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_sigma</span> <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">&gt;=</span> <span class="identifier">n_features</span>
+                        <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_sigma_woodbury</span><span class="grouping">)</span>
+        <span class="comment"># Iterative procedure of ARDRegression</span>
+        <span class="keyword">for</span> <span class="identifier">iter_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">update_sigma</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="grouping">)</span>
+            <span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">update_coeff</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="punctuation">,</span> <span class="identifier">sigma_</span><span class="grouping">)</span>
+
+            <span class="comment"># Update alpha and lambda</span>
+            <span class="identifier">rmse_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">coef_</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span>
+            <span class="identifier">gamma_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">keep_lambda</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">sigma_</span><span class="grouping">)</span>
+            <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">keep_lambda</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">gamma_</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span>
+                                    <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">coef_</span><span class="grouping">[</span><span class="identifier">keep_lambda</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span> <span class="arithmetic-operator">+</span>
+                                     <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">alpha_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">gamma_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_1</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span>
+                      <span class="grouping">(</span><span class="identifier">rmse_</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_2</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="comment"># Prune the weights with a precision over a threshold</span>
+            <span class="identifier">keep_lambda</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold_lambda</span>
+            <span class="identifier">coef_</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">keep_lambda</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+            <span class="comment"># Compute the objective function</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_score</span><span class="punctuation">:</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">1</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">alpha_1</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="identifier">alpha_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">alpha_2</span> <span class="arithmetic-operator">*</span> <span class="identifier">alpha_</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">+=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">fast_logdet</span><span class="grouping">(</span><span class="identifier">sigma_</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="identifier">alpha_</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+                            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">s</span> <span class="arithmetic-assignment">-=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">rmse_</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-operator">*</span> <span class="identifier">coef_</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span>
+
+            <span class="comment"># Check for convergence</span>
+            <span class="keyword">if</span> <span class="identifier">iter_</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span> <span class="logical-operator">and</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">coef_old_</span> <span class="arithmetic-operator">-</span> <span class="identifier">coef_</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">verbose</span><span class="punctuation">:</span>
+                    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Converged after %s iterations"</span> <span class="arithmetic-operator">%</span> <span class="identifier">iter_</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="identifier">coef_old_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">coef_</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">keep_lambda</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+
+        <span class="keyword">if</span> <span class="identifier">keep_lambda</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># update sigma and mu using updated params from the last iteration</span>
+            <span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">update_sigma</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="grouping">)</span>
+            <span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">update_coeff</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">coef_</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="punctuation">,</span> <span class="identifier">sigma_</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sigma_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_intercept</span><span class="grouping">(</span><span class="identifier">X_offset_</span><span class="punctuation">,</span> <span class="identifier">y_offset_</span><span class="punctuation">,</span> <span class="identifier">X_scale_</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_sigma_woodbury</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># See slides as referenced in the docstring note</span>
+        <span class="comment"># this function is used when n_samples &lt; n_features and will invert</span>
+        <span class="comment"># a matrix of shape (n_samples, n_samples) making use of the</span>
+        <span class="comment"># woodbury formula:</span>
+        <span class="comment"># https://en.wikipedia.org/wiki/Woodbury_matrix_identity</span>
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">X_keep</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="grouping">]</span>
+        <span class="identifier">inv_lambda</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">keep_lambda</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pinvh</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">alpha_</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_keep</span> <span class="arithmetic-operator">*</span> <span class="identifier">inv_lambda</span><span class="punctuation">,</span> <span class="identifier">X_keep</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="grouping">)</span>
+        <span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">sigma_</span><span class="punctuation">,</span> <span class="identifier">X_keep</span> <span class="arithmetic-operator">*</span> <span class="identifier">inv_lambda</span><span class="grouping">)</span>
+        <span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">inv_lambda</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X_keep</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">sigma_</span><span class="grouping">)</span>
+        <span class="identifier">sigma_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag_indices</span><span class="grouping">(</span><span class="identifier">sigma_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">keep_lambda</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">sigma_</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_sigma</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">alpha_</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># See slides as referenced in the docstring note</span>
+        <span class="comment"># this function is used when n_samples &gt;= n_features and will</span>
+        <span class="comment"># invert a matrix of shape (n_features, n_features)</span>
+        <span class="identifier">X_keep</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">keep_lambda</span><span class="grouping">]</span>
+        <span class="identifier">gram</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_keep</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">X_keep</span><span class="grouping">)</span>
+        <span class="identifier">eye</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">gram</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">sigma_inv</span> <span class="arithmetic-assignment">=</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">keep_lambda</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">eye</span> <span class="arithmetic-operator">+</span> <span class="identifier">alpha_</span> <span class="arithmetic-operator">*</span> <span class="identifier">gram</span>
+        <span class="identifier">sigma_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pinvh</span><span class="grouping">(</span><span class="identifier">sigma_inv</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">sigma_</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict using the linear model.
+
+        In addition to the mean of the predictive distribution, also its
+        standard deviation can be returned.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Samples.
+
+        return_std : bool, default=False
+            Whether to return the standard deviation of posterior prediction.
+
+        Returns
+        -------
+        y_mean : array-like of shape (n_samples,)
+            Mean of predictive distribution of query points.
+
+        y_std : array-like of shape (n_samples,)
+            Standard deviation of predictive distribution of query points.
+        """</span>
+        <span class="identifier">y_mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">d</span> <span class="relational-operator">is</span> <span class="bool-literal">False</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">y_mean</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalize</span><span class="punctuation">:</span>
+                <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_offset_</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_scale_</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">_</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">threshold_lambda</span><span class="grouping">]</span>
+            <span class="identifier">sigmas_squared_data</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sigma_</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">y_std</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">sigmas_squared_data</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha_</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">y_mean</span><span class="punctuation">,</span> <span class="identifier">y_std</span>
+
+    </pre>
+  </body>
+</html>

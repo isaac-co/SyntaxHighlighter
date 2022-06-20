@@ -1,0 +1,264 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Andreas Mueller &lt;andreas.mueller@columbia.edu&gt;</span>
+<span class="comment">#          Guillaume Lemaitre &lt;guillaume.lemaitre@inria.fr&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">clone</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span><span class="punctuation">,</span> <span class="identifier">_safe_indexing</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">FunctionTransformer</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">NotFittedError</span>
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'TransformedTargetRegressor'</span><span class="grouping">]</span>
+
+
+<span class="keyword">class</span> <span class="identifier">TransformedTargetRegressor</span><span class="grouping">(</span><span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Meta-estimator to regress on a transformed target.
+
+    Useful for applying a non-linear transformation to the target ``y`` in
+    regression problems. This transformation can be given as a Transformer
+    such as the QuantileTransformer or as a function and its inverse such as
+    ``log`` and ``exp``.
+
+    The computation during ``fit`` is::
+
+        regressor.fit(X, func(y))
+
+    or::
+
+        regressor.fit(X, transformer.transform(y))
+
+    The computation during ``predict`` is::
+
+        inverse_func(regressor.predict(X))
+
+    or::
+
+        transformer.inverse_transform(regressor.predict(X))
+
+    Read more in the :ref:`User Guide &lt;transformed_target_regressor&gt;`.
+
+    .. versionadded:: 0.20
+
+    Parameters
+    ----------
+    regressor : object, default=None
+        Regressor object such as derived from ``RegressorMixin``. This
+        regressor will automatically be cloned each time prior to fitting.
+        If regressor is ``None``, ``LinearRegression()`` is created and used.
+
+    transformer : object, default=None
+        Estimator object such as derived from ``TransformerMixin``. Cannot be
+        set at the same time as ``func`` and ``inverse_func``. If
+        ``transformer`` is ``None`` as well as ``func`` and ``inverse_func``,
+        the transformer will be an identity transformer. Note that the
+        transformer will be cloned during fitting. Also, the transformer is
+        restricting ``y`` to be a numpy array.
+
+    func : function, default=None
+        Function to apply to ``y`` before passing to ``fit``. Cannot be set at
+        the same time as ``transformer``. The function needs to return a
+        2-dimensional array. If ``func`` is ``None``, the function used will be
+        the identity function.
+
+    inverse_func : function, default=None
+        Function to apply to the prediction of the regressor. Cannot be set at
+        the same time as ``transformer`` as well. The function needs to return
+        a 2-dimensional array. The inverse function is used to return
+        predictions to the same space of the original training labels.
+
+    check_inverse : bool, default=True
+        Whether to check that ``transform`` followed by ``inverse_transform``
+        or ``func`` followed by ``inverse_func`` leads to the original targets.
+
+    Attributes
+    ----------
+    regressor_ : object
+        Fitted regressor.
+
+    transformer_ : object
+        Transformer used in ``fit`` and ``predict``.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.linear_model import LinearRegression
+    &gt;&gt;&gt; from sklearn.compose import TransformedTargetRegressor
+    &gt;&gt;&gt; tt = TransformedTargetRegressor(regressor=LinearRegression(),
+    ...                                 func=np.log, inverse_func=np.exp)
+    &gt;&gt;&gt; X = np.arange(4).reshape(-1, 1)
+    &gt;&gt;&gt; y = np.exp(2 * X).ravel()
+    &gt;&gt;&gt; tt.fit(X, y)
+    TransformedTargetRegressor(...)
+    &gt;&gt;&gt; tt.score(X, y)
+    1.0
+    &gt;&gt;&gt; tt.regressor_.coef_
+    array([2.])
+
+    Notes
+    -----
+    Internally, the target ``y`` is always converted into a 2-dimensional array
+    to be used by scikit-learn transformers. At the time of prediction, the
+    output will be reshaped to a have the same number of dimensions as ``y``.
+
+    See :ref:`examples/compose/plot_transformed_target.py
+    &lt;sphx_glr_auto_examples_compose_plot_transformed_target.py&gt;`.
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">regressor</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">transformer</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">func</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">inverse_func</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">check_inverse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">regressor</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">transformer</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">func</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">inverse_func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inverse_func</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">check_inverse</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_inverse</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit_transformer</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Check transformer and fit transformer.
+
+        Create the default transformer, fit it and make additional inverse
+        check on a subset (optional).
+
+        """</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span>
+                <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">func</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">inverse_func</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"'transformer' and functions 'func'/"</span>
+                             <span class="string-literal">"'inverse_func' cannot both be set."</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">func</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">inverse_func</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"When 'func' is provided, 'inverse_func' must"</span>
+                                 <span class="string-literal">" also be provided"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">FunctionTransformer</span><span class="grouping">(</span>
+                <span class="identifier">func</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">func</span><span class="punctuation">,</span> <span class="identifier">inverse_func</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">inverse_func</span><span class="punctuation">,</span> <span class="identifier">validate</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                <span class="identifier">check_inverse</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">check_inverse</span><span class="grouping">)</span>
+        <span class="comment"># XXX: sample_weight is not currently passed to the</span>
+        <span class="comment"># transformer. However, if transformer starts using sample_weight, the</span>
+        <span class="comment"># code should be modified accordingly. At the time to consider the</span>
+        <span class="comment"># sample_prop feature, it is also a good use case to be considered.</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">check_inverse</span><span class="punctuation">:</span>
+            <span class="identifier">idx_selected</span> <span class="arithmetic-assignment">=</span> <span class="identifier">slice</span><span class="grouping">(</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">//</span> <span class="int-literal">10</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">y_sel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">idx_selected</span><span class="grouping">)</span>
+            <span class="identifier">y_sel_t</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">y_sel</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">allclose</span><span class="grouping">(</span><span class="identifier">y_sel</span><span class="punctuation">,</span>
+                               <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span><span class="punctuation">.</span><span class="identifier">inverse_transform</span><span class="grouping">(</span><span class="identifier">y_sel_t</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"The provided functions or transformer are"</span>
+                              <span class="string-literal">" not strictly inverse of each other. If"</span>
+                              <span class="string-literal">" you are sure you want to proceed regardless"</span>
+                              <span class="string-literal">", set 'check_inverse=False'"</span><span class="punctuation">,</span> <span class="identifier">UserWarning</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">fit_params</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model according to the given training data.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Training vector, where n_samples is the number of samples and
+            n_features is the number of features.
+
+        y : array-like of shape (n_samples,)
+            Target values.
+
+        **fit_params : dict
+            Parameters passed to the ``fit`` method of the underlying
+            regressor.
+
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                        <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">'numeric'</span><span class="punctuation">,</span> <span class="identifier">allow_nd</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="comment"># store the number of dimension of the target to predict an array of</span>
+        <span class="comment"># similar shape at predict</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_training_dim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">ndim</span>
+
+        <span class="comment"># transformers are designed to modify X which is 2d dimensional, we</span>
+        <span class="comment"># need to modify y accordingly.</span>
+        <span class="keyword">if</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">y_2d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">y_2d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_transformer</span><span class="grouping">(</span><span class="identifier">y_2d</span><span class="grouping">)</span>
+
+        <span class="comment"># transform y and convert back to 1d array if needed</span>
+        <span class="identifier">y_trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">y_2d</span><span class="grouping">)</span>
+        <span class="comment"># FIXME: a FunctionTransformer can return a 1D array even when validate</span>
+        <span class="comment"># is set to True. Therefore, we need to check the number of dimension</span>
+        <span class="comment"># first.</span>
+        <span class="keyword">if</span> <span class="identifier">y_trans</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span> <span class="logical-operator">and</span> <span class="identifier">y_trans</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">y_trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_trans</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">LinearRegression</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LinearRegression</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y_trans</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">fit_params</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict using the base regressor, applying inverse.
+
+        The regressor is used to predict and the ``inverse_func`` or
+        ``inverse_transform`` is applied before returning the prediction.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Samples.
+
+        Returns
+        -------
+        y_hat : ndarray of shape (n_samples,)
+            Predicted values.
+
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">pred</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">pred_trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span><span class="punctuation">.</span><span class="identifier">inverse_transform</span><span class="grouping">(</span>
+                <span class="identifier">pred</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">pred_trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transformer_</span><span class="punctuation">.</span><span class="identifier">inverse_transform</span><span class="grouping">(</span><span class="identifier">pred</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_training_dim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span> <span class="logical-operator">and</span>
+                <span class="identifier">pred_trans</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span> <span class="logical-operator">and</span> <span class="identifier">pred_trans</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">pred_trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pred_trans</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">pred_trans</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'poor_score': True, 'no_validation'</span><span class="punctuation">:</span> <span class="bool-literal">True</span><span class="grouping">}</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">n_features_in_</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># For consistency with other estimators we raise a AttributeError so</span>
+        <span class="comment"># that hasattr() returns False the estimator isn't fitted.</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">NotFittedError</span> <span class="keyword">as</span> <span class="identifier">nfe</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">AttributeError</span><span class="grouping">(</span>
+                <span class="string-literal">"{} object has no n_features_in_ attribute."</span>
+                <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+            <span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">nfe</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">n_features_in_</span>
+
+    </pre>
+  </body>
+</html>

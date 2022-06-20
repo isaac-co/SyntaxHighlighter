@@ -1,0 +1,530 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Partial dependence plots for regression and classification models."""</span>
+
+<span class="comment"># Authors: Peter Prettenhofer</span>
+<span class="comment">#          Trevor Stephens</span>
+<span class="comment">#          Nicolas Hug</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">collections</span><span class="punctuation">.</span><span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">Iterable</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">sparse</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">stats</span><span class="punctuation">.</span><span class="identifier">mstats</span> <span class="keyword">import</span> <span class="identifier">mquantiles</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">is_classifier</span><span class="punctuation">,</span> <span class="identifier">is_regressor</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">pipeline</span> <span class="keyword">import</span> <span class="identifier">Pipeline</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">cartesian</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_matplotlib_support</span>  <span class="comment"># noqa</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">_safe_indexing</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">_determine_key_type</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">_get_column_indices</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">Bunch</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">tree</span> <span class="keyword">import</span> <span class="identifier">DecisionTreeRegressor</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">ensemble</span> <span class="keyword">import</span> <span class="identifier">RandomForestRegressor</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">NotFittedError</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">ensemble</span><span class="punctuation">.</span><span class="identifier">_gb</span> <span class="keyword">import</span> <span class="identifier">BaseGradientBoosting</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">ensemble</span><span class="punctuation">.</span><span class="identifier">_hist_gradient_boosting</span><span class="punctuation">.</span><span class="identifier">gradient_boosting</span> <span class="keyword">import</span> <span class="grouping">(</span>
+    <span class="identifier">BaseHistGradientBoosting</span><span class="grouping">)</span>
+
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+    <span class="string-literal">'partial_dependence'</span><span class="punctuation">,</span>
+<span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_grid_from_X</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">percentiles</span><span class="punctuation">,</span> <span class="identifier">grid_resolution</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Generate a grid of points based on the percentiles of X.
+
+    The grid is a cartesian product between the columns of ``values``. The
+    ith column of ``values`` consists in ``grid_resolution`` equally-spaced
+    points between the percentiles of the jth column of X.
+    If ``grid_resolution`` is bigger than the number of unique values in the
+    jth column of X, then those unique values will be used instead.
+
+    Parameters
+    ----------
+    X : ndarray, shape (n_samples, n_target_features)
+        The data.
+
+    percentiles : tuple of floats
+        The percentiles which are used to construct the extreme values of
+        the grid. Must be in [0, 1].
+
+    grid_resolution : int
+        The number of equally spaced points to be placed on the grid for each
+        feature.
+
+    Returns
+    -------
+    grid : ndarray, shape (n_points, n_target_features)
+        A value for each feature at each point in the grid. ``n_points`` is
+        always ``&lt;= grid_resolution ** X.shape[1]``.
+
+    values : list of 1d ndarrays
+        The values with which the grid has been created. The size of each
+        array ``values[j]`` is either ``grid_resolution``, or the number of
+        unique values in ``X[:, j]``, whichever is smaller.
+    """</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">percentiles</span><span class="punctuation">,</span> <span class="identifier">Iterable</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">percentiles</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"'percentiles' must be a sequence of 2 elements."</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">all</span><span class="grouping">(</span><span class="int-literal">0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">x</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span> <span class="keyword">for</span> <span class="identifier">x</span> <span class="relational-operator">in</span> <span class="identifier">percentiles</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"'percentiles' values must be in [0, 1]."</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">percentiles</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&gt;=</span> <span class="identifier">percentiles</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'percentiles[0] must be strictly less '</span>
+                         <span class="string-literal">'than percentiles[1].'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">grid_resolution</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"'grid_resolution' must be strictly greater than 1."</span><span class="grouping">)</span>
+
+    <span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">feature</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">uniques</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">feature</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">uniques</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&lt;</span> <span class="identifier">grid_resolution</span><span class="punctuation">:</span>
+            <span class="comment"># feature has low resolution use unique vals</span>
+            <span class="identifier">axis</span> <span class="arithmetic-assignment">=</span> <span class="identifier">uniques</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># create axis based on percentiles and grid resolution</span>
+            <span class="identifier">emp_percentiles</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mquantiles</span><span class="grouping">(</span>
+                <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">feature</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">prob</span><span class="arithmetic-assignment">=</span><span class="identifier">percentiles</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span>
+            <span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">allclose</span><span class="grouping">(</span><span class="identifier">emp_percentiles</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">emp_percentiles</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">'percentiles are too close to each other, '</span>
+                    <span class="string-literal">'unable to build the grid. Please choose percentiles '</span>
+                    <span class="string-literal">'that are further apart.'</span><span class="grouping">)</span>
+            <span class="identifier">axis</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linspace</span><span class="grouping">(</span><span class="identifier">emp_percentiles</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                               <span class="identifier">emp_percentiles</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+                               <span class="identifier">num</span><span class="arithmetic-assignment">=</span><span class="identifier">grid_resolution</span><span class="punctuation">,</span> <span class="identifier">endpoint</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">values</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">axis</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">cartesian</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">values</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_partial_dependence_recursion</span><span class="grouping">(</span><span class="identifier">est</span><span class="punctuation">,</span> <span class="identifier">grid</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">_compute_partial_dependence_recursion</span><span class="grouping">(</span><span class="identifier">grid</span><span class="punctuation">,</span>
+                                                                     <span class="identifier">features</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="comment"># reshape to (1, n_points) for consistency with</span>
+        <span class="comment"># _partial_dependence_brute</span>
+        <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">averaged_predictions</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_partial_dependence_brute</span><span class="grouping">(</span><span class="identifier">est</span><span class="punctuation">,</span> <span class="identifier">grid</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">response_method</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+    <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+    <span class="comment"># define the prediction_method (predict, predict_proba, decision_function).</span>
+    <span class="keyword">if</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">est</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">prediction_method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">predict</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">predict_proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">est</span><span class="punctuation">,</span> <span class="string-literal">'predict_proba'</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="identifier">decision_function</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">est</span><span class="punctuation">,</span> <span class="string-literal">'decision_function'</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">response_method</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="comment"># try predict_proba, then decision_function if it doesn't exist</span>
+            <span class="identifier">prediction_method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predict_proba</span> <span class="logical-operator">or</span> <span class="identifier">decision_function</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">prediction_method</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">predict_proba</span> <span class="keyword">if</span> <span class="identifier">response_method</span> <span class="relational-operator">==</span>
+                                 <span class="string-literal">'predict_proba'</span> <span class="keyword">else</span> <span class="identifier">decision_function</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">prediction_method</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">response_method</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">'The estimator has no predict_proba and no '</span>
+                    <span class="string-literal">'decision_function method.'</span>
+                <span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">response_method</span> <span class="relational-operator">==</span> <span class="string-literal">'predict_proba'</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'The estimator has no predict_proba method.'</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">'The estimator has no decision_function method.'</span><span class="grouping">)</span>
+
+    <span class="keyword">for</span> <span class="identifier">new_values</span> <span class="relational-operator">in</span> <span class="identifier">grid</span><span class="punctuation">:</span>
+        <span class="identifier">X_eval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">variable</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X_eval</span><span class="punctuation">,</span> <span class="string-literal">'iloc'</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">X_eval</span><span class="punctuation">.</span><span class="identifier">iloc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">variable</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">new_values</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">X_eval</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">variable</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">new_values</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="comment"># Note: predictions is of shape</span>
+            <span class="comment"># (n_points,) for non-multioutput regressors</span>
+            <span class="comment"># (n_points, n_tasks) for multioutput regressors</span>
+            <span class="comment"># (n_points, 1) for the regressors in cross_decomposition (I think)</span>
+            <span class="comment"># (n_points, 2) for binary classification</span>
+            <span class="comment"># (n_points, n_classes) for multiclass classification</span>
+            <span class="identifier">pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">prediction_method</span><span class="grouping">(</span><span class="identifier">X_eval</span><span class="grouping">)</span>
+
+            <span class="identifier">predictions</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">pred</span><span class="grouping">)</span>
+            <span class="comment"># average over samples</span>
+            <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">pred</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">NotFittedError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"'estimator' parameter must be a fitted estimator"</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="comment"># reshape to (n_targets, n_instances, n_points) where n_targets is:</span>
+    <span class="comment"># - 1 for non-multioutput regression and binary classification (shape is</span>
+    <span class="comment">#   already correct in those cases)</span>
+    <span class="comment"># - n_tasks for multi-output regression</span>
+    <span class="comment"># - n_classes for multiclass classification.</span>
+    <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">predictions</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+    <span class="keyword">if</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">est</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">predictions</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="comment"># non-multioutput regression, shape is (n_instances, n_points,)</span>
+        <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">is_classifier</span><span class="grouping">(</span><span class="identifier">est</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">predictions</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="comment"># Binary classification, shape is (2, n_instances, n_points).</span>
+        <span class="comment"># we output the effect of **positive** class</span>
+        <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predictions</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+    <span class="comment"># reshape averaged_predictions to (n_targets, n_points) where n_targets is:</span>
+    <span class="comment"># - 1 for non-multioutput regression and binary classification (shape is</span>
+    <span class="comment">#   already correct in those cases)</span>
+    <span class="comment"># - n_tasks for multi-output regression</span>
+    <span class="comment"># - n_classes for multiclass classification.</span>
+    <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">averaged_predictions</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+    <span class="keyword">if</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">est</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="comment"># non-multioutput regression, shape is (n_points,)</span>
+        <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">is_classifier</span><span class="grouping">(</span><span class="identifier">est</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="comment"># Binary classification, shape is (2, n_points).</span>
+        <span class="comment"># we output the effect of **positive** class</span>
+        <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">averaged_predictions</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">averaged_predictions</span><span class="punctuation">,</span> <span class="identifier">predictions</span>
+
+
+<span class="keyword">def</span> <span class="identifier">partial_dependence</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">response_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span>
+                       <span class="identifier">percentiles</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="float-literal">0.05</span><span class="punctuation">,</span> <span class="float-literal">0.95</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">grid_resolution</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                       <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto', kind='legacy'</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Partial dependence of ``features``.
+
+    Partial dependence of a feature (or a set of features) corresponds to
+    the average response of an estimator for each possible value of the
+    feature.
+
+    Read more in the :ref:`User Guide &lt;partial_dependence&gt;`.
+
+    .. warning::
+
+        For :class:`~sklearn.ensemble.GradientBoostingClassifier` and
+        :class:`~sklearn.ensemble.GradientBoostingRegressor`, the
+        `'recursion'` method (used by default) will not account for the `init`
+        predictor of the boosting process. In practice, this will produce
+        the same values as `'brute'` up to a constant offset in the target
+        response, provided that `init` is a constant estimator (which is the
+        default). However, if `init` is not a constant estimator, the
+        partial dependence values are incorrect for `'recursion'` because the
+        offset will be sample-dependent. It is preferable to use the `'brute'`
+        method. Note that this only applies to
+        :class:`~sklearn.ensemble.GradientBoostingClassifier` and
+        :class:`~sklearn.ensemble.GradientBoostingRegressor`, not to
+        :class:`~sklearn.ensemble.HistGradientBoostingClassifier` and
+        :class:`~sklearn.ensemble.HistGradientBoostingRegressor`.
+
+    Parameters
+    ----------
+    estimator : BaseEstimator
+        A fitted estimator object implementing :term:`predict`,
+        :term:`predict_proba`, or :term:`decision_function`.
+        Multioutput-multiclass classifiers are not supported.
+
+    X : {array-like or dataframe} of shape (n_samples, n_features)
+        ``X`` is used to generate a grid of values for the target
+        ``features`` (where the partial dependence will be evaluated), and
+        also to generate values for the complement features when the
+        `method` is 'brute'.
+
+    features : array-like of {int, str}
+        The feature (e.g. `[0]`) or pair of interacting features
+        (e.g. `[(0, 1)]`) for which the partial dependency should be computed.
+
+    response_method : {'auto', 'predict_proba', 'decision_function'}, \
+            default='auto'
+        Specifies whether to use :term:`predict_proba` or
+        :term:`decision_function` as the target response. For regressors
+        this parameter is ignored and the response is always the output of
+        :term:`predict`. By default, :term:`predict_proba` is tried first
+        and we revert to :term:`decision_function` if it doesn't exist. If
+        ``method`` is 'recursion', the response is always the output of
+        :term:`decision_function`.
+
+    percentiles : tuple of float, default=(0.05, 0.95)
+        The lower and upper percentile used to create the extreme values
+        for the grid. Must be in [0, 1].
+
+    grid_resolution : int, default=100
+        The number of equally spaced points on the grid, for each target
+        feature.
+
+    method : {'auto', 'recursion', 'brute'}, default='auto'
+        The method used to calculate the averaged predictions:
+
+        - `'recursion'` is only supported for some tree-based estimators
+          (namely
+          :class:`~sklearn.ensemble.GradientBoostingClassifier`,
+          :class:`~sklearn.ensemble.GradientBoostingRegressor`,
+          :class:`~sklearn.ensemble.HistGradientBoostingClassifier`,
+          :class:`~sklearn.ensemble.HistGradientBoostingRegressor`,
+          :class:`~sklearn.tree.DecisionTreeRegressor`,
+          :class:`~sklearn.ensemble.RandomForestRegressor`,
+          ) when `kind='average'`.
+          This is more efficient in terms of speed.
+          With this method, the target response of a
+          classifier is always the decision function, not the predicted
+          probabilities. Since the `'recursion'` method implicitely computes
+          the average of the Individual Conditional Expectation (ICE) by
+          design, it is not compatible with ICE and thus `kind` must be
+          `'average'`.
+
+        - `'brute'` is supported for any estimator, but is more
+          computationally intensive.
+
+        - `'auto'`: the `'recursion'` is used for estimators that support it,
+          and `'brute'` is used otherwise.
+
+        Please see :ref:`this note &lt;pdp_method_differences&gt;` for
+        differences between the `'brute'` and `'recursion'` method.
+
+    kind : {'legacy', 'average', 'individual', 'both'}, default='legacy'
+        Whether to return the partial dependence averaged across all the
+        samples in the dataset or one line per sample or both.
+        See Returns below.
+
+        Note that the fast `method='recursion'` option is only available for
+        `kind='average'`. Plotting individual dependencies requires using the
+        slower `method='brute'` option.
+
+        .. versionadded:: 0.24
+        .. deprecated:: 0.24
+            `kind='legacy'` is deprecated and will be removed in version 1.1.
+            `kind='average'` will be the new default. It is intended to migrate
+            from the ndarray output to :class:`~sklearn.utils.Bunch` output.
+
+
+    Returns
+    -------
+    predictions : ndarray or :class:`~sklearn.utils.Bunch`
+
+        - if `kind='legacy'`, return value is ndarray of shape (n_outputs, \
+                len(values[0]), len(values[1]), ...)
+            The predictions for all the points in the grid, averaged
+            over all samples in X (or over the training data if ``method``
+            is 'recursion').
+
+        - if `kind='individual'`, `'average'` or `'both'`, return value is \
+                :class:`~sklearn.utils.Bunch`
+            Dictionary-like object, with the following attributes.
+
+            individual : ndarray of shape (n_outputs, n_instances, \
+                    len(values[0]), len(values[1]), ...)
+                The predictions for all the points in the grid for all
+                samples in X. This is also known as Individual
+                Conditional Expectation (ICE)
+
+            average : ndarray of shape (n_outputs, len(values[0]), \
+                    len(values[1]), ...)
+                The predictions for all the points in the grid, averaged
+                over all samples in X (or over the training data if
+                ``method`` is 'recursion').
+                Only available when kind='both'.
+
+            values : seq of 1d ndarrays
+                The values with which the grid has been created. The generated
+                grid is a cartesian product of the arrays in ``values``.
+                ``len(values) == len(features)``. The size of each array
+                ``values[j]`` is either ``grid_resolution``, or the number of
+                unique values in ``X[:, j]``, whichever is smaller.
+
+        ``n_outputs`` corresponds to the number of classes in a multi-class
+        setting, or to the number of tasks for multi-output regression.
+        For classical regression and binary classification ``n_outputs==1``.
+        ``n_values_feature_j`` corresponds to the size ``values[j]``.
+
+    values : seq of 1d ndarrays
+        The values with which the grid has been created. The generated grid
+        is a cartesian product of the arrays in ``values``. ``len(values) ==
+        len(features)``. The size of each array ``values[j]`` is either
+        ``grid_resolution``, or the number of unique values in ``X[:, j]``,
+        whichever is smaller. Only available when `kind="legacy"`.
+
+    See Also
+    --------
+    plot_partial_dependence : Plot Partial Dependence.
+    PartialDependenceDisplay : Partial Dependence visualization.
+
+    Examples
+    --------
+    &gt;&gt;&gt; X = [[0, 0, 2], [1, 0, 0]]
+    &gt;&gt;&gt; y = [0, 1]
+    &gt;&gt;&gt; from sklearn.ensemble import GradientBoostingClassifier
+    &gt;&gt;&gt; gb = GradientBoostingClassifier(random_state=0).fit(X, y)
+    &gt;&gt;&gt; partial_dependence(gb, features=[0], X=X, percentiles=(0, 1),
+    ...                    grid_resolution=2) # doctest: +SKIP
+    (array([[-4.52...,  4.52...]]), [array([ 0.,  1.])])
+    """</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="identifier">is_classifier</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">"'estimator' must be a fitted regressor or classifier."</span>
+        <span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">Pipeline</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># TODO: to be removed if/when pipeline get a `steps_` attributes</span>
+        <span class="comment"># assuming Pipeline is the only estimator that does not store a new</span>
+        <span class="comment"># attribute</span>
+        <span class="keyword">for</span> <span class="identifier">est</span> <span class="relational-operator">in</span> <span class="identifier">estimator</span><span class="punctuation">:</span>
+            <span class="comment"># FIXME: remove the None option when it will be deprecated</span>
+            <span class="keyword">if</span> <span class="identifier">est</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="string-literal">'drop'</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">est</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">is_classifier</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span> <span class="logical-operator">and</span>
+            <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">'Multiclass-multioutput estimators are not supported'</span>
+        <span class="grouping">)</span>
+
+    <span class="comment"># Use check_array only on lists and other non-array-likes / sparse. Do not</span>
+    <span class="comment"># convert DataFrame into a NumPy array.</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span><span class="grouping">(</span><span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">'__array__'</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+
+    <span class="identifier">accepted_responses</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">'auto', 'predict_proba', 'decision_function'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">response_method</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">accepted_responses</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">'response_method {} is invalid. Accepted response_method names '</span>
+            <span class="string-literal">'are {}.'.format(response_method, ', '</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">accepted_responses</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">response_method</span> <span class="relational-operator">!=</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">"The response_method parameter is ignored for regressors and "</span>
+            <span class="string-literal">"must be 'auto'."</span>
+        <span class="grouping">)</span>
+
+    <span class="identifier">accepted_methods</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">'brute', 'recursion', 'auto'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">method</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">accepted_methods</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">'method {} is invalid. Accepted method names are {}.'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                <span class="identifier">method</span><span class="punctuation">,</span> <span class="string-literal">', '</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">accepted_methods</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">kind</span> <span class="relational-operator">!=</span> <span class="string-literal">'average' and kind != 'legacy'</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'recursion'</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"The 'recursion' method only applies when 'kind' is set "</span>
+                <span class="string-literal">"to 'average'"</span>
+            <span class="grouping">)</span>
+        <span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'brute'</span>
+
+    <span class="keyword">if</span> <span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">BaseGradientBoosting</span><span class="grouping">)</span> <span class="logical-operator">and</span>
+                <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">init</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'recursion'</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">BaseHistGradientBoosting</span><span class="punctuation">,</span>
+                                    <span class="identifier">DecisionTreeRegressor</span><span class="punctuation">,</span>
+                                    <span class="identifier">RandomForestRegressor</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'recursion'</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'brute'</span>
+
+    <span class="keyword">if</span> <span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'recursion'</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span>
+                          <span class="grouping">(</span><span class="identifier">BaseGradientBoosting</span><span class="punctuation">,</span> <span class="identifier">BaseHistGradientBoosting</span><span class="punctuation">,</span>
+                           <span class="identifier">DecisionTreeRegressor</span><span class="punctuation">,</span> <span class="identifier">RandomForestRegressor</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">supported_classes_recursion</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+                <span class="string-literal">'GradientBoostingClassifier'</span><span class="punctuation">,</span>
+                <span class="string-literal">'GradientBoostingRegressor'</span><span class="punctuation">,</span>
+                <span class="string-literal">'HistGradientBoostingClassifier'</span><span class="punctuation">,</span>
+                <span class="string-literal">'HistGradientBoostingRegressor'</span><span class="punctuation">,</span>
+                <span class="string-literal">'HistGradientBoostingRegressor'</span><span class="punctuation">,</span>
+                <span class="string-literal">'DecisionTreeRegressor'</span><span class="punctuation">,</span>
+                <span class="string-literal">'RandomForestRegressor'</span><span class="punctuation">,</span>
+            <span class="grouping">)</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Only the following estimators support the 'recursion' "</span>
+                <span class="string-literal">"method: {}. Try using method='brute'."</span>
+                <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="string-literal">', '</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">supported_classes_recursion</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">response_method</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="identifier">response_method</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'decision_function'</span>
+
+        <span class="keyword">if</span> <span class="identifier">response_method</span> <span class="relational-operator">!=</span> <span class="string-literal">'decision_function'</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"With the 'recursion' method, the response_method must be "</span>
+                <span class="string-literal">"'decision_function'. Got {}."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">response_method</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">_determine_key_type</span><span class="grouping">(</span><span class="identifier">features</span><span class="punctuation">,</span> <span class="identifier">accept_slice</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="string-literal">'int'</span><span class="punctuation">:</span>
+        <span class="comment"># _get_column_indices() supports negative indexing. Here, we limit</span>
+        <span class="comment"># the indexing to be positive. The upper bound will be checked</span>
+        <span class="comment"># by _get_column_indices()</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">less</span><span class="grouping">(</span><span class="identifier">features</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">'all features must be in [0, {}]'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+
+    <span class="identifier">features_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span>
+        <span class="identifier">_get_column_indices</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int32</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span>
+    <span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="identifier">grid</span><span class="punctuation">,</span> <span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_grid_from_X</span><span class="grouping">(</span>
+        <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">features_indices</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">percentiles</span><span class="punctuation">,</span>
+        <span class="identifier">grid_resolution</span>
+    <span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">'brute'</span><span class="punctuation">:</span>
+        <span class="identifier">averaged_predictions</span><span class="punctuation">,</span> <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_partial_dependence_brute</span><span class="grouping">(</span>
+            <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">grid</span><span class="punctuation">,</span> <span class="identifier">features_indices</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">response_method</span>
+        <span class="grouping">)</span>
+
+        <span class="comment"># reshape predictions to</span>
+        <span class="comment"># (n_outputs, n_instances, n_values_feature_0, n_values_feature_1, ...)</span>
+        <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span>
+            <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="grouping">[</span><span class="identifier">val</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">values</span><span class="grouping">]</span>
+        <span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_partial_dependence_recursion</span><span class="grouping">(</span>
+            <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">grid</span><span class="punctuation">,</span> <span class="identifier">features_indices</span>
+        <span class="grouping">)</span>
+
+    <span class="comment"># reshape averaged_predictions to</span>
+    <span class="comment"># (n_outputs, n_values_feature_0, n_values_feature_1, ...)</span>
+    <span class="identifier">averaged_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">averaged_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span>
+        <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="grouping">[</span><span class="identifier">val</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">values</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'legacy'</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span>
+            <span class="string-literal">"A Bunch will be returned in place of 'predictions' from version"</span>
+            <span class="string-literal">" 1.1 (renaming of 0.26) with partial dependence results "</span>
+            <span class="string-literal">"accessible via the 'average' key. In the meantime, pass "</span>
+            <span class="string-literal">"kind='average' to get the future behaviour."</span><span class="punctuation">,</span>
+            <span class="identifier">FutureWarning</span>
+        <span class="grouping">)</span>
+        <span class="comment"># TODO 1.1: Remove kind == 'legacy' section</span>
+        <span class="keyword">return</span> <span class="identifier">averaged_predictions</span><span class="punctuation">,</span> <span class="identifier">values</span>
+    <span class="keyword">elif</span> <span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'average'</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">Bunch</span><span class="grouping">(</span><span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="identifier">averaged_predictions</span><span class="punctuation">,</span> <span class="identifier">values</span><span class="arithmetic-assignment">=</span><span class="identifier">values</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'individual'</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">Bunch</span><span class="grouping">(</span><span class="identifier">individual</span><span class="arithmetic-assignment">=</span><span class="identifier">predictions</span><span class="punctuation">,</span> <span class="identifier">values</span><span class="arithmetic-assignment">=</span><span class="identifier">values</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># kind='both'</span>
+        <span class="keyword">return</span> <span class="identifier">Bunch</span><span class="grouping">(</span>
+            <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="identifier">averaged_predictions</span><span class="punctuation">,</span> <span class="identifier">individual</span><span class="arithmetic-assignment">=</span><span class="identifier">predictions</span><span class="punctuation">,</span>
+            <span class="identifier">values</span><span class="arithmetic-assignment">=</span><span class="identifier">values</span><span class="punctuation">,</span>
+        <span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

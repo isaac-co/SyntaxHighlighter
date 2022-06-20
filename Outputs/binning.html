@@ -1,0 +1,307 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+This module contains the BinMapper class.
+
+BinMapper is used for mapping a real-valued dataset into integer-valued bins.
+Bin thresholds are computed with the quantiles so that each bin contains
+approximately the same number of samples.
+"""</span>
+<span class="comment"># Author: Nicolas Hug</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_binning</span> <span class="keyword">import</span> <span class="identifier">_map_to_bins</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">common</span> <span class="keyword">import</span> <span class="identifier">X_DTYPE</span><span class="punctuation">,</span> <span class="identifier">X_BINNED_DTYPE</span><span class="punctuation">,</span> <span class="identifier">ALMOST_INF</span><span class="punctuation">,</span> <span class="identifier">X_BITSET_INNER_DTYPE</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_bitset</span> <span class="keyword">import</span> <span class="identifier">set_bitset_memoryview</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_find_binning_thresholds</span><span class="grouping">(</span><span class="identifier">col_data</span><span class="punctuation">,</span> <span class="identifier">max_bins</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Extract quantiles from a continuous feature.
+
+    Missing values are ignored for finding the thresholds.
+
+    Parameters
+    ----------
+    col_data : array-like, shape (n_samples,)
+        The continuous feature to bin.
+    max_bins: int
+        The maximum number of bins to use for non-missing values. If for a
+        given feature the number of unique values is less than ``max_bins``,
+        then those unique values will be used to compute the bin thresholds,
+        instead of the quantiles
+
+    Return
+    ------
+    binning_thresholds : ndarray of shape(min(max_bins, n_unique_values) - 1,)
+        The increasing numeric values that can be used to separate the bins.
+        A given value x will be mapped into bin value i iff
+        bining_thresholds[i - 1] &lt; x &lt;= binning_thresholds[i]
+    """</span>
+    <span class="comment"># ignore missing values when computing bin thresholds</span>
+    <span class="identifier">missing_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">col_data</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">missing_mask</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">col_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">col_data</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">missing_mask</span><span class="grouping">]</span>
+    <span class="identifier">col_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">c</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">u</span><span class="invalid">o</span><span class="invalid">u</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">col_data</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X_DTYPE</span><span class="grouping">)</span>
+    <span class="identifier">distinct_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">col_data</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">distinct_values</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="identifier">max_bins</span><span class="punctuation">:</span>
+        <span class="identifier">midpoints</span> <span class="arithmetic-assignment">=</span> <span class="identifier">distinct_values</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">distinct_values</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">midpoints</span> <span class="arithmetic-assignment">*=</span> <span class="float-literal">.5</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># We sort again the data in this case. We could compute</span>
+        <span class="comment"># approximate midpoint percentiles using the output of</span>
+        <span class="comment"># np.unique(col_data, return_counts) instead but this is more</span>
+        <span class="comment"># work and the performance benefit will be limited because we</span>
+        <span class="comment"># work on a fixed-size subsample of the full data.</span>
+        <span class="identifier">percentiles</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linspace</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">num</span><span class="arithmetic-assignment">=</span><span class="identifier">max_bins</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">percentiles</span> <span class="arithmetic-assignment">=</span> <span class="identifier">percentiles</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">midpoints</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">percentile</span><span class="grouping">(</span><span class="identifier">col_data</span><span class="punctuation">,</span> <span class="identifier">percentiles</span><span class="punctuation">,</span>
+                                  <span class="identifier">interpolation</span><span class="arithmetic-assignment">=</span><span class="string-literal">'midpoint'</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">X_DTYPE</span><span class="grouping">)</span>
+        <span class="keyword">assert</span> <span class="identifier">midpoints</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">max_bins</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+
+    <span class="comment"># We avoid having +inf thresholds: +inf thresholds are only allowed in</span>
+    <span class="comment"># a "split on nan" situation.</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">midpoints</span><span class="punctuation">,</span> <span class="identifier">a_min</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">a_max</span><span class="arithmetic-assignment">=</span><span class="identifier">ALMOST_INF</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">midpoints</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">midpoints</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_BinMapper</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Transformer that maps a dataset into integer-valued bins.
+
+    For continuous features, the bins are created in a feature-wise fashion,
+    using quantiles so that each bins contains approximately the same number
+    of samples. For large datasets, quantiles are computed on a subset of the
+    data to speed-up the binning, but the quantiles should remain stable.
+
+    For categorical features, the raw categorical values are expected to be
+    in [0, 254] (this is not validated here though) and each category
+    corresponds to a bin. All categorical values must be known at
+    initialization: transform() doesn't know how to bin unknown categorical
+    values. Note that transform() is only used on non-training data in the
+    case of early stopping.
+
+    Features with a small number of values may be binned into less than
+    ``n_bins`` bins. The last bin (at index ``n_bins - 1``) is always reserved
+    for missing values.
+
+    Parameters
+    ----------
+    n_bins : int, default=256
+        The maximum number of bins to use (including the bin for missing
+        values). Should be in [3, 256]. Non-missing values are binned on
+        ``max_bins = n_bins - 1`` bins. The last bin is always reserved for
+        missing values. If for a given feature the number of unique values is
+        less than ``max_bins``, then those unique values will be used to
+        compute the bin thresholds, instead of the quantiles. For categorical
+        features indicated by ``is_categorical``, the docstring for
+        ``is_categorical`` details on this procedure.
+    subsample : int or None, default=2e5
+        If ``n_samples &gt; subsample``, then ``sub_samples`` samples will be
+        randomly chosen to compute the quantiles. If ``None``, the whole data
+        is used.
+    is_categorical : ndarray of bool of shape (n_features,), default=None
+        Indicates categorical features. By default, all features are
+        considered continuous.
+    known_categories : list of {ndarray, None} of shape (n_features,), \
+            default=none
+        For each categorical feature, the array indicates the set of unique
+        categorical values. These should be the possible values over all the
+        data, not just the training data. For continuous features, the
+        corresponding entry should be None.
+    random_state: int, RandomState instance or None, default=None
+        Pseudo-random number generator to control the random sub-sampling.
+        Pass an int for reproducible output across multiple
+        function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    bin_thresholds_ : list of ndarray
+        For each feature, each array indicates how to map a feature into a
+        binned feature. The semantic and size depends on the nature of the
+        feature:
+        - for real-valued features, the array corresponds to the real-valued
+          bin thresholds (the upper bound of each bin). There are ``max_bins
+          - 1`` thresholds, where ``max_bins = n_bins - 1`` is the number of
+          bins used for non-missing values.
+        - for categorical features, the array is a map from a binned category
+          value to the raw category value. The size of the array is equal to
+          ``min(max_bins, category_cardinality)`` where we ignore missing
+          values in the cardinality.
+    n_bins_non_missing_ : ndarray, dtype=np.uint32
+        For each feature, gives the number of bins actually used for
+        non-missing values. For features with a lot of unique values, this is
+        equal to ``n_bins - 1``.
+    is_categorical_ : ndarray of shape (n_features,), dtype=np.uint8
+        Indicator for categorical features.
+    missing_values_bin_idx_ : np.uint8
+        The index of the bin where missing values are mapped. This is a
+        constant across all features. This corresponds to the last bin, and
+        it is always equal to ``n_bins - 1``. Note that if ``n_bins_missing_``
+        is less than ``n_bins - 1`` for a given feature, then there are
+        empty (and unused) bins.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_bins</span><span class="arithmetic-assignment">=</span><span class="int-literal">256</span><span class="punctuation">,</span> <span class="identifier">subsample</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">(</span><span class="float-literal">2e5</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">is_categorical</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">known_categories</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_bins</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span> <span class="arithmetic-assignment">=</span> <span class="identifier">subsample</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical</span> <span class="arithmetic-assignment">=</span> <span class="identifier">is_categorical</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">known_categories</span> <span class="arithmetic-assignment">=</span> <span class="identifier">known_categories</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit data X by computing the binning thresholds.
+
+        The last bin is reserved for missing values, whether missing values
+        are present in the data or not.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to bin.
+        y: None
+            Ignored.
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="int-literal">3</span> <span class="relational-operator">&lt;=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">256</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># min is 3: at least 2 distinct bins and a missing values bin</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'n_bins={} should be no smaller than 3 '</span>
+                             <span class="string-literal">'and no larger than 256.'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">X_DTYPE</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">max_bins</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+
+        <span class="identifier">rng</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span><span class="punctuation">:</span>
+            <span class="identifier">subset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rng</span><span class="punctuation">.</span><span class="identifier">choice</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span><span class="punctuation">,</span> <span class="identifier">replace</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">take</span><span class="grouping">(</span><span class="identifier">subset</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">uint8</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical</span><span class="punctuation">,</span>
+                                              <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">uint8</span><span class="grouping">)</span>
+
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">known_categories</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">known_categories</span>
+        <span class="keyword">if</span> <span class="identifier">known_categories</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">known_categories</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="none-literal">None</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_features</span>
+
+        <span class="comment"># validate is_categorical and known_categories parameters</span>
+        <span class="keyword">for</span> <span class="identifier">f_idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">is_categorical</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical_</span><span class="grouping">[</span><span class="identifier">f_idx</span><span class="grouping">]</span>
+            <span class="identifier">known_cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">known_categories</span><span class="grouping">[</span><span class="identifier">f_idx</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">is_categorical</span> <span class="logical-operator">and</span> <span class="identifier">known_cats</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="identifier">f</span><span class="string-literal">"Known categories for feature {f_idx} must be provided."</span>
+                <span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">is_categorical</span> <span class="logical-operator">and</span> <span class="identifier">known_cats</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="identifier">f</span><span class="string-literal">"Feature {f_idx} isn't marked as a categorical feature, "</span>
+                    <span class="identifier">f</span><span class="string-literal">"but categories were passed."</span>
+                <span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values_bin_idx_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bin_thresholds_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">n_bins_non_missing</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+        <span class="keyword">for</span> <span class="identifier">f_idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical_</span><span class="grouping">[</span><span class="identifier">f_idx</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_find_binning_thresholds</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">f_idx</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">max_bins</span><span class="grouping">)</span>
+                <span class="identifier">n_bins_non_missing</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">thresholds</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="comment"># Since categories are assumed to be encoded in</span>
+                <span class="comment"># [0, n_cats] and since n_cats &lt;= max_bins,</span>
+                <span class="comment"># the thresholds *are* the unique categorical values. This will</span>
+                <span class="comment"># lead to the correct mapping in transform()</span>
+                <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">known_categories</span><span class="grouping">[</span><span class="identifier">f_idx</span><span class="grouping">]</span>
+                <span class="identifier">n_bins_non_missing</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">thresholds</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bin_thresholds_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">thresholds</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins_non_missing_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">n_bins_non_missing</span><span class="punctuation">,</span>
+                                            <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">uint32</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Bin data X.
+
+        Missing values will be mapped to the last bin.
+
+        For categorical features, the mapping will be incorrect for unknown
+        categories. Since the BinMapper is given known_categories of the
+        entire training data (i.e. before the call to train_test_split() in
+        case of early-stopping), this never happens.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to bin.
+
+        Returns
+        -------
+        X_binned : array-like of shape (n_samples, n_features)
+            The binned data (fortran-aligned).
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">X_DTYPE</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins_non_missing_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">'This estimator was fitted with {} features but {} got passed '</span>
+                <span class="string-literal">'to transform()'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_bins_non_missing_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                        <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+        <span class="identifier">binned</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X_BINNED_DTYPE</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'F'</span><span class="grouping">)</span>
+        <span class="identifier">_map_to_bins</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bin_thresholds_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values_bin_idx_</span><span class="punctuation">,</span>
+                     <span class="identifier">binned</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">binned</span>
+
+    <span class="keyword">def</span> <span class="identifier">make_known_categories_bitsets</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Create bitsets of known categories.
+
+        Returns
+        -------
+        - known_cat_bitsets : ndarray of shape (n_categorical_features, 8)
+            Array of bitsets of known categories, for each categorical feature.
+        - f_idx_map : ndarray of shape (n_features,)
+            Map from original feature index to the corresponding index in the
+            known_cat_bitsets array.
+        """</span>
+
+        <span class="identifier">categorical_features_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical_</span><span class="grouping">)</span>
+
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_categorical_</span><span class="punctuation">.</span><span class="identifier">size</span>
+        <span class="identifier">n_categorical_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">categorical_features_indices</span><span class="punctuation">.</span><span class="identifier">size</span>
+
+        <span class="identifier">f_idx_map</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">uint32</span><span class="grouping">)</span>
+        <span class="identifier">f_idx_map</span><span class="grouping">[</span><span class="identifier">categorical_features_indices</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span>
+            <span class="identifier">n_categorical_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">uint32</span><span class="grouping">)</span>
+
+        <span class="identifier">known_categories</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bin_thresholds_</span>
+
+        <span class="identifier">known_cat_bitsets</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_categorical_features</span><span class="punctuation">,</span> <span class="int-literal">8</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X_BITSET_INNER_DTYPE</span><span class="grouping">)</span>
+
+        <span class="comment"># TODO: complexity is O(n_categorical_features * 255). Maybe this is</span>
+        <span class="comment"># worth cythonizing</span>
+        <span class="keyword">for</span> <span class="identifier">mapped_f_idx</span><span class="punctuation">,</span> <span class="identifier">f_idx</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">categorical_features_indices</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">raw_cat_val</span> <span class="relational-operator">in</span> <span class="identifier">known_categories</span><span class="grouping">[</span><span class="identifier">f_idx</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">set_bitset_memoryview</span><span class="grouping">(</span><span class="identifier">known_cat_bitsets</span><span class="grouping">[</span><span class="identifier">mapped_f_idx</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                      <span class="identifier">raw_cat_val</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">known_cat_bitsets</span><span class="punctuation">,</span> <span class="identifier">f_idx_map</span>
+
+    </pre>
+  </body>
+</html>

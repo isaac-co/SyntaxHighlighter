@@ -1,0 +1,437 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+This module contains the loss classes.
+
+Specific losses are used for regression, binary classification or multiclass
+classification.
+"""</span>
+<span class="comment"># Author: Nicolas Hug</span>
+
+<span class="keyword">from</span> <span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">ABC</span><span class="punctuation">,</span> <span class="identifier">abstractmethod</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">expit</span><span class="punctuation">,</span> <span class="identifier">logsumexp</span><span class="punctuation">,</span> <span class="identifier">xlogy</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">common</span> <span class="keyword">import</span> <span class="identifier">Y_DTYPE</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">common</span> <span class="keyword">import</span> <span class="identifier">G_H_DTYPE</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_loss</span> <span class="keyword">import</span> <span class="identifier">_update_gradients_least_squares</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_loss</span> <span class="keyword">import</span> <span class="identifier">_update_gradients_hessians_least_squares</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_loss</span> <span class="keyword">import</span> <span class="identifier">_update_gradients_least_absolute_deviation</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_loss</span> <span class="keyword">import</span> <span class="identifier">_update_gradients_hessians_least_absolute_deviation</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_loss</span> <span class="keyword">import</span> <span class="identifier">_update_gradients_hessians_binary_crossentropy</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_loss</span> <span class="keyword">import</span> <span class="identifier">_update_gradients_hessians_categorical_crossentropy</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_loss</span> <span class="keyword">import</span> <span class="identifier">_update_gradients_hessians_poisson</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">stats</span> <span class="keyword">import</span> <span class="identifier">_weighted_percentile</span>
+
+
+<span class="keyword">class</span> <span class="identifier">BaseLoss</span><span class="grouping">(</span><span class="identifier">ABC</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Base class for a loss."""</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">hessians_are_constant</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">hessians_are_constant</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hessians_are_constant</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return the weighted average loss"""</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pointwise_loss</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">,</span>
+                          <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">pointwise_loss</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return loss value for each input"""</span>
+
+    <span class="comment"># This variable indicates whether the loss requires the leaves values to</span>
+    <span class="comment"># be updated once the tree has been trained. The trees are trained to</span>
+    <span class="comment"># predict a Newton-Raphson step (see grower._finalize_leaf()). But for</span>
+    <span class="comment"># some losses (e.g. least absolute deviation) we need to adjust the tree</span>
+    <span class="comment"># values to account for the "line search" of the gradient descent</span>
+    <span class="comment"># procedure. See the original paper Greedy Function Approximation: A</span>
+    <span class="comment"># Gradient Boosting Machine by Friedman</span>
+    <span class="comment"># (https://statweb.stanford.edu/~jhf/ftp/trebst.pdf) for the theory.</span>
+    <span class="identifier">need_update_leaves_values</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+
+    <span class="keyword">def</span> <span class="identifier">init_gradients_and_hessians</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">prediction_dim</span><span class="punctuation">,</span>
+                                    <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return initial gradients and hessians.
+
+        Unless hessians are constant, arrays are initialized with undefined
+        values.
+
+        Parameters
+        ----------
+        n_samples : int
+            The number of samples passed to `fit()`.
+
+        prediction_dim : int
+            The dimension of a raw prediction, i.e. the number of trees
+            built at each iteration. Equals 1 for regression and binary
+            classification, or K where K is the number of classes for
+            multiclass classification.
+
+        sample_weight : array-like of shape(n_samples,) default=None
+            Weights of training data.
+
+        Returns
+        -------
+        gradients : ndarray, shape (prediction_dim, n_samples)
+            The initial gradients. The array is not initialized.
+        hessians : ndarray, shape (prediction_dim, n_samples)
+            If hessians are constant (e.g. for `LeastSquares` loss, the
+            array is initialized to ``1``. Otherwise, the array is allocated
+            without being initialized.
+        """</span>
+        <span class="identifier">shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">prediction_dim</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">gradients</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">G_H_DTYPE</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">hessians_are_constant</span><span class="punctuation">:</span>
+            <span class="comment"># If the hessians are constant, we consider they are equal to 1.</span>
+            <span class="comment"># - This is correct for the half LS loss</span>
+            <span class="comment"># - For LAD loss, hessians are actually 0, but they are always</span>
+            <span class="comment">#   ignored anyway.</span>
+            <span class="identifier">hessians</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">G_H_DTYPE</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">hessians</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">G_H_DTYPE</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">get_baseline_prediction</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return initial predictions (before the first iteration).
+
+        Parameters
+        ----------
+        y_train : ndarray, shape (n_samples,)
+            The target training values.
+
+        sample_weight : array-like of shape(n_samples,) default=None
+            Weights of training data.
+
+        prediction_dim : int
+            The dimension of one prediction: 1 for binary classification and
+            regression, n_classes for multiclass classification.
+
+        Returns
+        -------
+        baseline_prediction : float or ndarray, shape (1, prediction_dim)
+            The baseline prediction.
+        """</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">update_gradients_and_hessians</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                                      <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Update gradients and hessians arrays, inplace.
+
+        The gradients (resp. hessians) are the first (resp. second) order
+        derivatives of the loss for each sample with respect to the
+        predictions of model, evaluated at iteration ``i - 1``.
+
+        Parameters
+        ----------
+        gradients : ndarray, shape (prediction_dim, n_samples)
+            The gradients (treated as OUT array).
+
+        hessians : ndarray, shape (prediction_dim, n_samples) or \
+            (1,)
+            The hessians (treated as OUT array).
+
+        y_true : ndarray, shape (n_samples,)
+            The true target values or each training sample.
+
+        raw_predictions : ndarray, shape (prediction_dim, n_samples)
+            The raw_predictions (i.e. values from the trees) of the tree
+            ensemble at iteration ``i - 1``.
+
+        sample_weight : array-like of shape(n_samples,) default=None
+            Weights of training data.
+        """</span>
+
+
+<span class="keyword">class</span> <span class="identifier">LeastSquares</span><span class="grouping">(</span><span class="identifier">BaseLoss</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Least squares loss, for regression.
+
+    For a given sample x_i, least squares loss is defined as::
+
+        loss(x_i) = 0.5 * (y_true_i - raw_pred_i)**2
+
+    This actually computes the half least squares loss to simplify
+    the computation of the gradients and get a unit hessian (and be consistent
+    with what is done in LightGBM).
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># If sample weights are provided, the hessians and gradients</span>
+        <span class="comment"># are multiplied by sample_weight, which means the hessians are</span>
+        <span class="comment"># equal to sample weights.</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">hessians_are_constant</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">pointwise_loss</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">loss</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_baseline_prediction</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">inverse_link_function</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">raw_predictions</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_gradients_and_hessians</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                                      <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">gradients</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gradients</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">_update_gradients_least_squares</span><span class="grouping">(</span><span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">hessians</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hessians</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">_update_gradients_hessians_least_squares</span><span class="grouping">(</span><span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span>
+                                                     <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span>
+                                                     <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">LeastAbsoluteDeviation</span><span class="grouping">(</span><span class="identifier">BaseLoss</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Least absolute deviation, for regression.
+
+    For a given sample x_i, the loss is defined as::
+
+        loss(x_i) = |y_true_i - raw_pred_i|
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># If sample weights are provided, the hessians and gradients</span>
+        <span class="comment"># are multiplied by sample_weight, which means the hessians are</span>
+        <span class="comment"># equal to sample weights.</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">hessians_are_constant</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="grouping">)</span>
+
+    <span class="comment"># This variable indicates whether the loss requires the leaves values to</span>
+    <span class="comment"># be updated once the tree has been trained. The trees are trained to</span>
+    <span class="comment"># predict a Newton-Raphson step (see grower._finalize_leaf()). But for</span>
+    <span class="comment"># some losses (e.g. least absolute deviation) we need to adjust the tree</span>
+    <span class="comment"># values to account for the "line search" of the gradient descent</span>
+    <span class="comment"># procedure. See the original paper Greedy Function Approximation: A</span>
+    <span class="comment"># Gradient Boosting Machine by Friedman</span>
+    <span class="comment"># (https://statweb.stanford.edu/~jhf/ftp/trebst.pdf) for the theory.</span>
+    <span class="identifier">need_update_leaves_values</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">def</span> <span class="identifier">pointwise_loss</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">-</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">loss</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_baseline_prediction</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">_weighted_percentile</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="int-literal">50</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">inverse_link_function</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">raw_predictions</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_gradients_and_hessians</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                                      <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">gradients</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gradients</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">_update_gradients_least_absolute_deviation</span><span class="grouping">(</span><span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                                                       <span class="identifier">raw_predictions</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">hessians</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hessians</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">_update_gradients_hessians_least_absolute_deviation</span><span class="grouping">(</span>
+                <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_leaves_values</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">grower</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span>
+                             <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Update the values predicted by the tree with</span>
+        <span class="comment"># median(y_true - raw_predictions).</span>
+        <span class="comment"># See note about need_update_leaves_values in BaseLoss.</span>
+
+        <span class="comment"># TODO: ideally this should be computed in parallel over the leaves</span>
+        <span class="comment"># using something similar to _update_raw_predictions(), but this</span>
+        <span class="comment"># requires a cython version of median()</span>
+        <span class="keyword">for</span> <span class="identifier">leaf</span> <span class="relational-operator">in</span> <span class="identifier">grower</span><span class="punctuation">.</span><span class="identifier">finalized_leaves</span><span class="punctuation">:</span>
+            <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">leaf</span><span class="punctuation">.</span><span class="identifier">sample_indices</span>
+            <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">median_res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span>
+                                       <span class="arithmetic-operator">-</span> <span class="identifier">raw_predictions</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">median_res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_weighted_percentile</span><span class="grouping">(</span>
+                    <span class="identifier">y_true</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">raw_predictions</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">percentile</span><span class="arithmetic-assignment">=</span><span class="int-literal">50</span>
+                <span class="grouping">)</span>
+            <span class="identifier">leaf</span><span class="punctuation">.</span><span class="identifier">value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">grower</span><span class="punctuation">.</span><span class="identifier">shrinkage</span> <span class="arithmetic-operator">*</span> <span class="identifier">median_res</span>
+            <span class="comment"># Note that the regularization is ignored here</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Poisson</span><span class="grouping">(</span><span class="identifier">BaseLoss</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Poisson deviance loss with log-link, for regression.
+
+    For a given sample x_i, Poisson deviance loss is defined as::
+
+        loss(x_i) = y_true_i * log(y_true_i/exp(raw_pred_i))
+                    - y_true_i + exp(raw_pred_i))
+
+    This actually computes half the Poisson deviance to simplify
+    the computation of the gradients.
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">hessians_are_constant</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="identifier">inverse_link_function</span> <span class="arithmetic-assignment">=</span> <span class="identifier">staticmethod</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">pointwise_loss</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="comment"># TODO: For speed, we could remove the constant xlogy(y_true, y_true)</span>
+        <span class="comment"># Advantage of this form: minimum of zero at raw_predictions = y_true.</span>
+        <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">xlogy</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">raw_predictions</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+                <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">loss</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_baseline_prediction</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+        <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">eps</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_gradients_and_hessians</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                                      <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">gradients</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gradients</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">hessians</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hessians</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">_update_gradients_hessians_poisson</span><span class="grouping">(</span><span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span>
+                                           <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span>
+                                           <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">BinaryCrossEntropy</span><span class="grouping">(</span><span class="identifier">BaseLoss</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Binary cross-entropy loss, for binary classification.
+
+    For a given sample x_i, the binary cross-entropy loss is defined as the
+    negative log-likelihood of the model which can be expressed as::
+
+        loss(x_i) = log(1 + exp(raw_pred_i)) - y_true_i * raw_pred_i
+
+    See The Elements of Statistical Learning, by Hastie, Tibshirani, Friedman,
+    section 4.4.1 (about logistic regression).
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">hessians_are_constant</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="identifier">inverse_link_function</span> <span class="arithmetic-assignment">=</span> <span class="identifier">staticmethod</span><span class="grouping">(</span><span class="identifier">expit</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">pointwise_loss</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="comment"># logaddexp(0, x) = log(1 + exp(x))</span>
+        <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logaddexp</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true</span> <span class="arithmetic-operator">*</span> <span class="identifier">raw_predictions</span>
+        <span class="keyword">return</span> <span class="identifier">loss</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_baseline_prediction</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">prediction_dim</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"loss='binary_crossentropy' is not defined for multiclass"</span>
+                <span class="string-literal">" classification with n_classes=%d, use"</span>
+                <span class="string-literal">" loss='categorical_crossentropy' instead"</span> <span class="arithmetic-operator">%</span> <span class="identifier">prediction_dim</span><span class="grouping">)</span>
+        <span class="identifier">proba_positive_class</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+        <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+        <span class="identifier">proba_positive_class</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">proba_positive_class</span><span class="punctuation">,</span> <span class="identifier">eps</span><span class="punctuation">,</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">eps</span><span class="grouping">)</span>
+        <span class="comment"># log(x / 1 - x) is the anti function of sigmoid, or the link function</span>
+        <span class="comment"># of the Binomial model.</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">proba_positive_class</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">proba_positive_class</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_gradients_and_hessians</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                                      <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">gradients</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gradients</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">hessians</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hessians</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">_update_gradients_hessians_binary_crossentropy</span><span class="grouping">(</span>
+            <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># shape (1, n_samples) --&gt; (n_samples,). reshape(-1) is more likely to</span>
+        <span class="comment"># return a view.</span>
+        <span class="identifier">raw_predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">Y_DTYPE</span><span class="grouping">)</span>
+        <span class="identifier">proba</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">expit</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="grouping">)</span>
+        <span class="identifier">proba</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">proba</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">proba</span>
+
+
+<span class="keyword">class</span> <span class="identifier">CategoricalCrossEntropy</span><span class="grouping">(</span><span class="identifier">BaseLoss</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Categorical cross-entropy loss, for multiclass classification.
+
+    For a given sample x_i, the categorical cross-entropy loss is defined as
+    the negative log-likelihood of the model and generalizes the binary
+    cross-entropy to more than 2 classes.
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">hessians_are_constant</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">pointwise_loss</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">one_hot_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="grouping">)</span>
+        <span class="identifier">prediction_dim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_predictions</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">one_hot_true</span><span class="grouping">[</span><span class="identifier">k</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">y_true</span> <span class="relational-operator">==</span> <span class="identifier">k</span><span class="grouping">)</span>
+
+        <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">logsumexp</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+                <span class="grouping">(</span><span class="identifier">one_hot_true</span> <span class="arithmetic-operator">*</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">loss</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_baseline_prediction</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">init_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">prediction_dim</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">Y_DTYPE</span><span class="grouping">)</span>
+        <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+        <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">prediction_dim</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">proba_kth_class</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y_train</span> <span class="relational-operator">==</span> <span class="identifier">k</span><span class="punctuation">,</span>
+                                         <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+            <span class="identifier">proba_kth_class</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">proba_kth_class</span><span class="punctuation">,</span> <span class="identifier">eps</span><span class="punctuation">,</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">eps</span><span class="grouping">)</span>
+            <span class="identifier">init_value</span><span class="grouping">[</span><span class="identifier">k</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">proba_kth_class</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">init_value</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_gradients_and_hessians</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                                      <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">_update_gradients_hessians_categorical_crossentropy</span><span class="grouping">(</span>
+            <span class="identifier">gradients</span><span class="punctuation">,</span> <span class="identifier">hessians</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">raw_predictions</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># TODO: This could be done in parallel</span>
+        <span class="comment"># compute softmax (using exp(log(softmax)))</span>
+        <span class="identifier">proba</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="identifier">raw_predictions</span> <span class="arithmetic-operator">-</span>
+                       <span class="identifier">logsumexp</span><span class="grouping">(</span><span class="identifier">raw_predictions</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">proba</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+
+<span class="identifier">_LOSSES</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span>
+    <span class="string-literal">'squared_error'</span><span class="punctuation">:</span> <span class="identifier">LeastSquares</span><span class="punctuation">,</span>
+    <span class="string-literal">'absolute_error'</span><span class="punctuation">:</span> <span class="identifier">LeastAbsoluteDeviation</span><span class="punctuation">,</span>
+    <span class="string-literal">'binary_crossentropy'</span><span class="punctuation">:</span> <span class="identifier">BinaryCrossEntropy</span><span class="punctuation">,</span>
+    <span class="string-literal">'categorical_crossentropy'</span><span class="punctuation">:</span> <span class="identifier">CategoricalCrossEntropy</span><span class="punctuation">,</span>
+    <span class="string-literal">'poisson'</span><span class="punctuation">:</span> <span class="identifier">Poisson</span><span class="punctuation">,</span>
+<span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

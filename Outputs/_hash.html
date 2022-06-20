@@ -1,0 +1,181 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Author: Lars Buitinck</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">as</span> <span class="identifier">sp</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">IS_PYPY</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+
+<span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">IS_PYPY</span><span class="punctuation">:</span>
+    <span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_hashing_fast</span> <span class="keyword">import</span> <span class="identifier">transform</span> <span class="keyword">as</span> <span class="identifier">_hashing_transform</span>
+<span class="keyword">else</span><span class="punctuation">:</span>
+    <span class="keyword">def</span> <span class="identifier">_hashing_transform</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span>
+                <span class="string-literal">'FeatureHasher is not compatible with PyPy (see '</span>
+                <span class="string-literal">'https://github.com/scikit-learn/scikit-learn/issues/11540 '</span>
+                <span class="string-literal">'for the status updates).'</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_iteritems</span><span class="grouping">(</span><span class="identifier">d</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Like d.iteritems, but accepts any collections.Mapping."""</span>
+    <span class="keyword">return</span> <span class="identifier">d</span><span class="punctuation">.</span><span class="identifier">iteritems</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="string-literal">"iteritems"</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">d</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">FeatureHasher</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Implements feature hashing, aka the hashing trick.
+
+    This class turns sequences of symbolic feature names (strings) into
+    scipy.sparse matrices, using a hash function to compute the matrix column
+    corresponding to a name. The hash function employed is the signed 32-bit
+    version of Murmurhash3.
+
+    Feature names of type byte string are used as-is. Unicode strings are
+    converted to UTF-8 first, but no Unicode normalization is done.
+    Feature values must be (finite) numbers.
+
+    This class is a low-memory alternative to DictVectorizer and
+    CountVectorizer, intended for large-scale (online) learning and situations
+    where memory is tight, e.g. when running prediction code on embedded
+    devices.
+
+    Read more in the :ref:`User Guide &lt;feature_hashing&gt;`.
+
+    .. versionadded:: 0.13
+
+    Parameters
+    ----------
+    n_features : int, default=2**20
+        The number of features (columns) in the output matrices. Small numbers
+        of features are likely to cause hash collisions, but large numbers
+        will cause larger coefficient dimensions in linear learners.
+    input_type : {"dict", "pair", "string"}, default="dict"
+        Either "dict" (the default) to accept dictionaries over
+        (feature_name, value); "pair" to accept pairs of (feature_name, value);
+        or "string" to accept single strings.
+        feature_name should be a string, while value should be a number.
+        In the case of "string", a value of 1 is implied.
+        The feature_name is hashed to find the appropriate column for the
+        feature. The value's sign might be flipped in the output (but see
+        non_negative, below).
+    dtype : numpy dtype, default=np.float64
+        The type of feature values. Passed to scipy.sparse matrix constructors
+        as the dtype argument. Do not set this to bool, np.boolean or any
+        unsigned integer type.
+    alternate_sign : bool, default=True
+        When True, an alternating sign is added to the features as to
+        approximately conserve the inner product in the hashed space even for
+        small n_features. This approach is similar to sparse random projection.
+
+        .. versionchanged:: 0.19
+            ``alternate_sign`` replaces the now deprecated ``non_negative``
+            parameter.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.feature_extraction import FeatureHasher
+    &gt;&gt;&gt; h = FeatureHasher(n_features=10)
+    &gt;&gt;&gt; D = [{'dog': 1, 'cat':2, 'elephant':4},{'dog': 2, 'run': 5}]
+    &gt;&gt;&gt; f = h.transform(D)
+    &gt;&gt;&gt; f.toarray()
+    array([[ 0.,  0., -4., -1.,  0.,  0.,  0.,  0.,  0.,  2.],
+           [ 0.,  0.,  0., -2., -5.,  0.,  0.,  0.,  0.,  0.]])
+
+    See Also
+    --------
+    DictVectorizer : Vectorizes string-valued features using a hash table.
+    sklearn.preprocessing.OneHotEncoder : Handles nominal/categorical features.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">**</span> <span class="int-literal">20</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">input_type</span><span class="arithmetic-assignment">=</span><span class="string-literal">"dict"</span><span class="punctuation">,</span>
+                 <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">alternate_sign</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_params</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">input_type</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dtype</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_type</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alternate_sign</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alternate_sign</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_validate_params</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">input_type</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># strangely, np.int16 instances are not instances of Integral,</span>
+        <span class="comment"># while np.int64 instances are...</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">"n_features must be integral, got %r (%s)."</span>
+                            <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">n_features</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span> <span class="logical-operator">or</span> <span class="identifier">n_features</span> <span class="relational-operator">&gt;=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">iinfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int32</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">max</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid number of features (%d)."</span> <span class="arithmetic-operator">%</span> <span class="identifier">n_features</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">input_type</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"dict", "pair", "string"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"input_type must be 'dict', 'pair' or 'string',"</span>
+                             <span class="string-literal">" got %r."</span> <span class="arithmetic-operator">%</span> <span class="identifier">input_type</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""No-op.
+
+        This method doesn't do anything. It exists purely for compatibility
+        with the scikit-learn transformer API.
+
+        Parameters
+        ----------
+        X : ndarray
+
+        Returns
+        -------
+        self : FeatureHasher
+
+        """</span>
+        <span class="comment"># repeat input validation for grid search (which calls set_params)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_params</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_type</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">raw_X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Transform a sequence of instances to a scipy.sparse matrix.
+
+        Parameters
+        ----------
+        raw_X : iterable over iterable over raw features, length = n_samples
+            Samples. Each sample must be iterable an (e.g., a list or tuple)
+            containing/generating feature names (and optionally values, see
+            the input_type constructor argument) which will be hashed.
+            raw_X need not support the len function, so it can be the result
+            of a generator; n_samples is determined on the fly.
+
+        Returns
+        -------
+        X : sparse matrix of shape (n_samples, n_features)
+            Feature matrix, for use with estimators or further transformers.
+
+        """</span>
+        <span class="identifier">raw_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">iter</span><span class="grouping">(</span><span class="identifier">raw_X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_type</span> <span class="relational-operator">==</span> <span class="string-literal">"dict"</span><span class="punctuation">:</span>
+            <span class="identifier">raw_X</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">_iteritems</span><span class="grouping">(</span><span class="identifier">d</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">d</span> <span class="relational-operator">in</span> <span class="identifier">raw_X</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_type</span> <span class="relational-operator">==</span> <span class="string-literal">"string"</span><span class="punctuation">:</span>
+            <span class="identifier">raw_X</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">f</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">f</span> <span class="relational-operator">in</span> <span class="identifier">x</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">x</span> <span class="relational-operator">in</span> <span class="identifier">raw_X</span><span class="grouping">)</span>
+        <span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">indptr</span><span class="punctuation">,</span> <span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+            <span class="identifier">_hashing_transform</span><span class="grouping">(</span><span class="identifier">raw_X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span>
+                               <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alternate_sign</span><span class="punctuation">,</span> <span class="identifier">seed</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">indptr</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Cannot vectorize empty sequence."</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">csr_matrix</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">values</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">indptr</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span>
+                          <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">sum_duplicates</span><span class="grouping">(</span><span class="grouping">)</span>  <span class="comment"># also sorts the indices</span>
+
+        <span class="keyword">return</span> <span class="identifier">X</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'X_types'</span><span class="punctuation">:</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_type</span><span class="grouping">]</span><span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

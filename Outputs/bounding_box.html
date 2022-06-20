@@ -1,0 +1,419 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Bounding Box Editor for the manual adjustments tool """</span>
+
+<span class="keyword">import</span> <span class="identifier">gettext</span>
+<span class="keyword">import</span> <span class="identifier">platform</span>
+<span class="keyword">from</span> <span class="identifier">functools</span> <span class="keyword">import</span> <span class="identifier">partial</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">gui</span><span class="punctuation">.</span><span class="identifier">custom_widgets</span> <span class="keyword">import</span> <span class="identifier">RightClickMenu</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">ControlPanelOption</span><span class="punctuation">,</span> <span class="identifier">Editor</span><span class="punctuation">,</span> <span class="identifier">logger</span>
+
+
+<span class="comment"># LOCALES</span>
+<span class="identifier">_LANG</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gettext</span><span class="punctuation">.</span><span class="identifier">translation</span><span class="grouping">(</span><span class="string-literal">"tools.manual", localedir="locales"</span><span class="punctuation">,</span> <span class="identifier">fallback</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_LANG</span><span class="punctuation">.</span><span class="identifier">gettext</span>
+
+
+<span class="keyword">class</span> <span class="identifier">BoundingBox</span><span class="grouping">(</span><span class="identifier">Editor</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" The Bounding Box Editor.
+
+    Adjusting the bounding box feeds the aligner to generate new 68 point landmarks.
+
+    Parameters
+    ----------
+    canvas: :class:`tkinter.Canvas`
+        The canvas that holds the image and annotations
+    detected_faces: :class:`~tools.manual.detected_faces.DetectedFaces`
+        The _detected_faces data for this manual session
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">canvas</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_aligner</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_right_click_menu</span> <span class="arithmetic-assignment">=</span> <span class="identifier">RightClickMenu</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Delete Face"</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_delete_current_face</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                <span class="grouping">[</span><span class="string-literal">"Del"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">control_text</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Bounding Box Editor\nEdit the bounding box being fed into the aligner "</span>
+                         <span class="string-literal">"to recalculate the landmarks.\n\n"</span>
+                         <span class="string-literal">" - Grab the corner anchors to resize the bounding box.\n"</span>
+                         <span class="string-literal">" - Click and drag the bounding box to relocate.\n"</span>
+                         <span class="string-literal">" - Click in empty space to create a new bounding box.\n"</span>
+                         <span class="string-literal">" - Right click a bounding box to delete a face."</span><span class="grouping">)</span>
+        <span class="identifier">key_bindings</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">"&lt;Delete&gt;"</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_delete_current_face</span><span class="grouping">}</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">canvas</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="punctuation">,</span>
+                         <span class="identifier">control_text</span><span class="arithmetic-assignment">=</span><span class="identifier">control_text</span><span class="punctuation">,</span> <span class="identifier">key_bindings</span><span class="arithmetic-assignment">=</span><span class="identifier">key_bindings</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_corner_order</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The position index of bounding box corners """</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="int-literal">0</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="string-literal">"top", "left"</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="int-literal">1</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="string-literal">"top", "right"</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="int-literal">2</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="string-literal">"bottom", "right"</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="int-literal">3</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="string-literal">"bottom", "left"</span><span class="grouping">)</span><span class="grouping">}</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_bounding_boxes</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" list: The :func:`tkinter.Canvas.coords` for all displayed bounding boxes. """</span>
+        <span class="identifier">item_ids</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">find_withtag</span><span class="grouping">(</span><span class="string-literal">"bb_box"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">coords</span><span class="grouping">(</span><span class="identifier">item_id</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">item_id</span> <span class="relational-operator">in</span> <span class="identifier">item_ids</span>
+                <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">itemcget</span><span class="grouping">(</span><span class="identifier">item_id</span><span class="punctuation">,</span> <span class="string-literal">"state") != "hidden"</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_controls</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Controls for feeding the Aligner. Exposes Normalization Method as a parameter. """</span>
+        <span class="identifier">align_ctl</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ControlPanelOption</span><span class="grouping">(</span>
+            <span class="string-literal">"Aligner"</span><span class="punctuation">,</span>
+            <span class="identifier">str</span><span class="punctuation">,</span>
+            <span class="identifier">group</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Aligner"</span><span class="punctuation">,</span>
+            <span class="identifier">choices</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">"cv2-dnn", "FAN"</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="string-literal">"FAN"</span><span class="punctuation">,</span>
+            <span class="identifier">is_radio</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">helptext</span><span class="arithmetic-assignment">=</span><span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Aligner to use. FAN will obtain better alignments, but cv2-dnn can be "</span>
+                       <span class="string-literal">"useful if FAN cannot get decent alignments and you want to set a base to "</span>
+                       <span class="string-literal">"edit from."</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_aligner</span> <span class="arithmetic-assignment">=</span> <span class="identifier">align_ctl</span><span class="punctuation">.</span><span class="identifier">tk_var</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_control</span><span class="grouping">(</span><span class="identifier">align_ctl</span><span class="grouping">)</span>
+
+        <span class="identifier">norm_ctl</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ControlPanelOption</span><span class="grouping">(</span>
+            <span class="string-literal">"Normalization method"</span><span class="punctuation">,</span>
+            <span class="identifier">str</span><span class="punctuation">,</span>
+            <span class="identifier">group</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Aligner"</span><span class="punctuation">,</span>
+            <span class="identifier">choices</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">"none", "clahe", "hist", "mean"</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="arithmetic-assignment">=</span><span class="string-literal">"hist"</span><span class="punctuation">,</span>
+            <span class="identifier">is_radio</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">helptext</span><span class="arithmetic-assignment">=</span><span class="identifier">_</span><span class="grouping">(</span><span class="string-literal">"Normalization method to use for feeding faces to the aligner. This can "</span>
+                       <span class="string-literal">"help the aligner better align faces with difficult lighting conditions. "</span>
+                       <span class="string-literal">"Different methods will yield different results on different sets. NB: "</span>
+                       <span class="string-literal">"This does not impact the output face, just the input to the aligner."</span>
+                       <span class="string-literal">"\n\tnone: Don't perform normalization on the face."</span>
+                       <span class="string-literal">"\n\tclahe: Perform Contrast Limited Adaptive Histogram Equalization on "</span>
+                       <span class="string-literal">"the face."</span>
+                       <span class="string-literal">"\n\thist: Equalize the histograms on the RGB channels."</span>
+                       <span class="string-literal">"\n\tmean: Normalize the face colors to the mean."</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">norm_ctl</span><span class="punctuation">.</span><span class="identifier">tk_var</span>
+        <span class="identifier">var</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"w"</span><span class="punctuation">,</span>
+                  <span class="keyword">lambda</span> <span class="arithmetic-operator">*</span><span class="identifier">e</span><span class="punctuation">,</span> <span class="identifier">v</span><span class="arithmetic-assignment">=</span><span class="identifier">var</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_det_faces</span><span class="punctuation">.</span><span class="identifier">extractor</span><span class="punctuation">.</span><span class="identifier">set_normalization_method</span><span class="grouping">(</span><span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_control</span><span class="grouping">(</span><span class="identifier">norm_ctl</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">update_annotation</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get the latest bounding box data from alignments and update. """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">is_zoomed</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Image is zoomed. Hiding Bounding Box."</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">hide_annotation</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">key</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"bb_box"</span>
+        <span class="identifier">color</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_control_color</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_face_iterator</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">box</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">left</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">top</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">right</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">bottom</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">box</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_to_display</span><span class="grouping">(</span><span class="identifier">box</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"int32"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">outline</span><span class="arithmetic-assignment">=</span><span class="identifier">color</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"frame_index: %s, face_index: %s, box: %s, kwargs: %s"</span><span class="punctuation">,</span>
+                         <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_object_tracker</span><span class="grouping">(</span><span class="identifier">key</span><span class="punctuation">,</span> <span class="string-literal">"rectangle"</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_anchor_annotation</span><span class="grouping">(</span><span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Updated bounding box annotations"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_update_anchor_annotation</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">bounding_box</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update the anchor annotations for each corner of the bounding box.
+
+        The anchors only display when the bounding box editor is active.
+
+        Parameters
+        ----------
+        face_index: int
+            The index of the face being annotated
+        bounding_box: :class:`numpy.ndarray`
+            The scaled bounding box to get the corner anchors for
+        color: str
+            The hex color of the bounding box line
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_active</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">hide_annotation</span><span class="grouping">(</span><span class="string-literal">"bb_anc_dsp"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">hide_annotation</span><span class="grouping">(</span><span class="string-literal">"bb_anc_grb"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">fill_color</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"gray"</span>
+        <span class="identifier">activefill_color</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"white" if self._is_active else ""</span>
+        <span class="identifier">anchor_points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_anchor_points</span><span class="grouping">(</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                                 <span class="grouping">(</span><span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                                 <span class="grouping">(</span><span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                                 <span class="grouping">(</span><span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">bounding_box</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">anc_dsp</span><span class="punctuation">,</span> <span class="identifier">anc_grb</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">anchor_points</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">dsp_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">outline</span><span class="arithmetic-assignment">=</span><span class="identifier">color</span><span class="punctuation">,</span> <span class="identifier">fill</span><span class="arithmetic-assignment">=</span><span class="identifier">fill_color</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">grb_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">outline</span><span class="arithmetic-assignment">=</span><span class="string-literal">"", fill=""</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">activefill</span><span class="arithmetic-assignment">=</span><span class="identifier">activefill_color</span><span class="grouping">)</span>
+            <span class="identifier">dsp_key</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"bb_anc_dsp_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span>
+            <span class="identifier">grb_key</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"bb_anc_grb_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_object_tracker</span><span class="grouping">(</span><span class="identifier">dsp_key</span><span class="punctuation">,</span> <span class="string-literal">"oval"</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">anc_dsp</span><span class="punctuation">,</span> <span class="identifier">dsp_kwargs</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_object_tracker</span><span class="grouping">(</span><span class="identifier">grb_key</span><span class="punctuation">,</span> <span class="string-literal">"oval"</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">anc_grb</span><span class="punctuation">,</span> <span class="identifier">grb_kwargs</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Updated bounding box anchor annotations"</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;&lt; MOUSE HANDLING &gt;&gt;</span>
+    <span class="comment"># Mouse cursor display</span>
+    <span class="keyword">def</span> <span class="identifier">_update_cursor</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the cursor action.
+
+        Update :attr:`_mouse_location` with the current cursor position and display appropriate
+        icon.
+
+        If the cursor is over a corner anchor, then pop resize icon.
+        If the cursor is over a bounding box, then pop move icon.
+        If the cursor is over the image, then pop add icon.
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The current tkinter mouse event
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_cursor_anchors</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_cursor_bounding_box</span><span class="grouping">(</span><span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_cursor_image</span><span class="grouping">(</span><span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">(</span><span class="identifier">cursor</span><span class="arithmetic-assignment">=</span><span class="string-literal">""</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_cursor_anchors</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether the cursor is over a corner anchor.
+
+        If it is, set the appropriate cursor type and set :attr:`_mouse_location` to
+        ("anchor", (`face index`, `anchor index`)
+
+        Returns
+        -------
+        bool
+            ``True`` if cursor is over an anchor point otherwise ``False``
+        """</span>
+        <span class="identifier">anchors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">set</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">find_withtag</span><span class="grouping">(</span><span class="string-literal">"bb_anc_grb"</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">item_ids</span> <span class="arithmetic-assignment">=</span> <span class="identifier">set</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">find_withtag</span><span class="grouping">(</span><span class="string-literal">"current"</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">intersection</span><span class="grouping">(</span><span class="identifier">anchors</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">item_ids</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="bool-literal">False</span>
+        <span class="identifier">item_id</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">item_ids</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">tags</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">gettags</span><span class="grouping">(</span><span class="identifier">item_id</span><span class="grouping">)</span>
+        <span class="identifier">face_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">next</span><span class="grouping">(</span><span class="identifier">tag</span> <span class="keyword">for</span> <span class="identifier">tag</span> <span class="relational-operator">in</span> <span class="identifier">tags</span> <span class="keyword">if</span> <span class="identifier">tag</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">"face_")).split("_"</span><span class="grouping">)</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">corner_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">next</span><span class="grouping">(</span><span class="identifier">tag</span> <span class="keyword">for</span> <span class="identifier">tag</span> <span class="relational-operator">in</span> <span class="identifier">tags</span>
+                              <span class="keyword">if</span> <span class="identifier">tag</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">"bb_anc_grb_"</span><span class="grouping">)</span>
+                              <span class="logical-operator">and</span> <span class="string-literal">"face_" not in tag).split("_"</span><span class="grouping">)</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">(</span><span class="identifier">cursor</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_{}_corner"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_corner_order</span><span class="grouping">[</span><span class="identifier">corner_idx</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"anchor", "{}_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">face_idx</span><span class="punctuation">,</span> <span class="identifier">corner_idx</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_cursor_bounding_box</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether the cursor is over a bounding box.
+
+        If it is, set the appropriate cursor type and set :attr:`_mouse_location` to:
+        ("box", `face index`)
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse event
+
+        Returns
+        -------
+        bool
+            ``True`` if cursor is over a bounding box otherwise ``False``
+
+        Notes
+        -----
+        We can't use tags on unfilled rectangles as the interior of the rectangle is not tagged.
+        """</span>
+        <span class="keyword">for</span> <span class="identifier">face_idx</span><span class="punctuation">,</span> <span class="identifier">bbox</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_bounding_boxes</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">bbox</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="relational-operator">&lt;=</span> <span class="identifier">bbox</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="logical-operator">and</span> <span class="identifier">bbox</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="relational-operator">&lt;=</span> <span class="identifier">bbox</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">(</span><span class="identifier">cursor</span><span class="arithmetic-assignment">=</span><span class="string-literal">"fleur"</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"box"</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">face_idx</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="keyword">return</span> <span class="bool-literal">True</span>
+        <span class="keyword">return</span> <span class="bool-literal">False</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_cursor_image</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether the cursor is over the image.
+
+        If it is, set the appropriate cursor type and set :attr:`_mouse_location` to:
+        ("image", )
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse event
+
+        Returns
+        -------
+        bool
+            ``True`` if cursor is over a bounding box otherwise ``False``
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_index</span> <span class="relational-operator">==</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="bool-literal">False</span>
+        <span class="identifier">display_dims</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">current_frame</span><span class="grouping">[</span><span class="string-literal">"display_dims"</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">offset</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="relational-operator">&lt;=</span> <span class="identifier">display_dims</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">offset</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="logical-operator">and</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">offset</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="relational-operator">&lt;=</span> <span class="identifier">display_dims</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">offset</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">(</span><span class="identifier">cursor</span><span class="arithmetic-assignment">=</span><span class="string-literal">"plus"</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"image"</span><span class="punctuation">,</span> <span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="bool-literal">True</span>
+        <span class="keyword">return</span> <span class="bool-literal">False</span>
+
+    <span class="comment"># Mouse Actions</span>
+    <span class="keyword">def</span> <span class="identifier">set_mouse_click_actions</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add context menu to OS specific right click action. """</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">set_mouse_click_actions</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">bind</span><span class="grouping">(</span><span class="string-literal">"&lt;Button-2&gt;" if platform.system() == "Darwin" else "&lt;Button-3&gt;"</span><span class="punctuation">,</span>
+                          <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_context_menu</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_drag_start</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" The action to perform when the user starts clicking and dragging the mouse.
+
+        If :attr:`_mouse_location` indicates a corner anchor, then the bounding box is resized
+        based on the adjusted corner, and the alignments re-generated.
+
+        If :attr:`_mouse_location` indicates a bounding box, then the bounding box is moved, and
+        the alignments re-generated.
+
+        If :attr:`_mouse_location` indicates being over the main image, then a new bounding box is
+        created, and alignments generated.
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse event.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_callback</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="keyword">return</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="string-literal">"anchor"</span><span class="punctuation">:</span>
+            <span class="identifier">corner_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span><span class="grouping">[</span><span class="string-literal">"corner"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_corner_order</span><span class="grouping">[</span><span class="identifier">corner_idx</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_callback</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_resize</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="string-literal">"box"</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span><span class="grouping">[</span><span class="string-literal">"current_location"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_callback</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_move</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="string-literal">"image"</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_create_new_bounding_box</span><span class="grouping">(</span><span class="identifier">event</span><span class="grouping">)</span>
+            <span class="comment"># Refresh cursor and _mouse_location for new bounding box and reset _drag_start</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_update_cursor</span><span class="grouping">(</span><span class="identifier">event</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_start</span><span class="grouping">(</span><span class="identifier">event</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_drag_stop</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint: disable=unused-argument</span>
+        <span class="comment">""" Trigger a viewport thumbnail update on click + drag release
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse event. Required but unused.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="identifier">face_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_det_faces</span><span class="punctuation">.</span><span class="identifier">update</span><span class="punctuation">.</span><span class="identifier">post_edit_trigger</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_idx</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_create_new_bounding_box</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Create a new bounding box when user clicks on image, outside of existing boxes.
+
+        The bounding box is created as a square located around the click location, with dimensions
+        1 quarter the size of the frame's shortest side
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse event
+        """</span>
+        <span class="identifier">size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">current_frame</span><span class="grouping">[</span><span class="string-literal">"display_dims"</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">//</span> <span class="int-literal">8</span>
+        <span class="identifier">box</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-operator">-</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-operator">+</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-operator">+</span> <span class="identifier">size</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Creating new bounding box: %s "</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_det_faces</span><span class="punctuation">.</span><span class="identifier">update</span><span class="punctuation">.</span><span class="identifier">add</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coords_to_bounding_box</span><span class="grouping">(</span><span class="identifier">box</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_resize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Resizes a bounding box on a corner anchor drag event.
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse event.
+        """</span>
+        <span class="identifier">face_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">face_tag</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"bb_box_face_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">face_idx</span><span class="grouping">)</span>
+        <span class="identifier">box</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">coords</span><span class="grouping">(</span><span class="identifier">face_tag</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Face Index: %s, Corner Index: %s. Original ROI: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">face_idx</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span><span class="grouping">[</span><span class="string-literal">"corner"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="grouping">)</span>
+        <span class="comment"># Switch top/bottom and left/right and set partial so indices match and we don't</span>
+        <span class="comment"># need branching logic for min/max.</span>
+        <span class="identifier">limits</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">min</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="int-literal">20</span><span class="grouping">)</span><span class="punctuation">,</span>
+                  <span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">min</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="int-literal">20</span><span class="grouping">)</span><span class="punctuation">,</span>
+                  <span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">max</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">20</span><span class="grouping">)</span><span class="punctuation">,</span>
+                  <span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">max</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">20</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">rect_xy_indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">(</span><span class="string-literal">"left", "top", "right", "bottom"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">index</span><span class="grouping">(</span><span class="identifier">pnt</span><span class="grouping">)</span>
+                           <span class="keyword">for</span> <span class="identifier">pnt</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span><span class="grouping">[</span><span class="string-literal">"corner"</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="identifier">box</span><span class="grouping">[</span><span class="identifier">rect_xy_indices</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">limits</span><span class="grouping">[</span><span class="identifier">rect_xy_indices</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span><span class="grouping">)</span>
+        <span class="identifier">box</span><span class="grouping">[</span><span class="identifier">rect_xy_indices</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">limits</span><span class="grouping">[</span><span class="identifier">rect_xy_indices</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"New ROI: %s"</span><span class="punctuation">,</span> <span class="identifier">box</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_det_faces</span><span class="punctuation">.</span><span class="identifier">update</span><span class="punctuation">.</span><span class="identifier">bounding_box</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_index</span><span class="punctuation">,</span>
+                                            <span class="identifier">face_idx</span><span class="punctuation">,</span>
+                                            <span class="arithmetic-operator">*</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coords_to_bounding_box</span><span class="grouping">(</span><span class="identifier">box</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                            <span class="identifier">aligner</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_aligner</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_move</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Moves the bounding box on a bounding box drag event.
+
+        Parameters
+        ----------
+        event: :class:`tkinter.Event`
+            The tkinter mouse event.
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"event: %s, mouse_location: %s"</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">)</span>
+        <span class="identifier">face_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">shift</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span><span class="grouping">[</span><span class="string-literal">"current_location"</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                 <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span><span class="grouping">[</span><span class="string-literal">"current_location"</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">face_tag</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"bb_box_face_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">face_idx</span><span class="grouping">)</span>
+        <span class="identifier">coords</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_canvas</span><span class="punctuation">.</span><span class="identifier">coords</span><span class="grouping">(</span><span class="identifier">face_tag</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">shift</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">shift</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"face_tag: %s, shift: %s, new co-ords: %s"</span><span class="punctuation">,</span> <span class="identifier">face_tag</span><span class="punctuation">,</span> <span class="identifier">shift</span><span class="punctuation">,</span> <span class="identifier">coords</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_det_faces</span><span class="punctuation">.</span><span class="identifier">update</span><span class="punctuation">.</span><span class="identifier">bounding_box</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_index</span><span class="punctuation">,</span>
+                                            <span class="identifier">face_idx</span><span class="punctuation">,</span>
+                                            <span class="arithmetic-operator">*</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coords_to_bounding_box</span><span class="grouping">(</span><span class="identifier">coords</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                            <span class="identifier">aligner</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_aligner</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_drag_data</span><span class="grouping">[</span><span class="string-literal">"current_location"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">y</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_coords_to_bounding_box</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">coords</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Converts tkinter coordinates to :class:`lib.align.DetectedFace` bounding
+        box format, scaled up and offset for feeding the model.
+
+        Returns
+        -------
+        tuple
+            The (`x`, `width`, `y`, `height`) integer points of the bounding box.
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"in: %s"</span><span class="punctuation">,</span> <span class="identifier">coords</span><span class="grouping">)</span>
+        <span class="identifier">coords</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale_from_display</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">coords</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"int32"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"out: %s"</span><span class="punctuation">,</span> <span class="identifier">coords</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">coords</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">coords</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">coords</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">coords</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">coords</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">coords</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_context_menu</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Create a right click context menu to delete the alignment that is being
+        hovered over. """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="string-literal">"box"</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_right_click_menu</span><span class="punctuation">.</span><span class="identifier">popup</span><span class="grouping">(</span><span class="identifier">event</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_delete_current_face</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=unused-argument</span>
+        <span class="comment">""" Called by the right click delete event. Deletes the face that the mouse is currently
+        over.
+
+        Parameters
+        ----------
+        args: tuple (unused)
+            The event parameter is passed in by the hot key binding, so args is required
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="string-literal">"box"</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Delete called without valid location. _mouse_location: %s"</span><span class="punctuation">,</span>
+                         <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Deleting face. _mouse_location: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_det_faces</span><span class="punctuation">.</span><span class="identifier">update</span><span class="punctuation">.</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mouse_location</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

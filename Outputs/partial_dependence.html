@@ -1,0 +1,1000 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="keyword">import</span> <span class="identifier">numbers</span>
+<span class="keyword">from</span> <span class="identifier">itertools</span> <span class="keyword">import</span> <span class="identifier">chain</span>
+<span class="keyword">from</span> <span class="identifier">math</span> <span class="keyword">import</span> <span class="identifier">ceil</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">sparse</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">stats</span><span class="punctuation">.</span><span class="identifier">mstats</span> <span class="keyword">import</span> <span class="identifier">mquantiles</span>
+<span class="keyword">from</span> <span class="identifier">joblib</span> <span class="keyword">import</span> <span class="identifier">Parallel</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">partial_dependence</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">is_regressor</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_matplotlib_support</span>  <span class="comment"># noqa</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">_safe_indexing</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_deprecate_positional_args</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span>
+
+
+<span class="keyword">def</span> <span class="identifier">plot_partial_dependence</span><span class="grouping">(</span>
+    <span class="identifier">estimator</span><span class="punctuation">,</span>
+    <span class="identifier">X</span><span class="punctuation">,</span>
+    <span class="identifier">features</span><span class="punctuation">,</span>
+    <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+    <span class="identifier">feature_names</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">target</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">response_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">"auto"</span><span class="punctuation">,</span>
+    <span class="identifier">n_cols</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span>
+    <span class="identifier">grid_resolution</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+    <span class="identifier">percentiles</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="float-literal">0.05</span><span class="punctuation">,</span> <span class="float-literal">0.95</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">"auto"</span><span class="punctuation">,</span>
+    <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+    <span class="identifier">line_kw</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">contour_kw</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">"average"</span><span class="punctuation">,</span>
+    <span class="identifier">subsample</span><span class="arithmetic-assignment">=</span><span class="int-literal">1000</span><span class="punctuation">,</span>
+    <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+<span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Partial dependence (PD) and individual conditional expectation (ICE)
+    plots.
+
+    Partial dependence plots, individual conditional expectation plots or an
+    overlay of both of them can be plotted by setting the ``kind``
+    parameter.
+    The ``len(features)`` plots are arranged in a grid with ``n_cols``
+    columns. Two-way partial dependence plots are plotted as contour plots. The
+    deciles of the feature values will be shown with tick marks on the x-axes
+    for one-way plots, and on both axes for two-way plots.
+
+    Read more in the :ref:`User Guide &lt;partial_dependence&gt;`.
+
+    .. note::
+
+        :func:`plot_partial_dependence` does not support using the same axes
+        with multiple calls. To plot the the partial dependence for multiple
+        estimators, please pass the axes created by the first call to the
+        second call::
+
+          &gt;&gt;&gt; from sklearn.inspection import plot_partial_dependence
+          &gt;&gt;&gt; from sklearn.datasets import make_friedman1
+          &gt;&gt;&gt; from sklearn.linear_model import LinearRegression
+          &gt;&gt;&gt; from sklearn.ensemble import RandomForestRegressor
+          &gt;&gt;&gt; X, y = make_friedman1()
+          &gt;&gt;&gt; est1 = LinearRegression().fit(X, y)
+          &gt;&gt;&gt; est2 = RandomForestRegressor().fit(X, y)
+          &gt;&gt;&gt; disp1 = plot_partial_dependence(est1, X,
+          ...                                 [1, 2])  # doctest: +SKIP
+          &gt;&gt;&gt; disp2 = plot_partial_dependence(est2, X, [1, 2],
+          ...                                 ax=disp1.axes_)  # doctest: +SKIP
+
+    .. warning::
+
+        For :class:`~sklearn.ensemble.GradientBoostingClassifier` and
+        :class:`~sklearn.ensemble.GradientBoostingRegressor`, the
+        `'recursion'` method (used by default) will not account for the `init`
+        predictor of the boosting process. In practice, this will produce
+        the same values as `'brute'` up to a constant offset in the target
+        response, provided that `init` is a constant estimator (which is the
+        default). However, if `init` is not a constant estimator, the
+        partial dependence values are incorrect for `'recursion'` because the
+        offset will be sample-dependent. It is preferable to use the `'brute'`
+        method. Note that this only applies to
+        :class:`~sklearn.ensemble.GradientBoostingClassifier` and
+        :class:`~sklearn.ensemble.GradientBoostingRegressor`, not to
+        :class:`~sklearn.ensemble.HistGradientBoostingClassifier` and
+        :class:`~sklearn.ensemble.HistGradientBoostingRegressor`.
+
+    Parameters
+    ----------
+    estimator : BaseEstimator
+        A fitted estimator object implementing :term:`predict`,
+        :term:`predict_proba`, or :term:`decision_function`.
+        Multioutput-multiclass classifiers are not supported.
+
+    X : {array-like or dataframe} of shape (n_samples, n_features)
+        ``X`` is used to generate a grid of values for the target
+        ``features`` (where the partial dependence will be evaluated), and
+        also to generate values for the complement features when the
+        `method` is `'brute'`.
+
+    features : list of {int, str, pair of int, pair of str}
+        The target features for which to create the PDPs.
+        If `features[i]` is an integer or a string, a one-way PDP is created;
+        if `features[i]` is a tuple, a two-way PDP is created (only supported
+        with `kind='average'`). Each tuple must be of size 2.
+        if any entry is a string, then it must be in ``feature_names``.
+
+    feature_names : array-like of shape (n_features,), dtype=str, default=None
+        Name of each feature; `feature_names[i]` holds the name of the feature
+        with index `i`.
+        By default, the name of the feature corresponds to their numerical
+        index for NumPy array and their column name for pandas dataframe.
+
+    target : int, default=None
+        - In a multiclass setting, specifies the class for which the PDPs
+          should be computed. Note that for binary classification, the
+          positive class (index 1) is always used.
+        - In a multioutput setting, specifies the task for which the PDPs
+          should be computed.
+
+        Ignored in binary classification or classical regression settings.
+
+    response_method : {'auto', 'predict_proba', 'decision_function'}, \
+            default='auto'
+        Specifies whether to use :term:`predict_proba` or
+        :term:`decision_function` as the target response. For regressors
+        this parameter is ignored and the response is always the output of
+        :term:`predict`. By default, :term:`predict_proba` is tried first
+        and we revert to :term:`decision_function` if it doesn't exist. If
+        ``method`` is `'recursion'`, the response is always the output of
+        :term:`decision_function`.
+
+    n_cols : int, default=3
+        The maximum number of columns in the grid plot. Only active when `ax`
+        is a single axis or `None`.
+
+    grid_resolution : int, default=100
+        The number of equally spaced points on the axes of the plots, for each
+        target feature.
+
+    percentiles : tuple of float, default=(0.05, 0.95)
+        The lower and upper percentile used to create the extreme values
+        for the PDP axes. Must be in [0, 1].
+
+    method : str, default='auto'
+        The method used to calculate the averaged predictions:
+
+        - `'recursion'` is only supported for some tree-based estimators
+          (namely
+          :class:`~sklearn.ensemble.GradientBoostingClassifier`,
+          :class:`~sklearn.ensemble.GradientBoostingRegressor`,
+          :class:`~sklearn.ensemble.HistGradientBoostingClassifier`,
+          :class:`~sklearn.ensemble.HistGradientBoostingRegressor`,
+          :class:`~sklearn.tree.DecisionTreeRegressor`,
+          :class:`~sklearn.ensemble.RandomForestRegressor`
+          but is more efficient in terms of speed.
+          With this method, the target response of a
+          classifier is always the decision function, not the predicted
+          probabilities. Since the `'recursion'` method implicitely computes
+          the average of the ICEs by design, it is not compatible with ICE and
+          thus `kind` must be `'average'`.
+
+        - `'brute'` is supported for any estimator, but is more
+          computationally intensive.
+
+        - `'auto'`: the `'recursion'` is used for estimators that support it,
+          and `'brute'` is used otherwise.
+
+        Please see :ref:`this note &lt;pdp_method_differences&gt;` for
+        differences between the `'brute'` and `'recursion'` method.
+
+    n_jobs : int, default=None
+        The number of CPUs to use to compute the partial dependences.
+        Computation is parallelized over features specified by the `features`
+        parameter.
+
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    verbose : int, default=0
+        Verbose output during PD computations.
+
+    line_kw : dict, default=None
+        Dict with keywords passed to the ``matplotlib.pyplot.plot`` call.
+        For one-way partial dependence plots.
+
+    contour_kw : dict, default=None
+        Dict with keywords passed to the ``matplotlib.pyplot.contourf`` call.
+        For two-way partial dependence plots.
+
+    ax : Matplotlib axes or array-like of Matplotlib axes, default=None
+        - If a single axis is passed in, it is treated as a bounding axes
+          and a grid of partial dependence plots will be drawn within
+          these bounds. The `n_cols` parameter controls the number of
+          columns in the grid.
+        - If an array-like of axes are passed in, the partial dependence
+          plots will be drawn directly into these axes.
+        - If `None`, a figure and a bounding axes is created and treated
+          as the single axes case.
+
+        .. versionadded:: 0.22
+
+    kind : {'average', 'individual', 'both'}, default='average'
+        Whether to plot the partial dependence averaged across all the samples
+        in the dataset or one line per sample or both.
+
+        - ``kind='average'`` results in the traditional PD plot;
+        - ``kind='individual'`` results in the ICE plot.
+
+       Note that the fast ``method='recursion'`` option is only available for
+       ``kind='average'``. Plotting individual dependencies requires using the
+       slower ``method='brute'`` option.
+
+        .. versionadded:: 0.24
+
+    subsample : float, int or None, default=1000
+        Sampling for ICE curves when `kind` is 'individual' or 'both'.
+        If `float`, should be between 0.0 and 1.0 and represent the proportion
+        of the dataset to be used to plot ICE curves. If `int`, represents the
+        absolute number samples to use.
+
+        Note that the full dataset is still used to calculate averaged partial
+        dependence when `kind='both'`.
+
+        .. versionadded:: 0.24
+
+    random_state : int, RandomState instance or None, default=None
+        Controls the randomness of the selected samples when subsamples is not
+        `None` and `kind` is either `'both'` or `'individual'`.
+        See :term:`Glossary &lt;random_state&gt;` for details.
+
+        .. versionadded:: 0.24
+
+    Returns
+    -------
+    display : :class:`~sklearn.inspection.PartialDependenceDisplay`
+
+    See Also
+    --------
+    partial_dependence : Compute Partial Dependence values.
+    PartialDependenceDisplay : Partial Dependence visualization.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.datasets import make_friedman1
+    &gt;&gt;&gt; from sklearn.ensemble import GradientBoostingRegressor
+    &gt;&gt;&gt; X, y = make_friedman1()
+    &gt;&gt;&gt; clf = GradientBoostingRegressor(n_estimators=10).fit(X, y)
+    &gt;&gt;&gt; plot_partial_dependence(clf, X, [0, (0, 1)]) #doctest: +SKIP
+    """</span>
+    <span class="identifier">check_matplotlib_support</span><span class="grouping">(</span><span class="string-literal">'plot_partial_dependence'</span><span class="grouping">)</span>  <span class="comment"># noqa</span>
+    <span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>  <span class="comment"># noqa</span>
+
+    <span class="comment"># set target_idx for multi-class estimators</span>
+    <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">'classes_'</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">size</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">target</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'target must be specified for multi-class'</span><span class="grouping">)</span>
+        <span class="identifier">target_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">target</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="logical-operator">not</span> <span class="grouping">(</span><span class="int-literal">0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">target_idx</span> <span class="relational-operator">&lt;</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span><span class="grouping">)</span> <span class="logical-operator">or</span>
+                <span class="identifier">estimator</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">target_idx</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">target</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'target not in est.classes_, got {}'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                <span class="identifier">target</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># regression and binary classification</span>
+        <span class="identifier">target_idx</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="comment"># Use check_array only on lists and other non-array-likes / sparse. Do not</span>
+    <span class="comment"># convert DataFrame into a NumPy array.</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span><span class="grouping">(</span><span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">'__array__'</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+    <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+    <span class="comment"># convert feature_names to list</span>
+    <span class="keyword">if</span> <span class="identifier">feature_names</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">"loc"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># get the column names for a pandas dataframe</span>
+            <span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">columns</span><span class="punctuation">.</span><span class="identifier">tolist</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># define a list of numbered indices for a numpy array</span>
+            <span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">i</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">]</span>
+    <span class="keyword">elif</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">feature_names</span><span class="punctuation">,</span> <span class="string-literal">"tolist"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># convert numpy array or pandas index to a list</span>
+        <span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">feature_names</span><span class="punctuation">.</span><span class="identifier">tolist</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">set</span><span class="grouping">(</span><span class="identifier">feature_names</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">feature_names</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'feature_names should not contain duplicates.'</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">convert_feature</span><span class="grouping">(</span><span class="identifier">fx</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">fx</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">fx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">feature_names</span><span class="punctuation">.</span><span class="identifier">index</span><span class="grouping">(</span><span class="identifier">fx</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="identifier">ValueError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Feature %s not in feature_names'</span> <span class="arithmetic-operator">%</span> <span class="identifier">fx</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+        <span class="keyword">return</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">fx</span><span class="grouping">)</span>
+
+    <span class="comment"># convert features into a seq of int tuples</span>
+    <span class="identifier">tmp_features</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">fxs</span> <span class="relational-operator">in</span> <span class="identifier">features</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">fxs</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">fxs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">fxs</span><span class="punctuation">,</span><span class="grouping">)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">fxs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tuple</span><span class="grouping">(</span><span class="identifier">convert_feature</span><span class="grouping">(</span><span class="identifier">fx</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">fx</span> <span class="relational-operator">in</span> <span class="identifier">fxs</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">TypeError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">'Each entry in features must be either an int, '</span>
+                <span class="string-literal">'a string, or an iterable of size at most 2.'</span>
+            <span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="int-literal">1</span> <span class="relational-operator">&lt;=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">size</span><span class="grouping">(</span><span class="identifier">fxs</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Each entry in features must be either an int, '</span>
+                             <span class="string-literal">'a string, or an iterable of size at most 2.'</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">kind</span> <span class="relational-operator">!=</span> <span class="string-literal">'average'</span> <span class="logical-operator">and</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">size</span><span class="grouping">(</span><span class="identifier">fxs</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"It is not possible to display individual effects for more "</span>
+                <span class="identifier">f</span><span class="string-literal">"than one feature at a time. Got: features={features}."</span><span class="grouping">)</span>
+        <span class="identifier">tmp_features</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">fxs</span><span class="grouping">)</span>
+
+    <span class="identifier">features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tmp_features</span>
+
+    <span class="comment"># Early exit if the axes does not have the correct number of axes</span>
+    <span class="keyword">if</span> <span class="identifier">ax</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">Axes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">axes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">axes</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Expected ax to have {} axes, got {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                             <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axes</span><span class="punctuation">.</span><span class="identifier">size</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">chain</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">l</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">features</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">i</span> <span class="relational-operator">&gt;=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">feature_names</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'All entries of features must be less than '</span>
+                             <span class="string-literal">'len(feature_names) = {0}, got {1}.'</span>
+                             <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">feature_names</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">subsample</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">subsample</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"When an integer, subsample={subsample} should be positive."</span>
+            <span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">subsample</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Real</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">subsample</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">subsample</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"When a floating-point, subsample={subsample} should be in "</span>
+                <span class="identifier">f</span><span class="string-literal">"the (0, 1) range."</span>
+            <span class="grouping">)</span>
+
+    <span class="comment"># compute predictions and/or averaged predictions</span>
+    <span class="identifier">pd_results</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="grouping">)</span><span class="grouping">(</span>
+        <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span><span class="grouping">(</span><span class="identifier">partial_dependence</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">fxs</span><span class="punctuation">,</span>
+                                    <span class="identifier">response_method</span><span class="arithmetic-assignment">=</span><span class="identifier">response_method</span><span class="punctuation">,</span>
+                                    <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="identifier">method</span><span class="punctuation">,</span>
+                                    <span class="identifier">grid_resolution</span><span class="arithmetic-assignment">=</span><span class="identifier">grid_resolution</span><span class="punctuation">,</span>
+                                    <span class="identifier">percentiles</span><span class="arithmetic-assignment">=</span><span class="identifier">percentiles</span><span class="punctuation">,</span>
+                                    <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="identifier">kind</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">fxs</span> <span class="relational-operator">in</span> <span class="identifier">features</span><span class="grouping">)</span>
+
+    <span class="comment"># For multioutput regression, we can only check the validity of target</span>
+    <span class="comment"># now that we have the predictions.</span>
+    <span class="comment"># Also note: as multiclass-multioutput classifiers are not supported,</span>
+    <span class="comment"># multiclass and multioutput scenario are mutually exclusive. So there is</span>
+    <span class="comment"># no risk of overwriting target_idx here.</span>
+    <span class="identifier">pd_result</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_results</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>  <span class="comment"># checking the first result is enough</span>
+    <span class="identifier">n_tasks</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">pd_result</span><span class="punctuation">.</span><span class="identifier">average</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'average'</span>
+               <span class="keyword">else</span> <span class="identifier">pd_result</span><span class="punctuation">.</span><span class="identifier">individual</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">n_tasks</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">target</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">'target must be specified for multi-output regressors'</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="int-literal">0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">target</span> <span class="relational-operator">&lt;=</span> <span class="identifier">n_tasks</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">'target must be in [0, n_tasks], got {}.'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">target</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">target_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">target</span>
+
+    <span class="comment"># get global min and max average predictions of PD grouped by plot type</span>
+    <span class="identifier">pdp_lim</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+    <span class="keyword">for</span> <span class="identifier">pdp</span> <span class="relational-operator">in</span> <span class="identifier">pd_results</span><span class="punctuation">:</span>
+        <span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pdp</span><span class="grouping">[</span><span class="string-literal">"values"</span><span class="grouping">]</span>
+        <span class="identifier">preds</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">pdp</span><span class="punctuation">.</span><span class="identifier">average</span> <span class="keyword">if</span> <span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'average'</span> <span class="keyword">else</span> <span class="identifier">pdp</span><span class="punctuation">.</span><span class="identifier">individual</span><span class="grouping">)</span>
+        <span class="identifier">min_pd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">preds</span><span class="grouping">[</span><span class="identifier">target_idx</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">max_pd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">preds</span><span class="grouping">[</span><span class="identifier">target_idx</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">n_fx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">)</span>
+        <span class="identifier">old_min_pd</span><span class="punctuation">,</span> <span class="identifier">old_max_pd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pdp_lim</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">n_fx</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">min_pd</span><span class="punctuation">,</span> <span class="identifier">max_pd</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">min_pd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">min_pd</span><span class="punctuation">,</span> <span class="identifier">old_min_pd</span><span class="grouping">)</span>
+        <span class="identifier">max_pd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">max_pd</span><span class="punctuation">,</span> <span class="identifier">old_max_pd</span><span class="grouping">)</span>
+        <span class="identifier">pdp_lim</span><span class="grouping">[</span><span class="identifier">n_fx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">min_pd</span><span class="punctuation">,</span> <span class="identifier">max_pd</span><span class="grouping">)</span>
+
+    <span class="identifier">deciles</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+    <span class="keyword">for</span> <span class="identifier">fx</span> <span class="relational-operator">in</span> <span class="identifier">chain</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">l</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">features</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">fx</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">deciles</span><span class="punctuation">:</span>
+            <span class="identifier">X_col</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">fx</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">deciles</span><span class="grouping">[</span><span class="identifier">fx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mquantiles</span><span class="grouping">(</span><span class="identifier">X_col</span><span class="punctuation">,</span> <span class="identifier">prob</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="float-literal">0.1</span><span class="punctuation">,</span> <span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="float-literal">0.1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">display</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PartialDependenceDisplay</span><span class="grouping">(</span>
+        <span class="identifier">pd_results</span><span class="arithmetic-assignment">=</span><span class="identifier">pd_results</span><span class="punctuation">,</span>
+        <span class="identifier">features</span><span class="arithmetic-assignment">=</span><span class="identifier">features</span><span class="punctuation">,</span>
+        <span class="identifier">feature_names</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span><span class="punctuation">,</span>
+        <span class="identifier">target_idx</span><span class="arithmetic-assignment">=</span><span class="identifier">target_idx</span><span class="punctuation">,</span>
+        <span class="identifier">pdp_lim</span><span class="arithmetic-assignment">=</span><span class="identifier">pdp_lim</span><span class="punctuation">,</span>
+        <span class="identifier">deciles</span><span class="arithmetic-assignment">=</span><span class="identifier">deciles</span><span class="punctuation">,</span>
+        <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="identifier">kind</span><span class="punctuation">,</span>
+        <span class="identifier">subsample</span><span class="arithmetic-assignment">=</span><span class="identifier">subsample</span><span class="punctuation">,</span>
+        <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+    <span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">display</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span>
+        <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="arithmetic-assignment">=</span><span class="identifier">n_cols</span><span class="punctuation">,</span> <span class="identifier">line_kw</span><span class="arithmetic-assignment">=</span><span class="identifier">line_kw</span><span class="punctuation">,</span> <span class="identifier">contour_kw</span><span class="arithmetic-assignment">=</span><span class="identifier">contour_kw</span>
+    <span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">PartialDependenceDisplay</span><span class="punctuation">:</span>
+    <span class="comment">"""Partial Dependence Plot (PDP).
+
+    This can also display individual partial dependencies which are often
+    referred to as: Individual Condition Expectation (ICE).
+
+    It is recommended to use
+    :func:`~sklearn.inspection.plot_partial_dependence` to create a
+    :class:`~sklearn.inspection.PartialDependenceDisplay`. All parameters are
+    stored as attributes.
+
+    Read more in
+    :ref:`sphx_glr_auto_examples_miscellaneous_plot_partial_dependence_visualization_api.py`
+    and the :ref:`User Guide &lt;visualizations&gt;`.
+
+        .. versionadded:: 0.22
+
+    Parameters
+    ----------
+    pd_results : list of Bunch
+        Results of :func:`~sklearn.inspection.partial_dependence` for
+        ``features``.
+
+    features : list of (int,) or list of (int, int)
+        Indices of features for a given plot. A tuple of one integer will plot
+        a partial dependence curve of one feature. A tuple of two integers will
+        plot a two-way partial dependence curve as a contour plot.
+
+    feature_names : list of str
+        Feature names corresponding to the indices in ``features``.
+
+    target_idx : int
+
+        - In a multiclass setting, specifies the class for which the PDPs
+          should be computed. Note that for binary classification, the
+          positive class (index 1) is always used.
+        - In a multioutput setting, specifies the task for which the PDPs
+          should be computed.
+
+        Ignored in binary classification or classical regression settings.
+
+    pdp_lim : dict
+        Global min and max average predictions, such that all plots will have
+        the same scale and y limits. `pdp_lim[1]` is the global min and max for
+        single partial dependence curves. `pdp_lim[2]` is the global min and
+        max for two-way partial dependence curves.
+
+    deciles : dict
+        Deciles for feature indices in ``features``.
+
+    kind : {'average', 'individual', 'both'}, default='average'
+        Whether to plot the partial dependence averaged across all the samples
+        in the dataset or one line per sample or both.
+
+        - ``kind='average'`` results in the traditional PD plot;
+        - ``kind='individual'`` results in the ICE plot.
+
+       Note that the fast ``method='recursion'`` option is only available for
+       ``kind='average'``. Plotting individual dependencies requires using the
+       slower ``method='brute'`` option.
+
+        .. versionadded:: 0.24
+
+    subsample : float, int or None, default=1000
+        Sampling for ICE curves when `kind` is 'individual' or 'both'.
+        If float, should be between 0.0 and 1.0 and represent the proportion
+        of the dataset to be used to plot ICE curves. If int, represents the
+        maximum absolute number of samples to use.
+
+        Note that the full dataset is still used to calculate partial
+        dependence when `kind='both'`.
+
+        .. versionadded:: 0.24
+
+    random_state : int, RandomState instance or None, default=None
+        Controls the randomness of the selected samples when subsamples is not
+        `None`. See :term:`Glossary &lt;random_state&gt;` for details.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    bounding_ax_ : matplotlib Axes or None
+        If `ax` is an axes or None, the `bounding_ax_` is the axes where the
+        grid of partial dependence plots are drawn. If `ax` is a list of axes
+        or a numpy array of axes, `bounding_ax_` is None.
+
+    axes_ : ndarray of matplotlib Axes
+        If `ax` is an axes or None, `axes_[i, j]` is the axes on the i-th row
+        and j-th column. If `ax` is a list of axes, `axes_[i]` is the i-th item
+        in `ax`. Elements that are None correspond to a nonexisting axes in
+        that position.
+
+    lines_ : ndarray of matplotlib Artists
+        If `ax` is an axes or None, `lines_[i, j]` is the partial dependence
+        curve on the i-th row and j-th column. If `ax` is a list of axes,
+        `lines_[i]` is the partial dependence curve corresponding to the i-th
+        item in `ax`. Elements that are None correspond to a nonexisting axes
+        or an axes that does not include a line plot.
+
+    deciles_vlines_ : ndarray of matplotlib LineCollection
+        If `ax` is an axes or None, `vlines_[i, j]` is the line collection
+        representing the x axis deciles of the i-th row and j-th column. If
+        `ax` is a list of axes, `vlines_[i]` corresponds to the i-th item in
+        `ax`. Elements that are None correspond to a nonexisting axes or an
+        axes that does not include a PDP plot.
+
+        .. versionadded:: 0.23
+
+    deciles_hlines_ : ndarray of matplotlib LineCollection
+        If `ax` is an axes or None, `vlines_[i, j]` is the line collection
+        representing the y axis deciles of the i-th row and j-th column. If
+        `ax` is a list of axes, `vlines_[i]` corresponds to the i-th item in
+        `ax`. Elements that are None correspond to a nonexisting axes or an
+        axes that does not include a 2-way plot.
+
+        .. versionadded:: 0.23
+
+    contours_ : ndarray of matplotlib Artists
+        If `ax` is an axes or None, `contours_[i, j]` is the partial dependence
+        plot on the i-th row and j-th column. If `ax` is a list of axes,
+        `contours_[i]` is the partial dependence plot corresponding to the i-th
+        item in `ax`. Elements that are None correspond to a nonexisting axes
+        or an axes that does not include a contour plot.
+
+    figure_ : matplotlib Figure
+        Figure containing partial dependence plots.
+
+    See Also
+    --------
+    partial_dependence : Compute Partial Dependence values.
+    plot_partial_dependence : Plot Partial Dependence.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span>
+        <span class="identifier">self</span><span class="punctuation">,</span>
+        <span class="identifier">pd_results</span><span class="punctuation">,</span>
+        <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+        <span class="identifier">features</span><span class="punctuation">,</span>
+        <span class="identifier">feature_names</span><span class="punctuation">,</span>
+        <span class="identifier">target_idx</span><span class="punctuation">,</span>
+        <span class="identifier">pdp_lim</span><span class="punctuation">,</span>
+        <span class="identifier">deciles</span><span class="punctuation">,</span>
+        <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">"average"</span><span class="punctuation">,</span>
+        <span class="identifier">subsample</span><span class="arithmetic-assignment">=</span><span class="int-literal">1000</span><span class="punctuation">,</span>
+        <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pd_results</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_results</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">features</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">feature_names</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">target_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">target_idx</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pdp_lim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pdp_lim</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles</span> <span class="arithmetic-assignment">=</span> <span class="identifier">deciles</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kind</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span> <span class="arithmetic-assignment">=</span> <span class="identifier">subsample</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_sample_count</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute the number of samples as an integer."""</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span>
+            <span class="keyword">return</span> <span class="identifier">n_samples</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Real</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">ceil</span><span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">subsample</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">n_samples</span>
+
+    <span class="keyword">def</span> <span class="identifier">_plot_ice_lines</span><span class="grouping">(</span>
+        <span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">preds</span><span class="punctuation">,</span> <span class="identifier">feature_values</span><span class="punctuation">,</span> <span class="identifier">n_ice_to_plot</span><span class="punctuation">,</span>
+        <span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">pd_plot_idx</span><span class="punctuation">,</span> <span class="identifier">n_total_lines_by_plot</span><span class="punctuation">,</span> <span class="identifier">individual_line_kw</span>
+    <span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Plot the ICE lines.
+
+        Parameters
+        ----------
+        preds : ndarray of shape \
+                (n_instances, n_grid_points)
+            The predictions computed for all points of `feature_values` for a
+            given feature for all samples in `X`.
+        feature_values : ndarray of shape (n_grid_points,)
+            The feature values for which the predictions have been computed.
+        n_ice_to_plot : int
+            The number of ICE lines to plot.
+        ax : Matplotlib axes
+            The axis on which to plot the ICE lines.
+        pd_plot_idx : int
+            The sequential index of the plot. It will be unraveled to find the
+            matching 2D position in the grid layout.
+        n_total_lines_by_plot : int
+            The total number of lines expected to be plot on the axis.
+        individual_line_kw : dict
+            Dict with keywords passed when plotting the ICE lines.
+        """</span>
+        <span class="identifier">rng</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="comment"># subsample ice</span>
+        <span class="identifier">ice_lines_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rng</span><span class="punctuation">.</span><span class="identifier">choice</span><span class="grouping">(</span>
+            <span class="identifier">preds</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">n_ice_to_plot</span><span class="punctuation">,</span> <span class="identifier">replace</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+        <span class="grouping">)</span>
+        <span class="identifier">ice_lines_subsampled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">preds</span><span class="grouping">[</span><span class="identifier">ice_lines_idx</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="comment"># plot the subsampled ice</span>
+        <span class="keyword">for</span> <span class="identifier">ice_idx</span><span class="punctuation">,</span> <span class="identifier">ice</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">ice_lines_subsampled</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">line_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unravel_index</span><span class="grouping">(</span>
+                <span class="identifier">pd_plot_idx</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_total_lines_by_plot</span> <span class="arithmetic-operator">+</span> <span class="identifier">ice_idx</span><span class="punctuation">,</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span><span class="punctuation">.</span><span class="identifier">shape</span>
+            <span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span><span class="grouping">[</span><span class="identifier">line_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span>
+                <span class="identifier">feature_values</span><span class="punctuation">,</span> <span class="identifier">ice</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">individual_line_kw</span>
+            <span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">_plot_average_dependence</span><span class="grouping">(</span>
+        <span class="identifier">self</span><span class="punctuation">,</span>
+        <span class="identifier">avg_preds</span><span class="punctuation">,</span>
+        <span class="identifier">feature_values</span><span class="punctuation">,</span>
+        <span class="identifier">ax</span><span class="punctuation">,</span>
+        <span class="identifier">pd_line_idx</span><span class="punctuation">,</span>
+        <span class="identifier">line_kw</span><span class="punctuation">,</span>
+    <span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Plot the average partial dependence.
+
+        Parameters
+        ----------
+        avg_preds : ndarray of shape (n_grid_points,)
+            The average predictions for all points of `feature_values` for a
+            given feature for all samples in `X`.
+        feature_values : ndarray of shape (n_grid_points,)
+            The feature values for which the predictions have been computed.
+        ax : Matplotlib axes
+            The axis on which to plot the ICE lines.
+        pd_line_idx : int
+            The sequential index of the plot. It will be unraveled to find the
+            matching 2D position in the grid layout.
+        line_kw : dict
+            Dict with keywords passed when plotting the PD plot.
+        """</span>
+        <span class="identifier">line_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unravel_index</span><span class="grouping">(</span><span class="identifier">pd_line_idx</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span><span class="grouping">[</span><span class="identifier">line_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span>
+            <span class="identifier">feature_values</span><span class="punctuation">,</span>
+            <span class="identifier">avg_preds</span><span class="punctuation">,</span>
+            <span class="arithmetic-operator">**</span><span class="identifier">line_kw</span><span class="punctuation">,</span>
+        <span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">_plot_one_way_partial_dependence</span><span class="grouping">(</span>
+        <span class="identifier">self</span><span class="punctuation">,</span>
+        <span class="identifier">preds</span><span class="punctuation">,</span>
+        <span class="identifier">avg_preds</span><span class="punctuation">,</span>
+        <span class="identifier">feature_values</span><span class="punctuation">,</span>
+        <span class="identifier">feature_idx</span><span class="punctuation">,</span>
+        <span class="identifier">n_ice_lines</span><span class="punctuation">,</span>
+        <span class="identifier">ax</span><span class="punctuation">,</span>
+        <span class="identifier">n_cols</span><span class="punctuation">,</span>
+        <span class="identifier">pd_plot_idx</span><span class="punctuation">,</span>
+        <span class="identifier">n_lines</span><span class="punctuation">,</span>
+        <span class="identifier">individual_line_kw</span><span class="punctuation">,</span>
+        <span class="identifier">line_kw</span><span class="punctuation">,</span>
+    <span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Plot 1-way partial dependence: ICE and PDP.
+
+        Parameters
+        ----------
+        preds : ndarray of shape \
+                (n_instances, n_grid_points) or None
+            The predictions computed for all points of `feature_values` for a
+            given feature for all samples in `X`.
+        avg_preds : ndarray of shape (n_grid_points,)
+            The average predictions for all points of `feature_values` for a
+            given feature for all samples in `X`.
+        feature_values : ndarray of shape (n_grid_points,)
+            The feature values for which the predictions have been computed.
+        feature_idx : int
+            The index corresponding to the target feature.
+        n_ice_lines : int
+            The number of ICE lines to plot.
+        ax : Matplotlib axes
+            The axis on which to plot the ICE and PDP lines.
+        n_cols : int or None
+            The number of column in the axis.
+        pd_plot_idx : int
+            The sequential index of the plot. It will be unraveled to find the
+            matching 2D position in the grid layout.
+        n_lines : int
+            The total number of lines expected to be plot on the axis.
+        individual_line_kw : dict
+            Dict with keywords passed when plotting the ICE lines.
+        line_kw : dict
+            Dict with keywords passed when plotting the PD plot.
+        """</span>
+        <span class="keyword">from</span> <span class="identifier">matplotlib</span> <span class="keyword">import</span> <span class="identifier">transforms</span>  <span class="comment"># noqa</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"individual", "both"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_plot_ice_lines</span><span class="grouping">(</span>
+                <span class="identifier">preds</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">target_idx</span><span class="grouping">]</span><span class="punctuation">,</span>
+                <span class="identifier">feature_values</span><span class="punctuation">,</span>
+                <span class="identifier">n_ice_lines</span><span class="punctuation">,</span>
+                <span class="identifier">ax</span><span class="punctuation">,</span>
+                <span class="identifier">pd_plot_idx</span><span class="punctuation">,</span>
+                <span class="identifier">n_lines</span><span class="punctuation">,</span>
+                <span class="identifier">individual_line_kw</span><span class="punctuation">,</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"average", "both"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># the average is stored as the last line</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">"average"</span><span class="punctuation">:</span>
+                <span class="identifier">pd_line_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_plot_idx</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">pd_line_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_plot_idx</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_lines</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_ice_lines</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_plot_average_dependence</span><span class="grouping">(</span>
+                <span class="identifier">avg_preds</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">target_idx</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="identifier">feature_values</span><span class="punctuation">,</span>
+                <span class="identifier">ax</span><span class="punctuation">,</span>
+                <span class="identifier">pd_line_idx</span><span class="punctuation">,</span>
+                <span class="identifier">line_kw</span><span class="punctuation">,</span>
+            <span class="grouping">)</span>
+
+        <span class="identifier">trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">transforms</span><span class="punctuation">.</span><span class="identifier">blended_transform_factory</span><span class="grouping">(</span>
+            <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transData</span><span class="punctuation">,</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transAxes</span>
+        <span class="grouping">)</span>
+        <span class="comment"># create the decile line for the vertical axis</span>
+        <span class="identifier">vlines_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unravel_index</span><span class="grouping">(</span><span class="identifier">pd_plot_idx</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_vlines_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_vlines_</span><span class="grouping">[</span><span class="identifier">vlines_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">vlines</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles</span><span class="grouping">[</span><span class="identifier">feature_idx</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="int-literal">0</span><span class="punctuation">,</span>
+            <span class="float-literal">0.05</span><span class="punctuation">,</span>
+            <span class="identifier">transform</span><span class="arithmetic-assignment">=</span><span class="identifier">trans</span><span class="punctuation">,</span>
+            <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">"k"</span><span class="punctuation">,</span>
+        <span class="grouping">)</span>
+        <span class="comment"># reset ylim which was overwritten by vlines</span>
+        <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylim</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pdp_lim</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="comment"># Set xlabel if it is not already set</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">get_xlabel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_xlabel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">feature_names</span><span class="grouping">[</span><span class="identifier">feature_idx</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_cols</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">pd_plot_idx</span> <span class="arithmetic-operator">%</span> <span class="identifier">n_cols</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">get_ylabel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylabel</span><span class="grouping">(</span><span class="string-literal">'Partial dependence'</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_yticklabels</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">line_kw</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"label"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">!=</span> <span class="string-literal">'individual'</span><span class="punctuation">:</span>
+            <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">legend</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_plot_two_way_partial_dependence</span><span class="grouping">(</span>
+        <span class="identifier">self</span><span class="punctuation">,</span>
+        <span class="identifier">avg_preds</span><span class="punctuation">,</span>
+        <span class="identifier">feature_values</span><span class="punctuation">,</span>
+        <span class="identifier">feature_idx</span><span class="punctuation">,</span>
+        <span class="identifier">ax</span><span class="punctuation">,</span>
+        <span class="identifier">pd_plot_idx</span><span class="punctuation">,</span>
+        <span class="identifier">Z_level</span><span class="punctuation">,</span>
+        <span class="identifier">contour_kw</span><span class="punctuation">,</span>
+    <span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Plot 2-way partial dependence.
+
+        Parameters
+        ----------
+        avg_preds : ndarray of shape \
+                (n_instances, n_grid_points, n_grid_points)
+            The average predictions for all points of `feature_values[0]` and
+            `feature_values[1]` for some given features for all samples in `X`.
+        feature_values : seq of 1d array
+            A sequence of array of the feature values for which the predictions
+            have been computed.
+        feature_idx : tuple of int
+            The indices of the target features
+        ax : Matplotlib axes
+            The axis on which to plot the ICE and PDP lines.
+        pd_plot_idx : int
+            The sequential index of the plot. It will be unraveled to find the
+            matching 2D position in the grid layout.
+        Z_level : ndarray of shape (8, 8)
+            The Z-level used to encode the average predictions.
+        contour_kw : dict
+            Dict with keywords passed when plotting the contours.
+        """</span>
+        <span class="keyword">from</span> <span class="identifier">matplotlib</span> <span class="keyword">import</span> <span class="identifier">transforms</span>  <span class="comment"># noqa</span>
+
+        <span class="identifier">XX</span><span class="punctuation">,</span> <span class="identifier">YY</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">meshgrid</span><span class="grouping">(</span><span class="identifier">feature_values</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">feature_values</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">Z</span> <span class="arithmetic-assignment">=</span> <span class="identifier">avg_preds</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">target_idx</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="identifier">CS</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">contour</span><span class="grouping">(</span><span class="identifier">XX</span><span class="punctuation">,</span> <span class="identifier">YY</span><span class="punctuation">,</span> <span class="identifier">Z</span><span class="punctuation">,</span> <span class="identifier">levels</span><span class="arithmetic-assignment">=</span><span class="identifier">Z_level</span><span class="punctuation">,</span> <span class="identifier">linewidths</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="punctuation">,</span> <span class="identifier">colors</span><span class="arithmetic-assignment">=</span><span class="string-literal">"k"</span><span class="grouping">)</span>
+        <span class="identifier">contour_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unravel_index</span><span class="grouping">(</span><span class="identifier">pd_plot_idx</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contours_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contours_</span><span class="grouping">[</span><span class="identifier">contour_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">contourf</span><span class="grouping">(</span>
+            <span class="identifier">XX</span><span class="punctuation">,</span>
+            <span class="identifier">YY</span><span class="punctuation">,</span>
+            <span class="identifier">Z</span><span class="punctuation">,</span>
+            <span class="identifier">levels</span><span class="arithmetic-assignment">=</span><span class="identifier">Z_level</span><span class="punctuation">,</span>
+            <span class="identifier">vmax</span><span class="arithmetic-assignment">=</span><span class="identifier">Z_level</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="identifier">vmin</span><span class="arithmetic-assignment">=</span><span class="identifier">Z_level</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="arithmetic-operator">**</span><span class="identifier">contour_kw</span><span class="punctuation">,</span>
+        <span class="grouping">)</span>
+        <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">clabel</span><span class="grouping">(</span><span class="identifier">CS</span><span class="punctuation">,</span> <span class="identifier">fmt</span><span class="arithmetic-assignment">=</span><span class="string-literal">"%2.2f", colors="k"</span><span class="punctuation">,</span> <span class="identifier">fontsize</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="identifier">inline</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="identifier">trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">transforms</span><span class="punctuation">.</span><span class="identifier">blended_transform_factory</span><span class="grouping">(</span>
+            <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transData</span><span class="punctuation">,</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transAxes</span>
+        <span class="grouping">)</span>
+        <span class="comment"># create the decile line for the vertical axis</span>
+        <span class="identifier">xlim</span><span class="punctuation">,</span> <span class="identifier">ylim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">get_xlim</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">get_ylim</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">vlines_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unravel_index</span><span class="grouping">(</span><span class="identifier">pd_plot_idx</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_vlines_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_vlines_</span><span class="grouping">[</span><span class="identifier">vlines_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">vlines</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles</span><span class="grouping">[</span><span class="identifier">feature_idx</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="float-literal">0.05</span><span class="punctuation">,</span> <span class="identifier">transform</span><span class="arithmetic-assignment">=</span><span class="identifier">trans</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">"k"</span><span class="punctuation">,</span>
+        <span class="grouping">)</span>
+        <span class="comment"># create the decile line for the horizontal axis</span>
+        <span class="identifier">hlines_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unravel_index</span><span class="grouping">(</span><span class="identifier">pd_plot_idx</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_hlines_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_hlines_</span><span class="grouping">[</span><span class="identifier">hlines_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">hlines</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles</span><span class="grouping">[</span><span class="identifier">feature_idx</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="float-literal">0.05</span><span class="punctuation">,</span> <span class="identifier">transform</span><span class="arithmetic-assignment">=</span><span class="identifier">trans</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">"k"</span><span class="punctuation">,</span>
+        <span class="grouping">)</span>
+        <span class="comment"># reset xlim and ylim since they are overwritten by hlines and vlines</span>
+        <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_xlim</span><span class="grouping">(</span><span class="identifier">xlim</span><span class="grouping">)</span>
+        <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylim</span><span class="grouping">(</span><span class="identifier">ylim</span><span class="grouping">)</span>
+
+        <span class="comment"># set xlabel if it is not already set</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">get_xlabel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_xlabel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">feature_names</span><span class="grouping">[</span><span class="identifier">feature_idx</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_ylabel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">feature_names</span><span class="grouping">[</span><span class="identifier">feature_idx</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">_deprecate_positional_args</span><span class="grouping">(</span><span class="identifier">version</span><span class="arithmetic-assignment">=</span><span class="string-literal">"1.1"</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">ax</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">line_kw</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">contour_kw</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Plot partial dependence plots.
+
+        Parameters
+        ----------
+        ax : Matplotlib axes or array-like of Matplotlib axes, default=None
+            - If a single axis is passed in, it is treated as a bounding axes
+                and a grid of partial dependence plots will be drawn within
+                these bounds. The `n_cols` parameter controls the number of
+                columns in the grid.
+            - If an array-like of axes are passed in, the partial dependence
+                plots will be drawn directly into these axes.
+            - If `None`, a figure and a bounding axes is created and treated
+                as the single axes case.
+
+        n_cols : int, default=3
+            The maximum number of columns in the grid plot. Only active when
+            `ax` is a single axes or `None`.
+
+        line_kw : dict, default=None
+            Dict with keywords passed to the `matplotlib.pyplot.plot` call.
+            For one-way partial dependence plots.
+
+        contour_kw : dict, default=None
+            Dict with keywords passed to the `matplotlib.pyplot.contourf`
+            call for two-way partial dependence plots.
+
+        Returns
+        -------
+        display : :class:`~sklearn.inspection.PartialDependenceDisplay`
+        """</span>
+
+        <span class="identifier">check_matplotlib_support</span><span class="grouping">(</span><span class="string-literal">"plot_partial_dependence"</span><span class="grouping">)</span>
+        <span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>  <span class="comment"># noqa</span>
+        <span class="keyword">from</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">gridspec</span> <span class="keyword">import</span> <span class="identifier">GridSpecFromSubplotSpec</span>  <span class="comment"># noqa</span>
+
+        <span class="keyword">if</span> <span class="identifier">line_kw</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">line_kw</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+        <span class="keyword">if</span> <span class="identifier">contour_kw</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">contour_kw</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+
+        <span class="keyword">if</span> <span class="identifier">ax</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">_</span><span class="invalid">k</span><span class="invalid">w</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">"alpha"</span><span class="punctuation">:</span> <span class="float-literal">0.75</span><span class="grouping">}</span>
+        <span class="identifier">contour_kw</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="arithmetic-operator">**</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">_</span><span class="invalid">k</span><span class="invalid">w</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">contour_kw</span><span class="grouping">}</span>
+
+        <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">k</span><span class="invalid">w</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span>
+            <span class="string-literal">"color": "C0"</span><span class="punctuation">,</span>
+            <span class="string-literal">"label": "average" if self.kind == "both"</span> <span class="keyword">else</span> <span class="none-literal">None</span><span class="punctuation">,</span>
+        <span class="grouping">}</span>
+        <span class="identifier">line_kw</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="arithmetic-operator">**</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">a</span><span class="invalid">u</span><span class="invalid">l</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">k</span><span class="invalid">w</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">line_kw</span><span class="grouping">}</span>
+
+        <span class="identifier">individual_line_kw</span> <span class="arithmetic-assignment">=</span> <span class="identifier">line_kw</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">del</span> <span class="identifier">individual_line_kw</span><span class="grouping">[</span><span class="string-literal">"label"</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'individual' or self.kind == 'both'</span><span class="punctuation">:</span>
+            <span class="identifier">individual_line_kw</span><span class="grouping">[</span><span class="string-literal">'alpha'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.3</span>
+            <span class="identifier">individual_line_kw</span><span class="grouping">[</span><span class="string-literal">'linewidth'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span>
+
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">features</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"individual", "both"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">n_ice_lines</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_sample_count</span><span class="grouping">(</span>
+                <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pd_results</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">individual</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">"individual"</span><span class="punctuation">:</span>
+                <span class="identifier">n_lines</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_ice_lines</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">n_lines</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_ice_lines</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_ice_lines</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+            <span class="identifier">n_lines</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">Axes</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># If ax was set off, it has most likely been set to off</span>
+            <span class="comment"># by a previous call to plot.</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">axison</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"The ax was already used in another plot "</span>
+                                 <span class="string-literal">"function, please set ax=display.axes_ "</span>
+                                 <span class="string-literal">"instead"</span><span class="grouping">)</span>
+
+            <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">set_axis_off</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bounding_ax_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">figure_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">figure</span>
+
+            <span class="identifier">n_cols</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_cols</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span>
+            <span class="identifier">n_rows</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ceil</span><span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">/</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">n_cols</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axes_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_rows</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'average'</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_rows</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_rows</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="punctuation">,</span> <span class="identifier">n_lines</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contours_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_rows</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+
+            <span class="identifier">axes_ravel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axes_</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+
+            <span class="identifier">gs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">GridSpecFromSubplotSpec</span><span class="grouping">(</span><span class="identifier">n_rows</span><span class="punctuation">,</span> <span class="identifier">n_cols</span><span class="punctuation">,</span>
+                                         <span class="identifier">subplot_spec</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">get_subplotspec</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">spec</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gs</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">axes_ravel</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">figure_</span><span class="punctuation">.</span><span class="identifier">add_subplot</span><span class="grouping">(</span><span class="identifier">spec</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># array-like</span>
+            <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">!=</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Expected ax to have {} axes, got {}"</span>
+                                 <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">size</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+                <span class="identifier">n_cols</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">n_cols</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bounding_ax_</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">figure_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">figure</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axes_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ax</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'average'</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty_like</span><span class="grouping">(</span><span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">lines_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">n_lines</span><span class="punctuation">,</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contours_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty_like</span><span class="grouping">(</span><span class="identifier">ax</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+
+        <span class="comment"># create contour levels for two-way plots</span>
+        <span class="keyword">if</span> <span class="int-literal">2</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pdp_lim</span><span class="punctuation">:</span>
+            <span class="identifier">Z_level</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linspace</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pdp_lim</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">num</span><span class="arithmetic-assignment">=</span><span class="int-literal">8</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_vlines_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty_like</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axes_</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">deciles_hlines_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty_like</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axes_</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">pd_plot_idx</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">axi</span><span class="punctuation">,</span> <span class="identifier">feature_idx</span><span class="punctuation">,</span> <span class="identifier">pd_result</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span>
+            <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axes_</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">features</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pd_results</span><span class="grouping">)</span>
+        <span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">avg_preds</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="identifier">preds</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+            <span class="identifier">feature_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_result</span><span class="grouping">[</span><span class="string-literal">"values"</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'individual'</span><span class="punctuation">:</span>
+                <span class="identifier">preds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_result</span><span class="punctuation">.</span><span class="identifier">individual</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'average'</span><span class="punctuation">:</span>
+                <span class="identifier">avg_preds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_result</span><span class="punctuation">.</span><span class="identifier">average</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># kind='both'</span>
+                <span class="identifier">avg_preds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_result</span><span class="punctuation">.</span><span class="identifier">average</span>
+                <span class="identifier">preds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd_result</span><span class="punctuation">.</span><span class="identifier">individual</span>
+
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">feature_values</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_plot_one_way_partial_dependence</span><span class="grouping">(</span>
+                    <span class="identifier">preds</span><span class="punctuation">,</span>
+                    <span class="identifier">avg_preds</span><span class="punctuation">,</span>
+                    <span class="identifier">feature_values</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">feature_idx</span><span class="punctuation">,</span>
+                    <span class="identifier">n_ice_lines</span><span class="punctuation">,</span>
+                    <span class="identifier">axi</span><span class="punctuation">,</span>
+                    <span class="identifier">n_cols</span><span class="punctuation">,</span>
+                    <span class="identifier">pd_plot_idx</span><span class="punctuation">,</span>
+                    <span class="identifier">n_lines</span><span class="punctuation">,</span>
+                    <span class="identifier">individual_line_kw</span><span class="punctuation">,</span>
+                    <span class="identifier">line_kw</span><span class="punctuation">,</span>
+                <span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_plot_two_way_partial_dependence</span><span class="grouping">(</span>
+                    <span class="identifier">avg_preds</span><span class="punctuation">,</span>
+                    <span class="identifier">feature_values</span><span class="punctuation">,</span>
+                    <span class="identifier">feature_idx</span><span class="punctuation">,</span>
+                    <span class="identifier">axi</span><span class="punctuation">,</span>
+                    <span class="identifier">pd_plot_idx</span><span class="punctuation">,</span>
+                    <span class="identifier">Z_level</span><span class="punctuation">,</span>
+                    <span class="identifier">contour_kw</span><span class="punctuation">,</span>
+                <span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    </pre>
+  </body>
+</html>

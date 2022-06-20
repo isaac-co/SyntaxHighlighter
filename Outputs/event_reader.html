@@ -1,0 +1,684 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Handles the loading and collation of events from Tensorflow event log files. """</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">import</span> <span class="identifier">zlib</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">tensorflow</span> <span class="keyword">as</span> <span class="identifier">tf</span>
+<span class="keyword">from</span> <span class="identifier">tensorflow</span><span class="punctuation">.</span><span class="identifier">core</span><span class="punctuation">.</span><span class="identifier">util</span> <span class="keyword">import</span> <span class="identifier">event_pb2</span>
+<span class="keyword">from</span> <span class="identifier">tensorflow</span><span class="punctuation">.</span><span class="identifier">python</span><span class="punctuation">.</span><span class="identifier">framework</span> <span class="keyword">import</span> <span class="identifier">errors_impl</span> <span class="keyword">as</span> <span class="identifier">tf_errors</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">serializer</span> <span class="keyword">import</span> <span class="identifier">get_serializer</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_LogFiles</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Holds the filenames of the Tensorflow Event logs that require parsing.
+
+    Parameters
+    ----------
+    logs_folder: str
+        The folder that contains the Tensorboard log files
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">logs_folder</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s: (logs_folder: '%s')"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">logs_folder</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_logs_folder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logs_folder</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filenames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_log_filenames</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">session_ids</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" list: Sorted list of `ints` of available session ids. """</span>
+        <span class="keyword">return</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filenames</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_log_filenames</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get the Tensorflow event filenames for all existing sessions.
+
+        Returns
+        -------
+        dict
+            The full path of each log file for each training session id that has been run
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loading log filenames. base_dir: '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_logs_folder</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">dirpath</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">filenames</span> <span class="relational-operator">in</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">walk</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_logs_folder</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">any</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">"events.out.tfevents"</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">filenames</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">continue</span>
+            <span class="identifier">session_id</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_session_id</span><span class="grouping">(</span><span class="identifier">dirpath</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">session_id</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Unable to load session data for model"</span><span class="grouping">)</span>
+                <span class="keyword">return</span> <span class="identifier">retval</span>
+            <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">session_id</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_log_filename</span><span class="grouping">(</span><span class="identifier">dirpath</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"logfiles: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_get_session_id</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the session id for the given folder.
+
+        Parameters
+        ----------
+        folder: str
+            The full path to the folder that contains the session's Tensorflow Event Log
+
+        Returns
+        -------
+        int
+            The session ID for the given folder. If no session id can be determined, return
+            ``None``
+        """</span>
+        <span class="identifier">session</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">folder</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">session_id</span> <span class="arithmetic-assignment">=</span> <span class="identifier">session</span><span class="grouping">[</span><span class="identifier">session</span><span class="punctuation">.</span><span class="identifier">rfind</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span> <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">session_id</span><span class="punctuation">.</span><span class="identifier">isdigit</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"folder: '%s', session_id: %s"</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_get_log_filename</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filenames</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the session log file for the given folder. If multiple log files exist for the
+        given folder, then the most recent log file is used, as earlier files are assumed to be
+        obsolete.
+
+        Parameters
+        ----------
+        folder: str
+            The full path to the folder that contains the session's Tensorflow Event Log
+        filenames: list
+            List of filenames that exist within the given folder
+
+        Returns
+        -------
+        str
+            The full path the the selected log file
+        """</span>
+        <span class="identifier">logfiles</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">fname</span> <span class="keyword">for</span> <span class="identifier">fname</span> <span class="relational-operator">in</span> <span class="identifier">filenames</span> <span class="keyword">if</span> <span class="identifier">fname</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">"events.out.tfevents"</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">logfiles</span><span class="grouping">)</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>  <span class="comment"># Take last item if multi matches</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"logfiles: %s, selected: '%s'"</span><span class="punctuation">,</span> <span class="identifier">logfiles</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">refresh</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Refresh the list of log filenames. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Refreshing log filenames"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filenames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_log_filenames</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">get</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the log filename for the given session id.
+
+        Parameters
+        ----------
+        session_id: int
+            The session id to obtain the log filename for
+
+        Returns
+        -------
+        str
+            The full path to the log file for the requested session id
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filenames</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"session_id: %s, log_filename: '%s'"</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_Cache</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Holds parsed Tensorflow log event data in a compressed cache in memory.
+
+    Parameters
+    ----------
+    session_ids: list
+        List of `ints` pertaining to the session ids that exist in the Tensorflow events folder
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_ids</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s: (session_ids: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">session_ids</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">idx</span><span class="punctuation">:</span> <span class="none-literal">None</span> <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">session_ids</span><span class="grouping">}</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_carry_over</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">is_cached</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if the data already exists in the cache otherwise ``False``. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span>
+
+    <span class="keyword">def</span> <span class="identifier">cache_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">is_live</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a full session's worth of event data to :attr:`_data`.
+
+        Parameters
+        ----------
+        session_id: int
+            The session id to add the data for
+        data: dict
+            The extracted event data dictionary generated from :class:`_EventParser`
+        labels: list
+            List of `str` for the labels of each loss value output
+        is_live: bool, optional
+            ``True`` if the data to be cached is from a live training session otherwise ``False``.
+            Default: ``False``
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Caching event data: (session_id: %s, labels: %s, data points: %s, "</span>
+                     <span class="string-literal">"is_live: %s)"</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">is_live</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">data</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No data to cache"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="keyword">if</span> <span class="identifier">labels</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting loss labels: %s"</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">labels</span>
+
+        <span class="identifier">timestamps</span><span class="punctuation">,</span> <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_to_numpy</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">is_live</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">is_live</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">is_live</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">[</span><span class="identifier">session_id</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">labels</span><span class="arithmetic-assignment">=</span><span class="identifier">labels</span><span class="punctuation">,</span>
+                                          <span class="identifier">loss</span><span class="arithmetic-assignment">=</span><span class="identifier">zlib</span><span class="punctuation">.</span><span class="identifier">compress</span><span class="grouping">(</span><span class="identifier">loss</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                          <span class="identifier">loss_shape</span><span class="arithmetic-assignment">=</span><span class="identifier">loss</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span>
+                                          <span class="identifier">timestamps</span><span class="arithmetic-assignment">=</span><span class="identifier">zlib</span><span class="punctuation">.</span><span class="identifier">compress</span><span class="grouping">(</span><span class="identifier">timestamps</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                          <span class="identifier">timestamps_shape</span><span class="arithmetic-assignment">=</span><span class="identifier">timestamps</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_latest_live</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">timestamps</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_to_numpy</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">is_live</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Extract each individual step data into separate numpy arrays for loss and timestamps.
+
+        Timestamps are stored float64 as the extra accuracy is needed for correct timings. Arrays
+        are returned at the length of the shortest available data (i.e. truncated records are
+        dropped)
+
+        Parameters
+        ----------
+        data: dict
+            The incoming tensorflow event data in dictionary form per step
+        is_live: bool, optional
+            ``True`` if the data to be cached is from a live training session otherwise ``False``.
+            Default: ``False``
+
+        Returns
+        -------
+        timestamps: :class:`numpy.ndarray`
+            float64 array of all iteration's timestamps
+        loss: :class:`numpy.ndarray`
+            float32 array of all iteration's loss
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">is_live</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_carry_over</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Processing carry over: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_carry_over</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_collect_carry_over</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span>
+
+        <span class="identifier">times</span><span class="punctuation">,</span> <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="grouping">[</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"timestamp"), data[idx].get("loss"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+                            <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">times</span><span class="punctuation">,</span> <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_process_data</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">times</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">is_live</span><span class="grouping">)</span>
+
+        <span class="identifier">times</span><span class="punctuation">,</span> <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">times</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float64"), np.array(loss, dtype="float32"</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Converted to numpy: (data points: %s, timestamps shape: %s, loss shape: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">times</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">times</span><span class="punctuation">,</span> <span class="identifier">loss</span>
+
+    <span class="keyword">def</span> <span class="identifier">_collect_carry_over</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" For live data, collect carried over data from the previous update and merge into the
+        current data dictionary.
+
+        Parameters
+        ----------
+        data: dict
+            The latest raw data dictionary
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Carry over keys: %s, data keys: %s"</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_carry_over</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_carry_over</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">key</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">data</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Carry over found for item %s which does not exist in current "</span>
+                             <span class="string-literal">"data: %s. Skipping."</span><span class="punctuation">,</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="keyword">continue</span>
+            <span class="identifier">carry_over</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_carry_over</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="identifier">key</span><span class="grouping">)</span>
+            <span class="identifier">update</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Merging carry over data: %s in to %s"</span><span class="punctuation">,</span> <span class="identifier">carry_over</span><span class="punctuation">,</span> <span class="identifier">update</span><span class="grouping">)</span>
+            <span class="identifier">timestamp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">update</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"timestamp"</span><span class="grouping">)</span>
+            <span class="identifier">update</span><span class="grouping">[</span><span class="string-literal">"timestamp"] = carry_over["timestamp"</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">timestamp</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">timestamp</span>
+            <span class="identifier">update</span><span class="punctuation">.</span><span class="identifier">setdefault</span><span class="grouping">(</span><span class="string-literal">"loss", []).extend(carry_over.get("loss"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Merged carry over data: %s"</span><span class="punctuation">,</span> <span class="identifier">update</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_process_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">timestamps</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">is_live</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Process live update data.
+
+        Live data requires different processing as often we will only have partial data for the
+        current step, so we need to cache carried over partial data to be picked up at the next
+        query. In addition to this, if training is unexpectedly interrupted, there may also be
+        partial data which needs to be cleansed prior to creating a numpy array
+
+        Parameters
+        ----------
+        data: dict
+            The incoming tensorflow event data in dictionary form per step
+        timestamps: tuple
+            The raw timestamps for for the latest live query, including any partial reads
+        loss: tuple
+            The raw loss for for the latest live query, including any partial reads
+        is_live: bool
+            ``True`` if the data to be cached is from a live training session otherwise ``False``.
+
+        Returns
+        -------
+        timestamps: tuple
+            Cleaned list of complete timestamps for the latest live query
+        loss: list
+            Cleaned list of complete loss for the latest live query
+        """</span>
+        <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">loss</span><span class="grouping">)</span>
+        <span class="identifier">timestamps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">timestamps</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">loss</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Truncated loss found. loss count: %s"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">loss</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">)</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">is_live</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting carried over data: %s"</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_carry_over</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Removing truncated loss: (timestamp: %s, loss: %s)"</span><span class="punctuation">,</span>
+                         <span class="identifier">timestamps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">del</span> <span class="identifier">loss</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="keyword">del</span> <span class="identifier">timestamps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="keyword">return</span> <span class="identifier">timestamps</span><span class="punctuation">,</span> <span class="identifier">loss</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_latest_live</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">timestamps</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Append the latest received live training data to the cached data.
+
+        Parameters
+        ----------
+        session_id: int
+            The training session ID to update the cache for
+        loss: :class:`numpy.ndarray`
+            The latest loss values returned from the iterator
+        timestamps: :class:`numpy.ndarray`
+            The latest time stamps returned from the iterator
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding live data to cache: (session_id: %s, loss: %s, timestamps: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">loss</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">timestamps</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">loss</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">timestamps</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="grouping">[</span><span class="identifier">session_id</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">metric</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"loss", "timestamps"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">locals</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">metric</span><span class="grouping">]</span>
+            <span class="identifier">old_shape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">f</span><span class="string-literal">"{metric}_shape"</span><span class="grouping">]</span>
+            <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"float32" if metric == "loss" else "float64"</span>
+            <span class="identifier">old</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">u</span><span class="invalid">f</span><span class="invalid">f</span><span class="invalid">e</span><span class="invalid">r</span><span class="grouping">(</span><span class="identifier">zlib</span><span class="punctuation">.</span><span class="identifier">decompress</span><span class="grouping">(</span><span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">metric</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">old_shape</span><span class="grouping">)</span>
+            <span class="identifier">new</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">old</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"'%s' old_shape: %s new_shape: %s"</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">old_shape</span><span class="punctuation">,</span> <span class="identifier">new</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+            <span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">f</span><span class="string-literal">"{metric}_shape"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">new</span><span class="punctuation">.</span><span class="identifier">shape</span>
+            <span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">metric</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zlib</span><span class="punctuation">.</span><span class="identifier">compress</span><span class="grouping">(</span><span class="identifier">new</span><span class="grouping">)</span>
+            <span class="keyword">del</span> <span class="identifier">old</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Retrieve the decompressed cached data from the cache for the given session id.
+
+        Parameters
+        ----------
+        session_id: int or ``None``
+            If session_id is provided, then the cached data for that session is returned. If
+            session_id is ``None`` then the cached data for all sessions is returned
+        metric: ['loss', 'timestamps']
+            The metric to return the data for.
+
+        Returns
+        -------
+        dict
+            The `session_id` (s) as key, the values are a dictionary containing the requested
+            metric information for each session returned
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">session_id</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">raw</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">data</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="none-literal">None</span>
+            <span class="identifier">raw</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">session_id</span><span class="punctuation">:</span> <span class="identifier">data</span><span class="grouping">}</span>
+
+        <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"float32" if metric == "loss" else "float64"</span>
+
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">data</span> <span class="relational-operator">in</span> <span class="identifier">raw</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">val</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">metric</span><span class="punctuation">:</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">u</span><span class="invalid">f</span><span class="invalid">f</span><span class="invalid">e</span><span class="invalid">r</span><span class="grouping">(</span><span class="identifier">zlib</span><span class="punctuation">.</span><span class="identifier">decompress</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">metric</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                         <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">f</span><span class="string-literal">"{metric}_shape"</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">}</span>
+            <span class="keyword">if</span> <span class="identifier">metric</span> <span class="relational-operator">==</span> <span class="string-literal">"loss"</span><span class="punctuation">:</span>
+                <span class="identifier">val</span><span class="grouping">[</span><span class="string-literal">"labels"] = data["labels"</span><span class="grouping">]</span>
+            <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">val</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Obtained cached data: %s"</span><span class="punctuation">,</span>
+                     <span class="grouping">{</span><span class="identifier">session_id</span><span class="punctuation">:</span> <span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">v</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">v</span>
+                                   <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span>
+                      <span class="keyword">for</span> <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">data</span> <span class="relational-operator">in</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">TensorBoardLogs</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Parse data from TensorBoard logs.
+
+    Process the input logs folder and stores the individual filenames per session.
+
+    Caches timestamp and loss data on request and returns this data from the cache.
+
+    Parameters
+    ----------
+    logs_folder: str
+        The folder that contains the Tensorboard log files
+    is_training: bool
+        ``True`` if the events are being read whilst Faceswap is training otherwise ``False``
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">logs_folder</span><span class="punctuation">,</span> <span class="identifier">is_training</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s: (logs_folder: %s, is_training: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">logs_folder</span><span class="punctuation">,</span> <span class="identifier">is_training</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_training</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_training_iterator</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_log_files</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_LogFiles</span><span class="grouping">(</span><span class="identifier">logs_folder</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">set_training</span><span class="grouping">(</span><span class="identifier">is_training</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_Cache</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">session_ids</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">session_ids</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" list: Sorted list of integers of available session ids. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_log_files</span><span class="punctuation">.</span><span class="identifier">session_ids</span>
+
+    <span class="keyword">def</span> <span class="identifier">set_training</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">is_training</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the internal training flag to the given `is_training` value.
+
+        If a new training session is being instigated, refresh the log filenames
+
+        Parameters
+        ----------
+        is_training: bool
+            ``True`` to indicate that the logs to be read are from the currently training
+            session otherwise ``False``
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_training</span> <span class="relational-operator">==</span> <span class="identifier">is_training</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Training flag already set to %s. Returning"</span><span class="punctuation">,</span> <span class="identifier">is_training</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting is_training to %s"</span><span class="punctuation">,</span> <span class="identifier">is_training</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_training</span> <span class="arithmetic-assignment">=</span> <span class="identifier">is_training</span>
+        <span class="keyword">if</span> <span class="identifier">is_training</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_log_files</span><span class="punctuation">.</span><span class="identifier">refresh</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">log_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_log_files</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">session_ids</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Setting training iterator for log file: '%s'"</span><span class="punctuation">,</span> <span class="identifier">log_file</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_training_iterator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tf</span><span class="punctuation">.</span><span class="identifier">compat</span><span class="punctuation">.</span><span class="identifier">v1</span><span class="punctuation">.</span><span class="identifier">io</span><span class="punctuation">.</span><span class="identifier">tf_record_iterator</span><span class="grouping">(</span><span class="identifier">log_file</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Removing training iterator"</span><span class="grouping">)</span>
+            <span class="keyword">del</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_training_iterator</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_training_iterator</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">def</span> <span class="identifier">_cache_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Cache TensorBoard logs for the given session ID on first access.
+
+        Populates :attr:`_cache` with timestamps and loss data.
+
+        If this is a training session and the data is being queried for the training session ID
+        then get the latest available data and append to the cache
+
+        Parameters
+        -------
+        session_id: int
+            The session ID to cache the data for
+        """</span>
+        <span class="identifier">live_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_training</span> <span class="logical-operator">and</span> <span class="identifier">session_id</span> <span class="relational-operator">==</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">session_ids</span><span class="grouping">)</span>
+        <span class="identifier">iterator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_training_iterator</span> <span class="keyword">if</span> <span class="identifier">live_data</span> <span class="keyword">else</span> <span class="identifier">tf</span><span class="punctuation">.</span><span class="identifier">compat</span><span class="punctuation">.</span><span class="identifier">v1</span><span class="punctuation">.</span><span class="identifier">io</span><span class="punctuation">.</span><span class="identifier">tf_record_iterator</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_log_files</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">parser</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_EventParser</span><span class="grouping">(</span><span class="identifier">iterator</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">,</span> <span class="identifier">live_data</span><span class="grouping">)</span>
+        <span class="identifier">parser</span><span class="punctuation">.</span><span class="identifier">cache_events</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_cache</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check if the given session_id has been cached and if not, cache it.
+
+        Parameters
+        ----------
+        session_id: int, optional
+            The Session ID to return the data for. Set to ``None`` to return all session
+            data. Default ``None`
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">session_id</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">.</span><span class="identifier">is_cached</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_data</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_training</span> <span class="logical-operator">and</span> <span class="identifier">session_id</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">session_ids</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_data</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">session_id</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">session_ids</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">.</span><span class="identifier">is_cached</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache_data</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_loss</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Read the loss from the TensorBoard event logs
+
+        Parameters
+        ----------
+        session_id: int, optional
+            The Session ID to return the loss for. Set to ``None`` to return all session
+            losses. Default ``None``
+
+        Returns
+        -------
+        dict
+            The session id(s) as key, with a further dictionary as value containing the loss name
+            and list of loss values for each step
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Getting loss: (session_id: %s)"</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="identifier">session_id</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">session_id</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">session_ids</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_cache</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span>
+            <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">.</span><span class="identifier">get_data</span><span class="grouping">(</span><span class="identifier">idx</span><span class="punctuation">,</span> <span class="string-literal">"loss"</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">data</span><span class="punctuation">:</span>
+                <span class="keyword">continue</span>
+            <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span>
+            <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">title</span><span class="punctuation">:</span> <span class="identifier">data</span><span class="grouping">[</span><span class="string-literal">"loss"][:, idx] for idx, title in enumerate(data["labels"</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">}</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="grouping">{</span><span class="identifier">key</span><span class="punctuation">:</span> <span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">val</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span>
+                      <span class="keyword">for</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_timestamps</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Read the timestamps from the TensorBoard logs.
+
+        As loss timestamps are slightly different for each loss, we collect the timestamp from the
+        `batch_loss` key.
+
+        Parameters
+        ----------
+        session_id: int, optional
+            The Session ID to return the timestamps for. Set to ``None`` to return all session
+            timestamps. Default ``None``
+
+        Returns
+        -------
+        dict
+            The session id(s) as key with list of timestamps per step as value
+        """</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Getting timestamps: (session_id: %s, is_training: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_training</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="identifier">session_id</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">session_id</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">session_ids</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_cache</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span>
+            <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">.</span><span class="identifier">get_data</span><span class="grouping">(</span><span class="identifier">idx</span><span class="punctuation">,</span> <span class="string-literal">"timestamps"</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">data</span><span class="punctuation">:</span>
+                <span class="keyword">continue</span>
+            <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"timestamps"</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_EventParser</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Parses Tensorflow event and populates data to :class:`_Cache`.
+
+    Parameters
+    ----------
+    iterator: :func:`tf.compat.v1.io.tf_record_iterator`
+        The iterator to use for reading Tensorflow event logs
+    cache: :class:`_Cache`
+        The cache object to store the collected parsed events to
+    live_data: bool
+        ``True`` if the iterator to be loaded is a training iterator for reading live data
+        otherwise ``False``
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">iterator</span><span class="punctuation">,</span> <span class="identifier">cache</span><span class="punctuation">,</span> <span class="identifier">live_data</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s: (iterator: %s, cache: %s, live_data: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">iterator</span><span class="punctuation">,</span> <span class="identifier">cache</span><span class="punctuation">,</span> <span class="identifier">live_data</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_live_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">live_data</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cache</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_iterator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_latest_live</span><span class="grouping">(</span><span class="identifier">iterator</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">live_data</span> <span class="keyword">else</span> <span class="identifier">iterator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_get_latest_live</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">iterator</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the latest event logs for live training data.
+
+        The live data iterator remains open so that it can be re-queried
+
+        Parameters
+        ----------
+        iterator: :func:`tf.compat.v1.io.tf_record_iterator`
+            The live training iterator to use for reading Tensorflow event logs
+
+        Yields
+        ------
+        dict
+            A Tensorflow event in dictionary form for a single step
+        """</span>
+        <span class="identifier">i</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="keyword">yield</span> <span class="identifier">next</span><span class="grouping">(</span><span class="identifier">iterator</span><span class="grouping">)</span>
+                <span class="identifier">i</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+            <span class="keyword">except</span> <span class="identifier">StopIteration</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"End of data reached"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="keyword">except</span> <span class="identifier">tf</span><span class="punctuation">.</span><span class="identifier">errors</span><span class="punctuation">.</span><span class="identifier">DataLossError</span> <span class="keyword">as</span> <span class="identifier">err</span><span class="punctuation">:</span>
+                <span class="comment"># Truncated records are ignored. The iterator holds the offset, so the record will</span>
+                <span class="comment"># be completed at the next call.</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Truncated record. Original Error: %s"</span><span class="punctuation">,</span> <span class="identifier">err</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Collected %s records from live log file"</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">cache_events</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Parse the Tensorflow events logs and add to :attr:`_cache`.
+
+        Parameters
+        ----------
+        session_id: int
+            The session id that the data is being cached for
+        """</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">record</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_iterator</span><span class="punctuation">:</span>
+                <span class="identifier">event</span> <span class="arithmetic-assignment">=</span> <span class="identifier">event_pb2</span><span class="punctuation">.</span><span class="identifier">Event</span><span class="punctuation">.</span><span class="invalid">F</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">S</span><span class="invalid">t</span><span class="invalid">r</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">g</span><span class="grouping">(</span><span class="identifier">record</span><span class="grouping">)</span>  <span class="comment"># pylint:disable=no-member</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">summary</span><span class="punctuation">.</span><span class="identifier">value</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+                <span class="keyword">if</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">summary</span><span class="punctuation">.</span><span class="identifier">value</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">tag</span> <span class="relational-operator">==</span> <span class="string-literal">"keras"</span><span class="punctuation">:</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_parse_outputs</span><span class="grouping">(</span><span class="identifier">event</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">summary</span><span class="punctuation">.</span><span class="identifier">value</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">tag</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">"batch_"</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">step</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_process_event</span><span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">step</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">except</span> <span class="identifier">tf_errors</span><span class="punctuation">.</span><span class="identifier">DataLossError</span> <span class="keyword">as</span> <span class="identifier">err</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"The logs for Session %s are corrupted and cannot be displayed. "</span>
+                           <span class="string-literal">"The totals do not include this session. Original error message: "</span>
+                           <span class="string-literal">"'%s'"</span><span class="punctuation">,</span> <span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">err</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cache</span><span class="punctuation">.</span><span class="identifier">cache_data</span><span class="grouping">(</span><span class="identifier">session_id</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span><span class="punctuation">,</span> <span class="identifier">is_live</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_live_data</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_parse_outputs</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Parse the outputs from the stored model structure for mapping loss names to
+        model outputs.
+
+        Loss names are added to :attr:`_loss_labels`
+
+        Notes
+        -----
+        The master model does not actually contain the specified output name, so we dig into the
+        sub-model to obtain the name of the output layers
+
+        Parameters
+        ----------
+        event: :class:`tensorflow.core.util.event_pb2`
+            The event data containing the keras model structure to be parsed
+        """</span>
+        <span class="identifier">serializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_serializer</span><span class="grouping">(</span><span class="string-literal">"json"</span><span class="grouping">)</span>
+        <span class="identifier">struct</span> <span class="arithmetic-assignment">=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">summary</span><span class="punctuation">.</span><span class="identifier">value</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">tensor</span><span class="punctuation">.</span><span class="identifier">string_val</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+        <span class="identifier">config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">serializer</span><span class="punctuation">.</span><span class="identifier">unmarshal</span><span class="grouping">(</span><span class="identifier">struct</span><span class="grouping">)</span><span class="grouping">[</span><span class="string-literal">"config"</span><span class="grouping">]</span>
+        <span class="identifier">model_outputs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_outputs</span><span class="grouping">(</span><span class="identifier">config</span><span class="grouping">)</span>
+        <span class="identifier">split_output</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">model_outputs</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span>
+
+        <span class="keyword">for</span> <span class="identifier">side_outputs</span><span class="punctuation">,</span> <span class="identifier">side</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">model_outputs</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="string-literal">"a", "b"</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"side: '%s', outputs: '%s'"</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="punctuation">,</span> <span class="identifier">side_outputs</span><span class="grouping">)</span>
+            <span class="identifier">layer_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">side_outputs</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+            <span class="identifier">output_config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="identifier">layer</span> <span class="keyword">for</span> <span class="identifier">layer</span> <span class="relational-operator">in</span> <span class="identifier">config</span><span class="grouping">[</span><span class="string-literal">"layers"</span><span class="grouping">]</span>
+                                 <span class="keyword">if</span> <span class="identifier">layer</span><span class="grouping">[</span><span class="string-literal">"name"] == layer_name)["config"</span><span class="grouping">]</span>
+            <span class="identifier">layer_outputs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_outputs</span><span class="grouping">(</span><span class="identifier">output_config</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">output</span> <span class="relational-operator">in</span> <span class="identifier">layer_outputs</span><span class="punctuation">:</span>  <span class="comment"># Drill into sub-model to get the actual output names</span>
+                <span class="identifier">loss_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">output</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">split_output</span><span class="punctuation">:</span>  <span class="comment"># Rename losses to reflect the side's output</span>
+                    <span class="identifier">loss_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span><span class="string-literal">"{loss_name.replace('_both', '')}_{side}"</span>
+                <span class="keyword">if</span> <span class="identifier">loss_name</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span><span class="punctuation">:</span>
+                    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding loss name: '%s'"</span><span class="punctuation">,</span> <span class="identifier">loss_name</span><span class="grouping">)</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">loss_name</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Collated loss labels: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_loss_labels</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_get_outputs</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">model_config</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the output names, instance index and output index for the given model.
+
+        If there is only a single output, the shape of the array is expanded to remain consistent
+        with multi model outputs
+
+        Parameters
+        ----------
+        model_config: dict
+            The saved Keras model configuration dictionary
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The layer output names, their instance index and their output index
+        """</span>
+        <span class="identifier">outputs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">model_config</span><span class="grouping">[</span><span class="string-literal">"output_layers"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Obtained model outputs: %s, shape: %s"</span><span class="punctuation">,</span> <span class="identifier">outputs</span><span class="punctuation">,</span> <span class="identifier">outputs</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">outputs</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>  <span class="comment"># Insert extra dimension for non learn mask models</span>
+            <span class="identifier">outputs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">expand_dims</span><span class="grouping">(</span><span class="identifier">outputs</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Expanded dimensions for single output model. outputs: %s, shape: %s"</span><span class="punctuation">,</span>
+                         <span class="identifier">outputs</span><span class="punctuation">,</span> <span class="identifier">outputs</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">outputs</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_process_event</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">event</span><span class="punctuation">,</span> <span class="identifier">step</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Process a single Tensorflow event.
+
+        Adds timestamp to the step `dict` if a total loss value is received, process the labels for
+        any new loss entries and adds the side loss value to the step `dict`.
+
+        Parameters
+        ----------
+        event: :class:`tensorflow.core.util.event_pb2`
+            The event data to be processed
+        step: dict
+            The dictionary to populated with the extracted data from the tensorflow event
+
+        Returns
+        -------
+        dict
+            The given step `dict` with the given event data added to it.
+        """</span>
+        <span class="identifier">summary</span> <span class="arithmetic-assignment">=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">summary</span><span class="punctuation">.</span><span class="identifier">value</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">summary</span><span class="punctuation">.</span><span class="identifier">tag</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"batch_loss", "batch_total"):  # Pre tf2.3 totals were "batch_total"</span>
+            <span class="identifier">step</span><span class="grouping">[</span><span class="string-literal">"timestamp"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">event</span><span class="punctuation">.</span><span class="identifier">wall_time</span>
+            <span class="keyword">return</span> <span class="identifier">step</span>
+        <span class="identifier">step</span><span class="punctuation">.</span><span class="identifier">setdefault</span><span class="grouping">(</span><span class="string-literal">"loss"</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">summary</span><span class="punctuation">.</span><span class="identifier">simple_value</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">step</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,768 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre>
+<span class="keyword">from</span> <span class="identifier">time</span> <span class="keyword">import</span> <span class="identifier">time</span>
+<span class="keyword">from</span> <span class="identifier">collections</span> <span class="keyword">import</span> <span class="identifier">namedtuple</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">stats</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">clone</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">normalize</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">check_array</span><span class="punctuation">,</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="identifier">_safe_indexing</span><span class="punctuation">,</span>
+                     <span class="identifier">is_scalar_nan</span><span class="grouping">)</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">FLOAT_DTYPES</span><span class="punctuation">,</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="keyword">import</span> <span class="identifier">_get_mask</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_BaseImputer</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">SimpleImputer</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_check_inputs_dtype</span>
+
+
+<span class="identifier">_ImputerTriplet</span> <span class="arithmetic-assignment">=</span> <span class="identifier">namedtuple</span><span class="grouping">(</span><span class="string-literal">'_ImputerTriplet', ['feat_idx'</span><span class="punctuation">,</span>
+                                                 <span class="string-literal">'neighbor_feat_idx'</span><span class="punctuation">,</span>
+                                                 <span class="string-literal">'estimator'</span><span class="grouping">]</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">IterativeImputer</span><span class="grouping">(</span><span class="identifier">_BaseImputer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Multivariate imputer that estimates each feature from all the others.
+
+    A strategy for imputing missing values by modeling each feature with
+    missing values as a function of other features in a round-robin fashion.
+
+    Read more in the :ref:`User Guide &lt;iterative_imputer&gt;`.
+
+    .. versionadded:: 0.21
+
+    .. note::
+
+      This estimator is still **experimental** for now: the predictions
+      and the API might change without any deprecation cycle. To use it,
+      you need to explicitly import ``enable_iterative_imputer``::
+
+        &gt;&gt;&gt; # explicitly require this experimental feature
+        &gt;&gt;&gt; from sklearn.experimental import enable_iterative_imputer  # noqa
+        &gt;&gt;&gt; # now you can import normally from sklearn.impute
+        &gt;&gt;&gt; from sklearn.impute import IterativeImputer
+
+    Parameters
+    ----------
+    estimator : estimator object, default=BayesianRidge()
+        The estimator to use at each step of the round-robin imputation.
+        If ``sample_posterior`` is True, the estimator must support
+        ``return_std`` in its ``predict`` method.
+
+    missing_values : int, np.nan, default=np.nan
+        The placeholder for the missing values. All occurrences of
+        `missing_values` will be imputed. For pandas' dataframes with
+        nullable integer dtypes with missing values, `missing_values`
+        should be set to `np.nan`, since `pd.NA` will be converted to `np.nan`.
+
+    sample_posterior : boolean, default=False
+        Whether to sample from the (Gaussian) predictive posterior of the
+        fitted estimator for each imputation. Estimator must support
+        ``return_std`` in its ``predict`` method if set to ``True``. Set to
+        ``True`` if using ``IterativeImputer`` for multiple imputations.
+
+    max_iter : int, default=10
+        Maximum number of imputation rounds to perform before returning the
+        imputations computed during the final round. A round is a single
+        imputation of each feature with missing values. The stopping criterion
+        is met once `max(abs(X_t - X_{t-1}))/max(abs(X[known_vals])) &lt; tol`,
+        where `X_t` is `X` at iteration `t`. Note that early stopping is only
+        applied if ``sample_posterior=False``.
+
+    tol : float, default=1e-3
+        Tolerance of the stopping condition.
+
+    n_nearest_features : int, default=None
+        Number of other features to use to estimate the missing values of
+        each feature column. Nearness between features is measured using
+        the absolute correlation coefficient between each feature pair (after
+        initial imputation). To ensure coverage of features throughout the
+        imputation process, the neighbor features are not necessarily nearest,
+        but are drawn with probability proportional to correlation for each
+        imputed target feature. Can provide significant speed-up when the
+        number of features is huge. If ``None``, all features will be used.
+
+    initial_strategy : str, default='mean'
+        Which strategy to use to initialize the missing values. Same as the
+        ``strategy`` parameter in :class:`~sklearn.impute.SimpleImputer`
+        Valid values: {"mean", "median", "most_frequent", or "constant"}.
+
+    imputation_order : str, default='ascending'
+        The order in which the features will be imputed. Possible values:
+
+        "ascending"
+            From features with fewest missing values to most.
+        "descending"
+            From features with most missing values to fewest.
+        "roman"
+            Left to right.
+        "arabic"
+            Right to left.
+        "random"
+            A random order for each round.
+
+    skip_complete : boolean, default=False
+        If ``True`` then features with missing values during ``transform``
+        which did not have any missing values during ``fit`` will be imputed
+        with the initial imputation method only. Set to ``True`` if you have
+        many features with no missing values at both ``fit`` and ``transform``
+        time to save compute.
+
+    min_value : float or array-like of shape (n_features,), default=-np.inf
+        Minimum possible imputed value. Broadcast to shape (n_features,) if
+        scalar. If array-like, expects shape (n_features,), one min value for
+        each feature. The default is `-np.inf`.
+
+        .. versionchanged:: 0.23
+           Added support for array-like.
+
+    max_value : float or array-like of shape (n_features,), default=np.inf
+        Maximum possible imputed value. Broadcast to shape (n_features,) if
+        scalar. If array-like, expects shape (n_features,), one max value for
+        each feature. The default is `np.inf`.
+
+        .. versionchanged:: 0.23
+           Added support for array-like.
+
+    verbose : int, default=0
+        Verbosity flag, controls the debug messages that are issued
+        as functions are evaluated. The higher, the more verbose. Can be 0, 1,
+        or 2.
+
+    random_state : int, RandomState instance or None, default=None
+        The seed of the pseudo random number generator to use. Randomizes
+        selection of estimator features if n_nearest_features is not None, the
+        ``imputation_order`` if ``random``, and the sampling from posterior if
+        ``sample_posterior`` is True. Use an integer for determinism.
+        See :term:`the Glossary &lt;random_state&gt;`.
+
+    add_indicator : boolean, default=False
+        If True, a :class:`MissingIndicator` transform will stack onto output
+        of the imputer's transform. This allows a predictive estimator
+        to account for missingness despite imputation. If a feature has no
+        missing values at fit/train time, the feature won't appear on
+        the missing indicator even if there are missing values at
+        transform/test time.
+
+    Attributes
+    ----------
+    initial_imputer_ : object of type :class:`~sklearn.impute.SimpleImputer`
+        Imputer used to initialize the missing values.
+
+    imputation_sequence_ : list of tuples
+        Each tuple has ``(feat_idx, neighbor_feat_idx, estimator)``, where
+        ``feat_idx`` is the current feature to be imputed,
+        ``neighbor_feat_idx`` is the array of other features used to impute the
+        current feature, and ``estimator`` is the trained estimator used for
+        the imputation. Length is ``self.n_features_with_missing_ *
+        self.n_iter_``.
+
+    n_iter_ : int
+        Number of iteration rounds that occurred. Will be less than
+        ``self.max_iter`` if early stopping criterion was reached.
+
+    n_features_with_missing_ : int
+        Number of features with missing values.
+
+    indicator_ : :class:`~sklearn.impute.MissingIndicator`
+        Indicator used to add binary indicators for missing values.
+        ``None`` if add_indicator is False.
+
+    random_state_ : RandomState instance
+        RandomState instance that is generated either from a seed, the random
+        number generator or by `np.random`.
+
+    See Also
+    --------
+    SimpleImputer : Univariate imputation of missing values.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.experimental import enable_iterative_imputer
+    &gt;&gt;&gt; from sklearn.impute import IterativeImputer
+    &gt;&gt;&gt; imp_mean = IterativeImputer(random_state=0)
+    &gt;&gt;&gt; imp_mean.fit([[7, 2, 3], [4, np.nan, 6], [10, 5, 9]])
+    IterativeImputer(random_state=0)
+    &gt;&gt;&gt; X = [[np.nan, 2, 3], [4, np.nan, 6], [10, np.nan, 9]]
+    &gt;&gt;&gt; imp_mean.transform(X)
+    array([[ 6.9584...,  2.       ,  3.        ],
+           [ 4.       ,  2.6000...,  6.        ],
+           [10.       ,  4.9999...,  9.        ]])
+
+    Notes
+    -----
+    To support imputation in inductive mode we store each feature's estimator
+    during the ``fit`` phase, and predict without refitting (in order) during
+    the ``transform`` phase.
+
+    Features which contain all missing values at ``fit`` are discarded upon
+    ``transform``.
+
+    References
+    ----------
+    .. [1] `Stef van Buuren, Karin Groothuis-Oudshoorn (2011). "mice:
+        Multivariate Imputation by Chained Equations in R". Journal of
+        Statistical Software 45: 1-67.
+        &lt;https://www.jstatsoft.org/article/view/v045i03&gt;`_
+
+    .. [2] `S. F. Buck, (1960). "A Method of Estimation of Missing Values in
+        Multivariate Data Suitable for use with an Electronic Computer".
+        Journal of the Royal Statistical Society 22(2): 302-306.
+        &lt;https://www.jstor.org/stable/2984099&gt;`_
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                 <span class="identifier">missing_values</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nan</span><span class="punctuation">,</span>
+                 <span class="identifier">sample_posterior</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span>
+                 <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-3</span><span class="punctuation">,</span>
+                 <span class="identifier">n_nearest_features</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">initial_strategy</span><span class="arithmetic-assignment">=</span><span class="string-literal">"mean"</span><span class="punctuation">,</span>
+                 <span class="identifier">imputation_order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ascending'</span><span class="punctuation">,</span>
+                 <span class="identifier">skip_complete</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">min_value</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="punctuation">,</span>
+                 <span class="identifier">max_value</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="punctuation">,</span>
+                 <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">add_indicator</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">missing_values</span><span class="arithmetic-assignment">=</span><span class="identifier">missing_values</span><span class="punctuation">,</span>
+            <span class="identifier">add_indicator</span><span class="arithmetic-assignment">=</span><span class="identifier">add_indicator</span>
+        <span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_posterior</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_posterior</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_nearest_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_nearest_features</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_strategy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initial_strategy</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span> <span class="arithmetic-assignment">=</span> <span class="identifier">imputation_order</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">skip_complete</span> <span class="arithmetic-assignment">=</span> <span class="identifier">skip_complete</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min_value</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_value</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">_impute_one_feature</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                            <span class="identifier">X_filled</span><span class="punctuation">,</span>
+                            <span class="identifier">mask_missing_values</span><span class="punctuation">,</span>
+                            <span class="identifier">feat_idx</span><span class="punctuation">,</span>
+                            <span class="identifier">neighbor_feat_idx</span><span class="punctuation">,</span>
+                            <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                            <span class="identifier">fit_mode</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Impute a single feature from the others provided.
+
+        This function predicts the missing values of one of the features using
+        the current estimates of all the other features. The ``estimator`` must
+        support ``return_std=True`` in its ``predict`` method for this function
+        to work.
+
+        Parameters
+        ----------
+        X_filled : ndarray
+            Input data with the most recent imputations.
+
+        mask_missing_values : ndarray
+            Input data's missing indicator matrix.
+
+        feat_idx : int
+            Index of the feature currently being imputed.
+
+        neighbor_feat_idx : ndarray
+            Indices of the features to be used in imputing ``feat_idx``.
+
+        estimator : object
+            The estimator to use at this step of the round-robin imputation.
+            If ``sample_posterior`` is True, the estimator must support
+            ``return_std`` in its ``predict`` method.
+            If None, it will be cloned from self._estimator.
+
+        fit_mode : boolean, default=True
+            Whether to fit and predict with the estimator or just predict.
+
+        Returns
+        -------
+        X_filled : ndarray
+            Input data with ``X_filled[missing_row_mask, feat_idx]`` updated.
+
+        estimator : estimator with sklearn API
+            The fitted estimator used to impute
+            ``X_filled[missing_row_mask, feat_idx]``.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">estimator</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">fit_mode</span> <span class="relational-operator">is</span> <span class="bool-literal">False</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"If fit_mode is False, then an already-fitted "</span>
+                             <span class="string-literal">"estimator should be passed in."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">estimator</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_estimator</span><span class="grouping">)</span>
+
+        <span class="identifier">missing_row_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask_missing_values</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">feat_idx</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">fit_mode</span><span class="punctuation">:</span>
+            <span class="identifier">X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X_filled</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">neighbor_feat_idx</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                     <span class="bitwise-operator">~</span><span class="identifier">missing_row_mask</span><span class="grouping">)</span>
+            <span class="identifier">y_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X_filled</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">feat_idx</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                     <span class="bitwise-operator">~</span><span class="identifier">missing_row_mask</span><span class="grouping">)</span>
+            <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="grouping">)</span>
+
+        <span class="comment"># if no missing values, don't predict</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">missing_row_mask</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">X_filled</span><span class="punctuation">,</span> <span class="identifier">estimator</span>
+
+        <span class="comment"># get posterior samples if there is at least one missing value</span>
+        <span class="identifier">X_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_indexing</span><span class="grouping">(</span><span class="identifier">X_filled</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">neighbor_feat_idx</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                <span class="identifier">missing_row_mask</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_posterior</span><span class="punctuation">:</span>
+            <span class="identifier">mus</span><span class="punctuation">,</span> <span class="identifier">sigmas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+            <span class="identifier">imputed_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">mus</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X_filled</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+            <span class="comment"># two types of problems: (1) non-positive sigmas</span>
+            <span class="comment"># (2) mus outside legal range of min_value and max_value</span>
+            <span class="comment"># (results in inf sample)</span>
+            <span class="identifier">positive_sigmas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sigmas</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+            <span class="identifier">imputed_values</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">positive_sigmas</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mus</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">positive_sigmas</span><span class="grouping">]</span>
+            <span class="identifier">mus_too_low</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mus</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_min_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span>
+            <span class="identifier">imputed_values</span><span class="grouping">[</span><span class="identifier">mus_too_low</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_min_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span>
+            <span class="identifier">mus_too_high</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mus</span> <span class="relational-operator">&gt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span>
+            <span class="identifier">imputed_values</span><span class="grouping">[</span><span class="identifier">mus_too_high</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span>
+            <span class="comment"># the rest can be sampled without statistical issues</span>
+            <span class="identifier">inrange_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">positive_sigmas</span> <span class="bitwise-operator">&</span> <span class="bitwise-operator">~</span><span class="identifier">mus_too_low</span> <span class="bitwise-operator">&</span> <span class="bitwise-operator">~</span><span class="identifier">mus_too_high</span>
+            <span class="identifier">mus</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mus</span><span class="grouping">[</span><span class="identifier">inrange_mask</span><span class="grouping">]</span>
+            <span class="identifier">sigmas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sigmas</span><span class="grouping">[</span><span class="identifier">inrange_mask</span><span class="grouping">]</span>
+            <span class="identifier">a</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_min_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">mus</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">sigmas</span>
+            <span class="identifier">b</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">mus</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">sigmas</span>
+
+            <span class="identifier">truncated_normal</span> <span class="arithmetic-assignment">=</span> <span class="identifier">stats</span><span class="punctuation">.</span><span class="identifier">truncnorm</span><span class="grouping">(</span><span class="identifier">a</span><span class="arithmetic-assignment">=</span><span class="identifier">a</span><span class="punctuation">,</span> <span class="identifier">b</span><span class="arithmetic-assignment">=</span><span class="identifier">b</span><span class="punctuation">,</span>
+                                               <span class="identifier">loc</span><span class="arithmetic-assignment">=</span><span class="identifier">mus</span><span class="punctuation">,</span> <span class="identifier">scale</span><span class="arithmetic-assignment">=</span><span class="identifier">sigmas</span><span class="grouping">)</span>
+            <span class="identifier">imputed_values</span><span class="grouping">[</span><span class="identifier">inrange_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">truncated_normal</span><span class="punctuation">.</span><span class="identifier">rvs</span><span class="grouping">(</span>
+                <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state_</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">imputed_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+            <span class="identifier">imputed_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">imputed_values</span><span class="punctuation">,</span>
+                                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_min_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_value</span><span class="grouping">[</span><span class="identifier">feat_idx</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="comment"># update the feature</span>
+        <span class="identifier">X_filled</span><span class="grouping">[</span><span class="identifier">missing_row_mask</span><span class="punctuation">,</span> <span class="identifier">feat_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">imputed_values</span>
+        <span class="keyword">return</span> <span class="identifier">X_filled</span><span class="punctuation">,</span> <span class="identifier">estimator</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_neighbor_feat_idx</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                               <span class="identifier">n_features</span><span class="punctuation">,</span>
+                               <span class="identifier">feat_idx</span><span class="punctuation">,</span>
+                               <span class="identifier">abs_corr_mat</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Get a list of other features to predict ``feat_idx``.
+
+        If self.n_nearest_features is less than or equal to the total
+        number of features, then use a probability proportional to the absolute
+        correlation between ``feat_idx`` and each other feature to randomly
+        choose a subsample of the other features (without replacement).
+
+        Parameters
+        ----------
+        n_features : int
+            Number of features in ``X``.
+
+        feat_idx : int
+            Index of the feature currently being imputed.
+
+        abs_corr_mat : ndarray, shape (n_features, n_features)
+            Absolute correlation matrix of ``X``. The diagonal has been zeroed
+            out and each feature has been normalized to sum to 1. Can be None.
+
+        Returns
+        -------
+        neighbor_feat_idx : array-like
+            The features to use to impute ``feat_idx``.
+        """</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_nearest_features</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_nearest_features</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">p</span> <span class="arithmetic-assignment">=</span> <span class="identifier">abs_corr_mat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">feat_idx</span><span class="grouping">]</span>
+            <span class="identifier">neighbor_feat_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state_</span><span class="punctuation">.</span><span class="identifier">choice</span><span class="grouping">(</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_nearest_features</span><span class="punctuation">,</span> <span class="identifier">replace</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">p</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">inds_left</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">feat_idx</span><span class="grouping">)</span>
+            <span class="identifier">inds_right</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">feat_idx</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span>
+            <span class="identifier">neighbor_feat_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">inds_left</span><span class="punctuation">,</span> <span class="identifier">inds_right</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">neighbor_feat_idx</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_ordered_idx</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">mask_missing_values</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Decide in what order we will update the features.
+
+        As a homage to the MICE R package, we will have 4 main options of
+        how to order the updates, and use a random order if anything else
+        is specified.
+
+        Also, this function skips features which have no missing values.
+
+        Parameters
+        ----------
+        mask_missing_values : array-like, shape (n_samples, n_features)
+            Input data's missing indicator matrix, where "n_samples" is the
+            number of samples and "n_features" is the number of features.
+
+        Returns
+        -------
+        ordered_idx : ndarray, shape (n_features,)
+            The order in which to impute the features.
+        """</span>
+        <span class="identifier">frac_of_missing_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask_missing_values</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">skip_complete</span><span class="punctuation">:</span>
+            <span class="identifier">missing_values_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">frac_of_missing_values</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">missing_values_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">(</span><span class="identifier">frac_of_missing_values</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span> <span class="relational-operator">==</span> <span class="string-literal">'roman'</span><span class="punctuation">:</span>
+            <span class="identifier">ordered_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">missing_values_idx</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span> <span class="relational-operator">==</span> <span class="string-literal">'arabic'</span><span class="punctuation">:</span>
+            <span class="identifier">ordered_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">missing_values_idx</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span> <span class="relational-operator">==</span> <span class="string-literal">'ascending'</span><span class="punctuation">:</span>
+            <span class="identifier">n</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">frac_of_missing_values</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">missing_values_idx</span><span class="grouping">)</span>
+            <span class="identifier">ordered_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">frac_of_missing_values</span><span class="punctuation">,</span>
+                                     <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'mergesort'</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">n</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span> <span class="relational-operator">==</span> <span class="string-literal">'descending'</span><span class="punctuation">:</span>
+            <span class="identifier">n</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">frac_of_missing_values</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">missing_values_idx</span><span class="grouping">)</span>
+            <span class="identifier">ordered_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">frac_of_missing_values</span><span class="punctuation">,</span>
+                                     <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'mergesort'</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">n</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span> <span class="relational-operator">==</span> <span class="string-literal">'random'</span><span class="punctuation">:</span>
+            <span class="identifier">ordered_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">missing_values_idx</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state_</span><span class="punctuation">.</span><span class="identifier">shuffle</span><span class="grouping">(</span><span class="identifier">ordered_idx</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Got an invalid imputation order: '{0}'. It must "</span>
+                             <span class="string-literal">"be one of the following: 'roman', 'arabic', "</span>
+                             <span class="string-literal">"'ascending', 'descending', or "</span>
+                             <span class="string-literal">"'random'."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">ordered_idx</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_abs_corr_mat</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X_filled</span><span class="punctuation">,</span> <span class="identifier">tolerance</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-6</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Get absolute correlation matrix between features.
+
+        Parameters
+        ----------
+        X_filled : ndarray, shape (n_samples, n_features)
+            Input data with the most recent imputations.
+
+        tolerance : float, default=1e-6
+            ``abs_corr_mat`` can have nans, which will be replaced
+            with ``tolerance``.
+
+        Returns
+        -------
+        abs_corr_mat : ndarray, shape (n_features, n_features)
+            Absolute correlation matrix of ``X`` at the beginning of the
+            current round. The diagonal has been zeroed out and each feature's
+            absolute correlations with all others have been normalized to sum
+            to 1.
+        """</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_filled</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_nearest_features</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_nearest_features</span> <span class="relational-operator">&gt;=</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span>
+        <span class="keyword">with</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">errstate</span><span class="grouping">(</span><span class="identifier">invalid</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ignore'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># if a feature in the neighboorhood has only a single value</span>
+            <span class="comment"># (e.g., categorical feature), the std. dev. will be null and</span>
+            <span class="comment"># np.corrcoef will raise a warning due to a division by zero</span>
+            <span class="identifier">abs_corr_mat</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">corrcoef</span><span class="grouping">(</span><span class="identifier">X_filled</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="comment"># np.corrcoef is not defined for features with zero std</span>
+        <span class="identifier">abs_corr_mat</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">abs_corr_mat</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tolerance</span>
+        <span class="comment"># ensures exploration, i.e. at least some probability of sampling</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">abs_corr_mat</span><span class="punctuation">,</span> <span class="identifier">tolerance</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">abs_corr_mat</span><span class="grouping">)</span>
+        <span class="comment"># features are not their own neighbors</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">fill_diagonal</span><span class="grouping">(</span><span class="identifier">abs_corr_mat</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="comment"># needs to sum to 1 for np.random.choice sampling</span>
+        <span class="identifier">abs_corr_mat</span> <span class="arithmetic-assignment">=</span> <span class="identifier">normalize</span><span class="grouping">(</span><span class="identifier">abs_corr_mat</span><span class="punctuation">,</span> <span class="identifier">norm</span><span class="arithmetic-assignment">=</span><span class="string-literal">'l1'</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">abs_corr_mat</span>
+
+    <span class="keyword">def</span> <span class="identifier">_initial_imputation</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">in_fit</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform initial imputation for input X.
+
+        Parameters
+        ----------
+        X : ndarray, shape (n_samples, n_features)
+            Input data, where "n_samples" is the number of samples and
+            "n_features" is the number of features.
+
+        in_fit : bool, default=False
+            Whether function is called in fit.
+
+        Returns
+        -------
+        Xt : ndarray, shape (n_samples, n_features)
+            Input data, where "n_samples" is the number of samples and
+            "n_features" is the number of features.
+
+        X_filled : ndarray, shape (n_samples, n_features)
+            Input data with the most recent imputations.
+
+        mask_missing_values : ndarray, shape (n_samples, n_features)
+            Input data's missing indicator matrix, where "n_samples" is the
+            number of samples and "n_features" is the number of features.
+
+        X_missing_mask : ndarray, shape (n_samples, n_features)
+            Input data's mask matrix indicating missing datapoints, where
+            "n_samples" is the number of samples and "n_features" is the
+            number of features.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"allow-nan"</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">FLOAT_DTYPES</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">"F"</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="identifier">in_fit</span><span class="punctuation">,</span>
+                                <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">)</span>
+        <span class="identifier">_check_inputs_dtype</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="grouping">)</span>
+
+        <span class="identifier">X_missing_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_mask</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="grouping">)</span>
+        <span class="identifier">mask_missing_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_missing_mask</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_imputer_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_imputer_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">SimpleImputer</span><span class="grouping">(</span>
+                <span class="identifier">missing_values</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">missing_values</span><span class="punctuation">,</span>
+                <span class="identifier">strategy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_strategy</span>
+            <span class="grouping">)</span>
+            <span class="identifier">X_filled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_imputer_</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">X_filled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_imputer_</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">valid_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_not</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_imputer_</span><span class="punctuation">.</span><span class="identifier">statistics_</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">Xt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">valid_mask</span><span class="grouping">]</span>
+        <span class="identifier">mask_missing_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask_missing_values</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">valid_mask</span><span class="grouping">]</span>
+
+        <span class="keyword">return</span> <span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">X_filled</span><span class="punctuation">,</span> <span class="identifier">mask_missing_values</span><span class="punctuation">,</span> <span class="identifier">X_missing_mask</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_validate_limit</span><span class="grouping">(</span><span class="identifier">limit</span><span class="punctuation">,</span> <span class="identifier">limit_type</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Validate the limits (min/max) of the feature values
+        Converts scalar min/max limits to vectors of shape (n_features,)
+
+        Parameters
+        ----------
+        limit: scalar or array-like
+            The user-specified limit (i.e, min_value or max_value)
+        limit_type: string, "max" or "min"
+            n_features: Number of features in the dataset
+
+        Returns
+        -------
+        limit: ndarray, shape(n_features,)
+            Array of limits, one for each feature
+        """</span>
+        <span class="identifier">limit_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span> <span class="keyword">if</span> <span class="identifier">limit_type</span> <span class="relational-operator">==</span> <span class="string-literal">"max"</span> <span class="keyword">else</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+        <span class="identifier">limit</span> <span class="arithmetic-assignment">=</span> <span class="identifier">limit_bound</span> <span class="keyword">if</span> <span class="identifier">limit</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">limit</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isscalar</span><span class="grouping">(</span><span class="identifier">limit</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">limit</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">full</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">limit</span><span class="grouping">)</span>
+        <span class="identifier">limit</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span>
+            <span class="identifier">limit</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span>
+        <span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">limit</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"'{limit_type}_value' should be of "</span>
+                <span class="identifier">f</span><span class="string-literal">"shape ({n_features},) when an array-like "</span>
+                <span class="identifier">f</span><span class="string-literal">"is provided. Got {limit.shape}, instead."</span>
+            <span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">limit</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fits the imputer on X and return the transformed X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Input data, where "n_samples" is the number of samples and
+            "n_features" is the number of features.
+
+        y : ignored.
+
+        Returns
+        -------
+        Xt : array-like, shape (n_samples, n_features)
+            The imputed input data.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">"random_state_"</span><span class="punctuation">,</span>
+                                     <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"'max_iter' should be a positive integer. Got {} instead."</span>
+                <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"'tol' should be a non-negative float. Got {} instead."</span>
+                <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">BayesianRidge</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">BayesianRidge</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_sequence_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">initial_imputer_</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">mask_missing_values</span><span class="punctuation">,</span> <span class="identifier">complete_mask</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_initial_imputation</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">in_fit</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_fit_indicator</span><span class="grouping">(</span><span class="identifier">complete_mask</span><span class="grouping">)</span>
+        <span class="identifier">X_indicator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_transform_indicator</span><span class="grouping">(</span><span class="identifier">complete_mask</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">mask_missing_values</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+            <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_concatenate_indicator</span><span class="grouping">(</span><span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">X_indicator</span><span class="grouping">)</span>
+
+        <span class="comment"># Edge case: a single feature. We return the initial ...</span>
+        <span class="keyword">if</span> <span class="identifier">Xt</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+            <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_concatenate_indicator</span><span class="grouping">(</span><span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">X_indicator</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_min_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_limit</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_value</span><span class="punctuation">,</span> <span class="string-literal">"min"</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_limit</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_value</span><span class="punctuation">,</span> <span class="string-literal">"max"</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">greater</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_value</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_min_value</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"One (or more) features have min_value &gt;= max_value."</span><span class="grouping">)</span>
+
+        <span class="comment"># order in which to impute</span>
+        <span class="comment"># note this is probably too slow for large feature data (d &gt; 100000)</span>
+        <span class="comment"># and a better way would be good.</span>
+        <span class="comment"># see: https://goo.gl/KyCNwj and subsequent comments</span>
+        <span class="identifier">ordered_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_ordered_idx</span><span class="grouping">(</span><span class="identifier">mask_missing_values</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_with_missing_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">ordered_idx</span><span class="grouping">)</span>
+
+        <span class="identifier">abs_corr_mat</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_abs_corr_mat</span><span class="grouping">(</span><span class="identifier">Xt</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xt</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"[IterativeImputer] Completing matrix with shape %s"</span>
+                  <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">start_t</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_posterior</span><span class="punctuation">:</span>
+            <span class="identifier">Xt_previous</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xt</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">normalized_tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">mask_missing_values</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_order</span> <span class="relational-operator">==</span> <span class="string-literal">'random'</span><span class="punctuation">:</span>
+                <span class="identifier">ordered_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_ordered_idx</span><span class="grouping">(</span><span class="identifier">mask_missing_values</span><span class="grouping">)</span>
+
+            <span class="keyword">for</span> <span class="identifier">feat_idx</span> <span class="relational-operator">in</span> <span class="identifier">ordered_idx</span><span class="punctuation">:</span>
+                <span class="identifier">neighbor_feat_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_neighbor_feat_idx</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span>
+                                                                <span class="identifier">feat_idx</span><span class="punctuation">,</span>
+                                                                <span class="identifier">abs_corr_mat</span><span class="grouping">)</span>
+                <span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_impute_one_feature</span><span class="grouping">(</span>
+                    <span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">mask_missing_values</span><span class="punctuation">,</span> <span class="identifier">feat_idx</span><span class="punctuation">,</span> <span class="identifier">neighbor_feat_idx</span><span class="punctuation">,</span>
+                    <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">fit_mode</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+                <span class="identifier">estimator_triplet</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ImputerTriplet</span><span class="grouping">(</span><span class="identifier">feat_idx</span><span class="punctuation">,</span>
+                                                    <span class="identifier">neighbor_feat_idx</span><span class="punctuation">,</span>
+                                                    <span class="identifier">estimator</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_sequence_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">estimator_triplet</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'[IterativeImputer] Ending imputation round '</span>
+                      <span class="string-literal">'%d/%d, elapsed time %0.2f'</span>
+                      <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">start_t</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_posterior</span><span class="punctuation">:</span>
+                <span class="identifier">inf_norm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">Xt</span> <span class="arithmetic-operator">-</span> <span class="identifier">Xt_previous</span><span class="punctuation">,</span> <span class="identifier">ord</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span><span class="punctuation">,</span>
+                                          <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'[IterativeImputer] '</span>
+                          <span class="string-literal">'Change: {}, scaled tolerance: {} '</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                              <span class="identifier">inf_norm</span><span class="punctuation">,</span> <span class="identifier">normalized_tol</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">inf_norm</span> <span class="relational-operator">&lt;</span> <span class="identifier">normalized_tol</span><span class="punctuation">:</span>
+                    <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'[IterativeImputer] Early stopping criterion '</span>
+                              <span class="string-literal">'reached.'</span><span class="grouping">)</span>
+                    <span class="keyword">break</span>
+                <span class="identifier">Xt_previous</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xt</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sample_posterior</span><span class="punctuation">:</span>
+                <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"[IterativeImputer] Early stopping criterion not"</span>
+                              <span class="string-literal">" reached."</span><span class="punctuation">,</span> <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+        <span class="identifier">Xt</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">mask_missing_values</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">mask_missing_values</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_concatenate_indicator</span><span class="grouping">(</span><span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">X_indicator</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Imputes all missing values in X.
+
+        Note that this is stochastic, and that if random_state is not fixed,
+        repeated calls, or permuted input, will yield different results.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The input data to complete.
+
+        Returns
+        -------
+        Xt : array-like, shape (n_samples, n_features)
+             The imputed input data.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">mask_missing_values</span><span class="punctuation">,</span> <span class="identifier">complete_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_initial_imputation</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">X_indicator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_transform_indicator</span><span class="grouping">(</span><span class="identifier">complete_mask</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">mask_missing_values</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_concatenate_indicator</span><span class="grouping">(</span><span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">X_indicator</span><span class="grouping">)</span>
+
+        <span class="identifier">imputations_per_round</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_sequence_</span><span class="grouping">)</span> <span class="arithmetic-operator">//</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span>
+        <span class="identifier">i_rnd</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"[IterativeImputer] Completing matrix with shape %s"</span>
+                  <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">start_t</span> <span class="arithmetic-assignment">=</span> <span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">it</span><span class="punctuation">,</span> <span class="identifier">estimator_triplet</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">imputation_sequence_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_impute_one_feature</span><span class="grouping">(</span>
+                <span class="identifier">Xt</span><span class="punctuation">,</span>
+                <span class="identifier">mask_missing_values</span><span class="punctuation">,</span>
+                <span class="identifier">estimator_triplet</span><span class="punctuation">.</span><span class="identifier">feat_idx</span><span class="punctuation">,</span>
+                <span class="identifier">estimator_triplet</span><span class="punctuation">.</span><span class="identifier">neighbor_feat_idx</span><span class="punctuation">,</span>
+                <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">estimator_triplet</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">,</span>
+                <span class="identifier">fit_mode</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span>
+            <span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="identifier">it</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">%</span> <span class="identifier">imputations_per_round</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'[IterativeImputer] Ending imputation round '</span>
+                          <span class="string-literal">'%d/%d, elapsed time %0.2f'</span>
+                          <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">i_rnd</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span><span class="punctuation">,</span> <span class="identifier">time</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">start_t</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">i_rnd</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+        <span class="identifier">Xt</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">mask_missing_values</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">mask_missing_values</span><span class="grouping">]</span>
+
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_concatenate_indicator</span><span class="grouping">(</span><span class="identifier">Xt</span><span class="punctuation">,</span> <span class="identifier">X_indicator</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fits the imputer on X and return self.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Input data, where "n_samples" is the number of samples and
+            "n_features" is the number of features.
+
+        y : ignored
+
+        Returns
+        -------
+        self : object
+            Returns self.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,1728 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Metrics to assess performance on classification task given scores.
+
+Functions named as ``*_score`` return a scalar value to maximize: the higher
+the better.
+
+Function named as ``*_error`` or ``*_loss`` return a scalar value to minimize:
+the lower the better.
+"""</span>
+
+<span class="comment"># Authors: Alexandre Gramfort &lt;alexandre.gramfort@inria.fr&gt;</span>
+<span class="comment">#          Mathieu Blondel &lt;mathieu@mblondel.org&gt;</span>
+<span class="comment">#          Olivier Grisel &lt;olivier.grisel@ensta.org&gt;</span>
+<span class="comment">#          Arnaud Joly &lt;a.joly@ulg.ac.be&gt;</span>
+<span class="comment">#          Jochen Wersdorfer &lt;jochen@wersdoerfer.de&gt;</span>
+<span class="comment">#          Lars Buitinck</span>
+<span class="comment">#          Joel Nothman &lt;joel.nothman@gmail.com&gt;</span>
+<span class="comment">#          Noel Dawe &lt;noel@dawe.me&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">from</span> <span class="identifier">functools</span> <span class="keyword">import</span> <span class="identifier">partial</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">import</span> <span class="identifier">csr_matrix</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">stats</span> <span class="keyword">import</span> <span class="identifier">rankdata</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_consistent_length</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">column_or_1d</span><span class="punctuation">,</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">multiclass</span> <span class="keyword">import</span> <span class="identifier">type_of_target</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">stable_cumsum</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">sparsefuncs</span> <span class="keyword">import</span> <span class="identifier">count_nonzero</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">UndefinedMetricWarning</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">label_binarize</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_encode</span> <span class="keyword">import</span> <span class="identifier">_encode</span><span class="punctuation">,</span> <span class="identifier">_unique</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="grouping">(</span>
+    <span class="identifier">_average_binary_score</span><span class="punctuation">,</span>
+    <span class="identifier">_average_multiclass_ovo_score</span><span class="punctuation">,</span>
+    <span class="identifier">_check_pos_label_consistency</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">auc</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Area Under the Curve (AUC) using the trapezoidal rule.
+
+    This is a general function, given points on a curve.  For computing the
+    area under the ROC-curve, see :func:`roc_auc_score`.  For an alternative
+    way to summarize a precision-recall curve, see
+    :func:`average_precision_score`.
+
+    Parameters
+    ----------
+    x : ndarray of shape (n,)
+        x coordinates. These must be either monotonic increasing or monotonic
+        decreasing.
+    y : ndarray of shape, (n,)
+        y coordinates.
+
+    Returns
+    -------
+    auc : float
+
+    See Also
+    --------
+    roc_auc_score : Compute the area under the ROC curve.
+    average_precision_score : Compute average precision from prediction scores.
+    precision_recall_curve : Compute precision-recall pairs for different
+        probability thresholds.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn import metrics
+    &gt;&gt;&gt; y = np.array([1, 1, 2, 2])
+    &gt;&gt;&gt; pred = np.array([0.1, 0.4, 0.35, 0.8])
+    &gt;&gt;&gt; fpr, tpr, thresholds = metrics.roc_curve(y, pred, pos_label=2)
+    &gt;&gt;&gt; metrics.auc(fpr, tpr)
+    0.75
+    """</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+    <span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">x</span><span class="grouping">)</span>
+    <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">x</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&lt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'At least 2 points are needed to compute'</span>
+                         <span class="string-literal">' area under curve, but x.shape = %s'</span> <span class="arithmetic-operator">%</span> <span class="identifier">x</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+
+    <span class="identifier">direction</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+    <span class="identifier">dx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diff</span><span class="grouping">(</span><span class="identifier">x</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">dx</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">dx</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">direction</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"x is neither increasing nor decreasing "</span>
+                             <span class="string-literal">": {}."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">x</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">area</span> <span class="arithmetic-assignment">=</span> <span class="identifier">direction</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">trapz</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">x</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">area</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">memmap</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Reductions such as .sum used internally in np.trapz do not return a</span>
+        <span class="comment"># scalar by default for numpy.memmap instances contrary to</span>
+        <span class="comment"># regular numpy.ndarray instances.</span>
+        <span class="identifier">area</span> <span class="arithmetic-assignment">=</span> <span class="identifier">area</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">.</span><span class="identifier">type</span><span class="grouping">(</span><span class="identifier">area</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">area</span>
+
+
+<span class="keyword">def</span> <span class="identifier">average_precision_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="string-literal">"macro"</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                            <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute average precision (AP) from prediction scores.
+
+    AP summarizes a precision-recall curve as the weighted mean of precisions
+    achieved at each threshold, with the increase in recall from the previous
+    threshold used as the weight:
+
+    .. math::
+        \\text{AP} = \\sum_n (R_n - R_{n-1}) P_n
+
+    where :math:`P_n` and :math:`R_n` are the precision and recall at the nth
+    threshold [1]_. This implementation is not interpolated and is different
+    from computing the area under the precision-recall curve with the
+    trapezoidal rule, which uses linear interpolation and can be too
+    optimistic.
+
+    Note: this implementation is restricted to the binary classification task
+    or multilabel classification task.
+
+    Read more in the :ref:`User Guide &lt;precision_recall_f_measure_metrics&gt;`.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples,) or (n_samples, n_classes)
+        True binary labels or binary label indicators.
+
+    y_score : ndarray of shape (n_samples,) or (n_samples, n_classes)
+        Target scores, can either be probability estimates of the positive
+        class, confidence values, or non-thresholded measure of decisions
+        (as returned by :term:`decision_function` on some classifiers).
+
+    average : {'micro', 'samples', 'weighted', 'macro'} or None, \
+            default='macro'
+        If ``None``, the scores for each class are returned. Otherwise,
+        this determines the type of averaging performed on the data:
+
+        ``'micro'``:
+            Calculate metrics globally by considering each element of the label
+            indicator matrix as a label.
+        ``'macro'``:
+            Calculate metrics for each label, and find their unweighted
+            mean.  This does not take label imbalance into account.
+        ``'weighted'``:
+            Calculate metrics for each label, and find their average, weighted
+            by support (the number of true instances for each label).
+        ``'samples'``:
+            Calculate metrics for each instance, and find their average.
+
+        Will be ignored when ``y_true`` is binary.
+
+    pos_label : int or str, default=1
+        The label of the positive class. Only applied to binary ``y_true``.
+        For multilabel-indicator ``y_true``, ``pos_label`` is fixed to 1.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    average_precision : float
+
+    See Also
+    --------
+    roc_auc_score : Compute the area under the ROC curve.
+    precision_recall_curve : Compute precision-recall pairs for different
+        probability thresholds.
+
+    Notes
+    -----
+    .. versionchanged:: 0.19
+      Instead of linearly interpolating between operating points, precisions
+      are weighted by the change in recall since the last operating point.
+
+    References
+    ----------
+    .. [1] `Wikipedia entry for the Average precision
+           &lt;https://en.wikipedia.org/w/index.php?title=Information_retrieval&
+           oldid=793358396#Average_precision&gt;`_
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.metrics import average_precision_score
+    &gt;&gt;&gt; y_true = np.array([0, 0, 1, 1])
+    &gt;&gt;&gt; y_scores = np.array([0.1, 0.4, 0.35, 0.8])
+    &gt;&gt;&gt; average_precision_score(y_true, y_scores)
+    0.83...
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">_binary_uninterpolated_average_precision</span><span class="grouping">(</span>
+            <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">precision</span><span class="punctuation">,</span> <span class="identifier">recall</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">precision_recall_curve</span><span class="grouping">(</span>
+            <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="identifier">pos_label</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+        <span class="comment"># Return the step function integral</span>
+        <span class="comment"># The following works because the last entry of precision is</span>
+        <span class="comment"># guaranteed to be 1, as returned by precision_recall_curve</span>
+        <span class="keyword">return</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diff</span><span class="grouping">(</span><span class="identifier">recall</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">precision</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"multilabel-indicator"</span> <span class="logical-operator">and</span> <span class="identifier">pos_label</span> <span class="relational-operator">!=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Parameter pos_label is fixed to 1 for "</span>
+                         <span class="string-literal">"multilabel-indicator y_true. Do not set "</span>
+                         <span class="string-literal">"pos_label or set pos_label to 1."</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary"</span><span class="punctuation">:</span>
+        <span class="comment"># Convert to Python primitive type to avoid NumPy type / Python str</span>
+        <span class="comment"># comparison. See https://github.com/numpy/numpy/issues/6784</span>
+        <span class="identifier">present_labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">tolist</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">present_labels</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">2</span> <span class="logical-operator">and</span> <span class="identifier">pos_label</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">present_labels</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"pos_label={pos_label} is not a valid label. It should be "</span>
+                <span class="identifier">f</span><span class="string-literal">"one of {present_labels}"</span>
+            <span class="grouping">)</span>
+    <span class="identifier">average_precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">_binary_uninterpolated_average_precision</span><span class="punctuation">,</span>
+                                <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="identifier">pos_label</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">_average_binary_score</span><span class="grouping">(</span><span class="identifier">average_precision</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span>
+                                 <span class="identifier">average</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">det_curve</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute error rates for different probability thresholds.
+
+    .. note::
+       This metric is used for evaluation of ranking and error tradeoffs of
+       a binary classification task.
+
+    Read more in the :ref:`User Guide &lt;det_curve&gt;`.
+
+    .. versionadded:: 0.24
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples,)
+        True binary labels. If labels are not either {-1, 1} or {0, 1}, then
+        pos_label should be explicitly given.
+
+    y_score : ndarray of shape of (n_samples,)
+        Target scores, can either be probability estimates of the positive
+        class, confidence values, or non-thresholded measure of decisions
+        (as returned by "decision_function" on some classifiers).
+
+    pos_label : int or str, default=None
+        The label of the positive class.
+        When ``pos_label=None``, if `y_true` is in {-1, 1} or {0, 1},
+        ``pos_label`` is set to 1, otherwise an error will be raised.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    fpr : ndarray of shape (n_thresholds,)
+        False positive rate (FPR) such that element i is the false positive
+        rate of predictions with score &gt;= thresholds[i]. This is occasionally
+        referred to as false acceptance propability or fall-out.
+
+    fnr : ndarray of shape (n_thresholds,)
+        False negative rate (FNR) such that element i is the false negative
+        rate of predictions with score &gt;= thresholds[i]. This is occasionally
+        referred to as false rejection or miss rate.
+
+    thresholds : ndarray of shape (n_thresholds,)
+        Decreasing score values.
+
+    See Also
+    --------
+    plot_det_curve : Plot detection error tradeoff (DET) curve.
+    DetCurveDisplay : DET curve visualization.
+    roc_curve : Compute Receiver operating characteristic (ROC) curve.
+    precision_recall_curve : Compute precision-recall curve.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.metrics import det_curve
+    &gt;&gt;&gt; y_true = np.array([0, 0, 1, 1])
+    &gt;&gt;&gt; y_scores = np.array([0.1, 0.4, 0.35, 0.8])
+    &gt;&gt;&gt; fpr, fnr, thresholds = det_curve(y_true, y_scores)
+    &gt;&gt;&gt; fpr
+    array([0.5, 0.5, 0. ])
+    &gt;&gt;&gt; fnr
+    array([0. , 0.5, 0.5])
+    &gt;&gt;&gt; thresholds
+    array([0.35, 0.4 , 0.8 ])
+    """</span>
+    <span class="identifier">fps</span><span class="punctuation">,</span> <span class="identifier">tps</span><span class="punctuation">,</span> <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_binary_clf_curve</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="identifier">pos_label</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span>
+    <span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Only one class present in y_true. Detection error "</span>
+                         <span class="string-literal">"tradeoff curve is not defined in that case."</span><span class="grouping">)</span>
+
+    <span class="identifier">fns</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">tps</span>
+    <span class="identifier">p_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">n_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+    <span class="comment"># start with false positives zero</span>
+    <span class="identifier">first_ind</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+        <span class="identifier">fps</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">fps</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="string-literal">'right'</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+        <span class="keyword">if</span> <span class="identifier">fps</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">fps</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="arithmetic-assignment">=</span><span class="string-literal">'right'</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+        <span class="keyword">else</span> <span class="none-literal">None</span>
+    <span class="grouping">)</span>
+    <span class="comment"># stop with false negatives zero</span>
+    <span class="identifier">last_ind</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">tps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+    <span class="identifier">sl</span> <span class="arithmetic-assignment">=</span> <span class="identifier">slice</span><span class="grouping">(</span><span class="identifier">first_ind</span><span class="punctuation">,</span> <span class="identifier">last_ind</span><span class="grouping">)</span>
+
+    <span class="comment"># reverse the output such that list of false positives is decreasing</span>
+    <span class="keyword">return</span> <span class="grouping">(</span>
+        <span class="identifier">fps</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_count</span><span class="punctuation">,</span>
+        <span class="identifier">fns</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">p_count</span><span class="punctuation">,</span>
+        <span class="identifier">thresholds</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_binary_roc_auc_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">max_fpr</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Binary roc auc score."""</span>
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Only one class present in y_true. ROC AUC score "</span>
+                         <span class="string-literal">"is not defined in that case."</span><span class="grouping">)</span>
+
+    <span class="identifier">fpr</span><span class="punctuation">,</span> <span class="identifier">tpr</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">roc_curve</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span>
+                            <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">max_fpr</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">max_fpr</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">auc</span><span class="grouping">(</span><span class="identifier">fpr</span><span class="punctuation">,</span> <span class="identifier">tpr</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">max_fpr</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">max_fpr</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Expected max_fpr in range (0, 1], got: %r"</span> <span class="arithmetic-operator">%</span> <span class="identifier">max_fpr</span><span class="grouping">)</span>
+
+    <span class="comment"># Add a single point at max_fpr by linear interpolation</span>
+    <span class="identifier">stop</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">fpr</span><span class="punctuation">,</span> <span class="identifier">max_fpr</span><span class="punctuation">,</span> <span class="string-literal">'right'</span><span class="grouping">)</span>
+    <span class="identifier">x_interp</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">fpr</span><span class="grouping">[</span><span class="identifier">stop</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">fpr</span><span class="grouping">[</span><span class="identifier">stop</span><span class="grouping">]</span><span class="grouping">]</span>
+    <span class="identifier">y_interp</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">tpr</span><span class="grouping">[</span><span class="identifier">stop</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">tpr</span><span class="grouping">[</span><span class="identifier">stop</span><span class="grouping">]</span><span class="grouping">]</span>
+    <span class="identifier">tpr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">tpr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">stop</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">interp</span><span class="grouping">(</span><span class="identifier">max_fpr</span><span class="punctuation">,</span> <span class="identifier">x_interp</span><span class="punctuation">,</span> <span class="identifier">y_interp</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">fpr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">fpr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">stop</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">max_fpr</span><span class="grouping">)</span>
+    <span class="identifier">partial_auc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">auc</span><span class="grouping">(</span><span class="identifier">fpr</span><span class="punctuation">,</span> <span class="identifier">tpr</span><span class="grouping">)</span>
+
+    <span class="comment"># McClish correction: standardize result to be 0.5 if non-discriminant</span>
+    <span class="comment"># and 1 if maximal</span>
+    <span class="identifier">min_area</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">max_fpr</span><span class="arithmetic-operator">**</span><span class="int-literal">2</span>
+    <span class="identifier">max_area</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_fpr</span>
+    <span class="keyword">return</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">partial_auc</span> <span class="arithmetic-operator">-</span> <span class="identifier">min_area</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">max_area</span> <span class="arithmetic-operator">-</span> <span class="identifier">min_area</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">roc_auc_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="string-literal">"macro"</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                  <span class="identifier">max_fpr</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">multi_class</span><span class="arithmetic-assignment">=</span><span class="string-literal">"raise"</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Area Under the Receiver Operating Characteristic Curve (ROC AUC)
+    from prediction scores.
+
+    Note: this implementation can be used with binary, multiclass and
+    multilabel classification, but some restrictions apply (see Parameters).
+
+    Read more in the :ref:`User Guide &lt;roc_metrics&gt;`.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,) or (n_samples, n_classes)
+        True labels or binary label indicators. The binary and multiclass cases
+        expect labels with shape (n_samples,) while the multilabel case expects
+        binary label indicators with shape (n_samples, n_classes).
+
+    y_score : array-like of shape (n_samples,) or (n_samples, n_classes)
+        Target scores.
+
+        * In the binary case, it corresponds to an array of shape
+          `(n_samples,)`. Both probability estimates and non-thresholded
+          decision values can be provided. The probability estimates correspond
+          to the **probability of the class with the greater label**,
+          i.e. `estimator.classes_[1]` and thus
+          `estimator.predict_proba(X, y)[:, 1]`. The decision values
+          corresponds to the output of `estimator.decision_function(X, y)`.
+          See more information in the :ref:`User guide &lt;roc_auc_binary&gt;`;
+        * In the multiclass case, it corresponds to an array of shape
+          `(n_samples, n_classes)` of probability estimates provided by the
+          `predict_proba` method. The probability estimates **must**
+          sum to 1 across the possible classes. In addition, the order of the
+          class scores must correspond to the order of ``labels``,
+          if provided, or else to the numerical or lexicographical order of
+          the labels in ``y_true``. See more information in the
+          :ref:`User guide &lt;roc_auc_multiclass&gt;`;
+        * In the multilabel case, it corresponds to an array of shape
+          `(n_samples, n_classes)`. Probability estimates are provided by the
+          `predict_proba` method and the non-thresholded decision values by
+          the `decision_function` method. The probability estimates correspond
+          to the **probability of the class with the greater label for each
+          output** of the classifier. See more information in the
+          :ref:`User guide &lt;roc_auc_multilabel&gt;`.
+
+    average : {'micro', 'macro', 'samples', 'weighted'} or None, \
+            default='macro'
+        If ``None``, the scores for each class are returned. Otherwise,
+        this determines the type of averaging performed on the data:
+        Note: multiclass ROC AUC currently only handles the 'macro' and
+        'weighted' averages.
+
+        ``'micro'``:
+            Calculate metrics globally by considering each element of the label
+            indicator matrix as a label.
+        ``'macro'``:
+            Calculate metrics for each label, and find their unweighted
+            mean.  This does not take label imbalance into account.
+        ``'weighted'``:
+            Calculate metrics for each label, and find their average, weighted
+            by support (the number of true instances for each label).
+        ``'samples'``:
+            Calculate metrics for each instance, and find their average.
+
+        Will be ignored when ``y_true`` is binary.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    max_fpr : float &gt; 0 and &lt;= 1, default=None
+        If not ``None``, the standardized partial AUC [2]_ over the range
+        [0, max_fpr] is returned. For the multiclass case, ``max_fpr``,
+        should be either equal to ``None`` or ``1.0`` as AUC ROC partial
+        computation currently is not supported for multiclass.
+
+    multi_class : {'raise', 'ovr', 'ovo'}, default='raise'
+        Only used for multiclass targets. Determines the type of configuration
+        to use. The default value raises an error, so either
+        ``'ovr'`` or ``'ovo'`` must be passed explicitly.
+
+        ``'ovr'``:
+            Stands for One-vs-rest. Computes the AUC of each class
+            against the rest [3]_ [4]_. This
+            treats the multiclass case in the same way as the multilabel case.
+            Sensitive to class imbalance even when ``average == 'macro'``,
+            because class imbalance affects the composition of each of the
+            'rest' groupings.
+        ``'ovo'``:
+            Stands for One-vs-one. Computes the average AUC of all
+            possible pairwise combinations of classes [5]_.
+            Insensitive to class imbalance when
+            ``average == 'macro'``.
+
+    labels : array-like of shape (n_classes,), default=None
+        Only used for multiclass targets. List of labels that index the
+        classes in ``y_score``. If ``None``, the numerical or lexicographical
+        order of the labels in ``y_true`` is used.
+
+    Returns
+    -------
+    auc : float
+
+    References
+    ----------
+    .. [1] `Wikipedia entry for the Receiver operating characteristic
+            &lt;https://en.wikipedia.org/wiki/Receiver_operating_characteristic&gt;`_
+
+    .. [2] `Analyzing a portion of the ROC curve. McClish, 1989
+            &lt;https://www.ncbi.nlm.nih.gov/pubmed/2668680&gt;`_
+
+    .. [3] Provost, F., Domingos, P. (2000). Well-trained PETs: Improving
+           probability estimation trees (Section 6.2), CeDER Working Paper
+           #IS-00-04, Stern School of Business, New York University.
+
+    .. [4] `Fawcett, T. (2006). An introduction to ROC analysis. Pattern
+            Recognition Letters, 27(8), 861-874.
+            &lt;https://www.sciencedirect.com/science/article/pii/S016786550500303X&gt;`_
+
+    .. [5] `Hand, D.J., Till, R.J. (2001). A Simple Generalisation of the Area
+            Under the ROC Curve for Multiple Class Classification Problems.
+            Machine Learning, 45(2), 171-186.
+            &lt;http://link.springer.com/article/10.1023/A:1010920819831&gt;`_
+
+    See Also
+    --------
+    average_precision_score : Area under the precision-recall curve.
+    roc_curve : Compute Receiver operating characteristic (ROC) curve.
+    plot_roc_curve : Plot Receiver operating characteristic (ROC) curve.
+
+    Examples
+    --------
+    Binary case:
+
+    &gt;&gt;&gt; from sklearn.datasets import load_breast_cancer
+    &gt;&gt;&gt; from sklearn.linear_model import LogisticRegression
+    &gt;&gt;&gt; from sklearn.metrics import roc_auc_score
+    &gt;&gt;&gt; X, y = load_breast_cancer(return_X_y=True)
+    &gt;&gt;&gt; clf = LogisticRegression(solver="liblinear", random_state=0).fit(X, y)
+    &gt;&gt;&gt; roc_auc_score(y, clf.predict_proba(X)[:, 1])
+    0.99...
+    &gt;&gt;&gt; roc_auc_score(y, clf.decision_function(X))
+    0.99...
+
+    Multiclass case:
+
+    &gt;&gt;&gt; from sklearn.datasets import load_iris
+    &gt;&gt;&gt; X, y = load_iris(return_X_y=True)
+    &gt;&gt;&gt; clf = LogisticRegression(solver="liblinear").fit(X, y)
+    &gt;&gt;&gt; roc_auc_score(y, clf.predict_proba(X), multi_class='ovr')
+    0.99...
+
+    Multilabel case:
+
+    &gt;&gt;&gt; from sklearn.datasets import make_multilabel_classification
+    &gt;&gt;&gt; from sklearn.multioutput import MultiOutputClassifier
+    &gt;&gt;&gt; X, y = make_multilabel_classification(random_state=0)
+    &gt;&gt;&gt; clf = MultiOutputClassifier(clf).fit(X, y)
+    &gt;&gt;&gt; # get a list of n_output containing probability arrays of shape
+    &gt;&gt;&gt; # (n_samples, n_classes)
+    &gt;&gt;&gt; y_pred = clf.predict_proba(X)
+    &gt;&gt;&gt; # extract the positive columns for each output
+    &gt;&gt;&gt; y_pred = np.transpose([pred[:, 1] for pred in y_pred])
+    &gt;&gt;&gt; roc_auc_score(y, y_pred, average=None)
+    array([0.82..., 0.86..., 0.94..., 0.85... , 0.94...])
+    &gt;&gt;&gt; from sklearn.linear_model import RidgeClassifierCV
+    &gt;&gt;&gt; clf = RidgeClassifierCV().fit(X, y)
+    &gt;&gt;&gt; roc_auc_score(y, clf.decision_function(X), average=None)
+    array([0.81..., 0.84... , 0.93..., 0.87..., 0.94...])
+    """</span>
+
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"multiclass" or (y_type == "binary"</span> <span class="logical-operator">and</span>
+                                  <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span> <span class="logical-operator">and</span>
+                                  <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># do not support partial ROC computation for multiclass</span>
+        <span class="keyword">if</span> <span class="identifier">max_fpr</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">max_fpr</span> <span class="relational-operator">!=</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Partial AUC computation not available in "</span>
+                             <span class="string-literal">"multiclass setting, 'max_fpr' must be"</span>
+                             <span class="string-literal">" set to `None`, received `max_fpr={0}` "</span>
+                             <span class="string-literal">"instead"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">max_fpr</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">multi_class</span> <span class="relational-operator">==</span> <span class="string-literal">'raise'</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"multi_class must be in ('ovo', 'ovr')"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">_multiclass_roc_auc_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="punctuation">,</span>
+                                         <span class="identifier">multi_class</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary"</span><span class="punctuation">:</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+        <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">label_binarize</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="identifier">labels</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">_average_binary_score</span><span class="grouping">(</span><span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">_binary_roc_auc_score</span><span class="punctuation">,</span>
+                                             <span class="identifier">max_fpr</span><span class="arithmetic-assignment">=</span><span class="identifier">max_fpr</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="punctuation">,</span>
+                                     <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># multilabel-indicator</span>
+        <span class="keyword">return</span> <span class="identifier">_average_binary_score</span><span class="grouping">(</span><span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">_binary_roc_auc_score</span><span class="punctuation">,</span>
+                                             <span class="identifier">max_fpr</span><span class="arithmetic-assignment">=</span><span class="identifier">max_fpr</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="punctuation">,</span>
+                                     <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_multiclass_roc_auc_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="punctuation">,</span>
+                              <span class="identifier">multi_class</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Multiclass roc auc score.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True multiclass labels.
+
+    y_score : array-like of shape (n_samples, n_classes)
+        Target scores corresponding to probability estimates of a sample
+        belonging to a particular class
+
+    labels : array-like of shape (n_classes,) or None
+        List of labels to index ``y_score`` used for multiclass. If ``None``,
+        the lexical order of ``y_true`` is used to index ``y_score``.
+
+    multi_class : {'ovr', 'ovo'}
+        Determines the type of multiclass configuration to use.
+        ``'ovr'``:
+            Calculate metrics for the multiclass case using the one-vs-rest
+            approach.
+        ``'ovo'``:
+            Calculate metrics for the multiclass case using the one-vs-one
+            approach.
+
+    average : {'macro', 'weighted'}
+        Determines the type of averaging performed on the pairwise binary
+        metric scores
+        ``'macro'``:
+            Calculate metrics for each label, and find their unweighted
+            mean. This does not take label imbalance into account. Classes
+            are assumed to be uniformly distributed.
+        ``'weighted'``:
+            Calculate metrics for each label, taking into account the
+            prevalence of the classes.
+
+    sample_weight : array-like of shape (n_samples,) or None
+        Sample weights.
+
+    """</span>
+    <span class="comment"># validation of the input y_score</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">allclose</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">"Target scores need to be probabilities for multiclass "</span>
+            <span class="string-literal">"roc_auc, i.e. they should sum up to 1.0 over classes"</span><span class="grouping">)</span>
+
+    <span class="comment"># validation for multiclass parameter specifications</span>
+    <span class="identifier">average_options</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"macro", "weighted"</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">average</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">average_options</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"average must be one of {0} for "</span>
+                         <span class="string-literal">"multiclass problems"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">average_options</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">multiclass_options</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"ovo", "ovr"</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">multi_class</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">multiclass_options</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"multi_class='{0}' is not supported "</span>
+                         <span class="string-literal">"for multiclass ROC AUC, multi_class must be "</span>
+                         <span class="string-literal">"in {1}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                                <span class="identifier">multi_class</span><span class="punctuation">,</span> <span class="identifier">multiclass_options</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">labels</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_unique</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Parameter 'labels' must be unique"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array_equal</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Parameter 'labels' must be ordered"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Number of given labels, {0}, not equal to the number "</span>
+                <span class="string-literal">"of columns in 'y_score', {1}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                    <span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">setdiff1d</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"'y_true' contains labels not in parameter 'labels'"</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_unique</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Number of classes in y_true not equal to the number of "</span>
+                <span class="string-literal">"columns in 'y_score'"</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">multi_class</span> <span class="relational-operator">==</span> <span class="string-literal">"ovo"</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"sample_weight is not supported "</span>
+                             <span class="string-literal">"for multiclass one-vs-one ROC AUC, "</span>
+                             <span class="string-literal">"'sample_weight' must be None in this case."</span><span class="grouping">)</span>
+        <span class="identifier">y_true_encoded</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_encode</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">uniques</span><span class="arithmetic-assignment">=</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+        <span class="comment"># Hand & Till (2001) implementation (ovo)</span>
+        <span class="keyword">return</span> <span class="identifier">_average_multiclass_ovo_score</span><span class="grouping">(</span><span class="identifier">_binary_roc_auc_score</span><span class="punctuation">,</span>
+                                             <span class="identifier">y_true_encoded</span><span class="punctuation">,</span>
+                                             <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="identifier">average</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># ovr is same as multi-label</span>
+        <span class="identifier">y_true_multilabel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">label_binarize</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">_average_binary_score</span><span class="grouping">(</span><span class="identifier">_binary_roc_auc_score</span><span class="punctuation">,</span> <span class="identifier">y_true_multilabel</span><span class="punctuation">,</span>
+                                     <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="punctuation">,</span>
+                                     <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_binary_clf_curve</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Calculate true and false positives per binary classification threshold.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples,)
+        True targets of binary classification.
+
+    y_score : ndarray of shape (n_samples,)
+        Estimated probabilities or output of a decision function.
+
+    pos_label : int or str, default=None
+        The label of the positive class.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    fps : ndarray of shape (n_thresholds,)
+        A count of false positives, at index i being the number of negative
+        samples assigned a score &gt;= thresholds[i]. The total number of
+        negative samples is equal to fps[-1] (thus true negatives are given by
+        fps[-1] - fps).
+
+    tps : ndarray of shape (n_thresholds,)
+        An increasing count of true positives, at index i being the number
+        of positive samples assigned a score &gt;= thresholds[i]. The total
+        number of positive samples is equal to tps[-1] (thus false negatives
+        are given by tps[-1] - tps).
+
+    thresholds : ndarray of shape (n_thresholds,)
+        Decreasing score values.
+    """</span>
+    <span class="comment"># Check to make sure y_true is valid</span>
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary"</span> <span class="logical-operator">or</span>
+            <span class="grouping">(</span><span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"multiclass"</span> <span class="logical-operator">and</span> <span class="identifier">pos_label</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"{0} format is not supported"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">y_type</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="grouping">)</span>
+    <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="grouping">)</span>
+
+    <span class="comment"># Filter out zero-weighted samples, as they should not impact the result</span>
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="grouping">)</span>
+        <span class="identifier">nonzero_weight_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span>
+        <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="grouping">[</span><span class="identifier">nonzero_weight_mask</span><span class="grouping">]</span>
+        <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_score</span><span class="grouping">[</span><span class="identifier">nonzero_weight_mask</span><span class="grouping">]</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">nonzero_weight_mask</span><span class="grouping">]</span>
+
+    <span class="identifier">pos_label</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_pos_label_consistency</span><span class="grouping">(</span><span class="identifier">pos_label</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="grouping">)</span>
+
+    <span class="comment"># make y_true a boolean vector</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">y_true</span> <span class="relational-operator">==</span> <span class="identifier">pos_label</span><span class="grouping">)</span>
+
+    <span class="comment"># sort scores and corresponding truth values</span>
+    <span class="identifier">desc_score_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">"mergesort"</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_score</span><span class="grouping">[</span><span class="identifier">desc_score_indices</span><span class="grouping">]</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="grouping">[</span><span class="identifier">desc_score_indices</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">desc_score_indices</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">weight</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+
+    <span class="comment"># y_score typically has many tied values. Here we extract</span>
+    <span class="comment"># the indices associated with the distinct values. We also</span>
+    <span class="comment"># concatenate a value for the end of the curve.</span>
+    <span class="identifier">distinct_value_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diff</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="identifier">threshold_idxs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="identifier">distinct_value_indices</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span>
+
+    <span class="comment"># accumulate the true positives with decreasing threshold</span>
+    <span class="identifier">tps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">stable_cumsum</span><span class="grouping">(</span><span class="identifier">y_true</span> <span class="arithmetic-operator">*</span> <span class="identifier">weight</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">threshold_idxs</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="comment"># express fps as a cumsum to ensure fps is increasing even in</span>
+        <span class="comment"># the presence of floating point errors</span>
+        <span class="identifier">fps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">stable_cumsum</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">y_true</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">weight</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">threshold_idxs</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">fps</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">+</span> <span class="identifier">threshold_idxs</span> <span class="arithmetic-operator">-</span> <span class="identifier">tps</span>
+    <span class="keyword">return</span> <span class="identifier">fps</span><span class="punctuation">,</span> <span class="identifier">tps</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="grouping">[</span><span class="identifier">threshold_idxs</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">precision_recall_curve</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">probas_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                           <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute precision-recall pairs for different probability thresholds.
+
+    Note: this implementation is restricted to the binary classification task.
+
+    The precision is the ratio ``tp / (tp + fp)`` where ``tp`` is the number of
+    true positives and ``fp`` the number of false positives. The precision is
+    intuitively the ability of the classifier not to label as positive a sample
+    that is negative.
+
+    The recall is the ratio ``tp / (tp + fn)`` where ``tp`` is the number of
+    true positives and ``fn`` the number of false negatives. The recall is
+    intuitively the ability of the classifier to find all the positive samples.
+
+    The last precision and recall values are 1. and 0. respectively and do not
+    have a corresponding threshold. This ensures that the graph starts on the
+    y axis.
+
+    Read more in the :ref:`User Guide &lt;precision_recall_f_measure_metrics&gt;`.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples,)
+        True binary labels. If labels are not either {-1, 1} or {0, 1}, then
+        pos_label should be explicitly given.
+
+    probas_pred : ndarray of shape (n_samples,)
+        Target scores, can either be probability estimates of the positive
+        class, or non-thresholded measure of decisions (as returned by
+        `decision_function` on some classifiers).
+
+    pos_label : int or str, default=None
+        The label of the positive class.
+        When ``pos_label=None``, if y_true is in {-1, 1} or {0, 1},
+        ``pos_label`` is set to 1, otherwise an error will be raised.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    precision : ndarray of shape (n_thresholds + 1,)
+        Precision values such that element i is the precision of
+        predictions with score &gt;= thresholds[i] and the last element is 1.
+
+    recall : ndarray of shape (n_thresholds + 1,)
+        Decreasing recall values such that element i is the recall of
+        predictions with score &gt;= thresholds[i] and the last element is 0.
+
+    thresholds : ndarray of shape (n_thresholds,)
+        Increasing thresholds on the decision function used to compute
+        precision and recall. n_thresholds &lt;= len(np.unique(probas_pred)).
+
+    See Also
+    --------
+    plot_precision_recall_curve : Plot Precision Recall Curve for binary
+        classifiers.
+    PrecisionRecallDisplay : Precision Recall visualization.
+    average_precision_score : Compute average precision from prediction scores.
+    det_curve: Compute error rates for different probability thresholds.
+    roc_curve : Compute Receiver operating characteristic (ROC) curve.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.metrics import precision_recall_curve
+    &gt;&gt;&gt; y_true = np.array([0, 0, 1, 1])
+    &gt;&gt;&gt; y_scores = np.array([0.1, 0.4, 0.35, 0.8])
+    &gt;&gt;&gt; precision, recall, thresholds = precision_recall_curve(
+    ...     y_true, y_scores)
+    &gt;&gt;&gt; precision
+    array([0.66666667, 0.5       , 1.        , 1.        ])
+    &gt;&gt;&gt; recall
+    array([1. , 0.5, 0.5, 0. ])
+    &gt;&gt;&gt; thresholds
+    array([0.35, 0.4 , 0.8 ])
+
+    """</span>
+    <span class="identifier">fps</span><span class="punctuation">,</span> <span class="identifier">tps</span><span class="punctuation">,</span> <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_binary_clf_curve</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">probas_pred</span><span class="punctuation">,</span>
+                                             <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="identifier">pos_label</span><span class="punctuation">,</span>
+                                             <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">tps</span> <span class="arithmetic-operator">+</span> <span class="identifier">fps</span><span class="grouping">)</span>
+    <span class="identifier">precision</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">precision</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="identifier">recall</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span> <span class="arithmetic-operator">/</span> <span class="identifier">tps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+    <span class="comment"># stop when full recall attained</span>
+    <span class="comment"># and reverse the outputs so recall is decreasing</span>
+    <span class="identifier">last_ind</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">tps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">sl</span> <span class="arithmetic-assignment">=</span> <span class="identifier">slice</span><span class="grouping">(</span><span class="identifier">last_ind</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="identifier">precision</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="identifier">recall</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">thresholds</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">roc_curve</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+              <span class="identifier">drop_intermediate</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Receiver operating characteristic (ROC).
+
+    Note: this implementation is restricted to the binary classification task.
+
+    Read more in the :ref:`User Guide &lt;roc_metrics&gt;`.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples,)
+        True binary labels. If labels are not either {-1, 1} or {0, 1}, then
+        pos_label should be explicitly given.
+
+    y_score : ndarray of shape (n_samples,)
+        Target scores, can either be probability estimates of the positive
+        class, confidence values, or non-thresholded measure of decisions
+        (as returned by "decision_function" on some classifiers).
+
+    pos_label : int or str, default=None
+        The label of the positive class.
+        When ``pos_label=None``, if `y_true` is in {-1, 1} or {0, 1},
+        ``pos_label`` is set to 1, otherwise an error will be raised.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    drop_intermediate : bool, default=True
+        Whether to drop some suboptimal thresholds which would not appear
+        on a plotted ROC curve. This is useful in order to create lighter
+        ROC curves.
+
+        .. versionadded:: 0.17
+           parameter *drop_intermediate*.
+
+    Returns
+    -------
+    fpr : ndarray of shape (&gt;2,)
+        Increasing false positive rates such that element i is the false
+        positive rate of predictions with score &gt;= `thresholds[i]`.
+
+    tpr : ndarray of shape (&gt;2,)
+        Increasing true positive rates such that element `i` is the true
+        positive rate of predictions with score &gt;= `thresholds[i]`.
+
+    thresholds : ndarray of shape = (n_thresholds,)
+        Decreasing thresholds on the decision function used to compute
+        fpr and tpr. `thresholds[0]` represents no instances being predicted
+        and is arbitrarily set to `max(y_score) + 1`.
+
+    See Also
+    --------
+    plot_roc_curve : Plot Receiver operating characteristic (ROC) curve.
+    RocCurveDisplay : ROC Curve visualization.
+    det_curve: Compute error rates for different probability thresholds.
+    roc_auc_score : Compute the area under the ROC curve.
+
+    Notes
+    -----
+    Since the thresholds are sorted from low to high values, they
+    are reversed upon returning them to ensure they correspond to both ``fpr``
+    and ``tpr``, which are sorted in reversed order during their calculation.
+
+    References
+    ----------
+    .. [1] `Wikipedia entry for the Receiver operating characteristic
+            &lt;https://en.wikipedia.org/wiki/Receiver_operating_characteristic&gt;`_
+
+    .. [2] Fawcett T. An introduction to ROC analysis[J]. Pattern Recognition
+           Letters, 2006, 27(8):861-874.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn import metrics
+    &gt;&gt;&gt; y = np.array([1, 1, 2, 2])
+    &gt;&gt;&gt; scores = np.array([0.1, 0.4, 0.35, 0.8])
+    &gt;&gt;&gt; fpr, tpr, thresholds = metrics.roc_curve(y, scores, pos_label=2)
+    &gt;&gt;&gt; fpr
+    array([0. , 0. , 0.5, 0.5, 1. ])
+    &gt;&gt;&gt; tpr
+    array([0. , 0.5, 0.5, 1. , 1. ])
+    &gt;&gt;&gt; thresholds
+    array([1.8 , 0.8 , 0.4 , 0.35, 0.1 ])
+
+    """</span>
+    <span class="identifier">fps</span><span class="punctuation">,</span> <span class="identifier">tps</span><span class="punctuation">,</span> <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_binary_clf_curve</span><span class="grouping">(</span>
+        <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="identifier">pos_label</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="comment"># Attempt to drop thresholds corresponding to points in between and</span>
+    <span class="comment"># collinear with other points. These are always suboptimal and do not</span>
+    <span class="comment"># appear on a plotted ROC curve (and thus do not affect the AUC).</span>
+    <span class="comment"># Here np.diff(_, 2) is used as a "second derivative" to tell if there</span>
+    <span class="comment"># is a corner at the point. Both fps and tps must be tested to handle</span>
+    <span class="comment"># thresholds with multiple data points (which are combined in</span>
+    <span class="comment"># _binary_clf_curve). This keeps all cases where the point should be kept,</span>
+    <span class="comment"># but does not drop more complicated cases like fps = [1, 3, 7],</span>
+    <span class="comment"># tps = [1, 2, 4]; there is no harm in keeping too many thresholds.</span>
+    <span class="keyword">if</span> <span class="identifier">drop_intermediate</span> <span class="logical-operator">and</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">fps</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="identifier">optimal_idxs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                      <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_or</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diff</span><span class="grouping">(</span><span class="identifier">fps</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                                    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diff</span><span class="grouping">(</span><span class="identifier">tps</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                      <span class="bool-literal">True</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">fps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fps</span><span class="grouping">[</span><span class="identifier">optimal_idxs</span><span class="grouping">]</span>
+        <span class="identifier">tps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span><span class="grouping">[</span><span class="identifier">optimal_idxs</span><span class="grouping">]</span>
+        <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">thresholds</span><span class="grouping">[</span><span class="identifier">optimal_idxs</span><span class="grouping">]</span>
+
+    <span class="comment"># Add an extra threshold position</span>
+    <span class="comment"># to make sure that the curve starts at (0, 0)</span>
+    <span class="identifier">tps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">tps</span><span class="grouping">]</span>
+    <span class="identifier">fps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">fps</span><span class="grouping">]</span>
+    <span class="identifier">thresholds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">r_</span><span class="grouping">[</span><span class="identifier">thresholds</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">thresholds</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="identifier">fps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"No negative samples in y_true, "</span>
+                      <span class="string-literal">"false positive value should be meaningless"</span><span class="punctuation">,</span>
+                      <span class="identifier">UndefinedMetricWarning</span><span class="grouping">)</span>
+        <span class="identifier">fpr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">repeat</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nan</span><span class="punctuation">,</span> <span class="identifier">fps</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">fpr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fps</span> <span class="arithmetic-operator">/</span> <span class="identifier">fps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="identifier">tps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"No positive samples in y_true, "</span>
+                      <span class="string-literal">"true positive value should be meaningless"</span><span class="punctuation">,</span>
+                      <span class="identifier">UndefinedMetricWarning</span><span class="grouping">)</span>
+        <span class="identifier">tpr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">repeat</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nan</span><span class="punctuation">,</span> <span class="identifier">tps</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">tpr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tps</span> <span class="arithmetic-operator">/</span> <span class="identifier">tps</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+    <span class="keyword">return</span> <span class="identifier">fpr</span><span class="punctuation">,</span> <span class="identifier">tpr</span><span class="punctuation">,</span> <span class="identifier">thresholds</span>
+
+
+<span class="keyword">def</span> <span class="identifier">label_ranking_average_precision_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                                          <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute ranking-based average precision.
+
+    Label ranking average precision (LRAP) is the average over each ground
+    truth label assigned to each sample, of the ratio of true vs. total
+    labels with lower score.
+
+    This metric is used in multilabel ranking problem, where the goal
+    is to give better rank to the labels associated to each sample.
+
+    The obtained score is always strictly greater than 0 and
+    the best value is 1.
+
+    Read more in the :ref:`User Guide &lt;label_ranking_average_precision&gt;`.
+
+    Parameters
+    ----------
+    y_true : {ndarray, sparse matrix} of shape (n_samples, n_labels)
+        True binary labels in binary indicator format.
+
+    y_score : ndarray of shape (n_samples, n_labels)
+        Target scores, can either be probability estimates of the positive
+        class, confidence values, or non-thresholded measure of decisions
+        (as returned by "decision_function" on some classifiers).
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+        .. versionadded:: 0.20
+
+    Returns
+    -------
+    score : float
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.metrics import label_ranking_average_precision_score
+    &gt;&gt;&gt; y_true = np.array([[1, 0, 0], [0, 0, 1]])
+    &gt;&gt;&gt; y_score = np.array([[0.75, 0.5, 1], [1, 0.2, 0.1]])
+    &gt;&gt;&gt; label_ranking_average_precision_score(y_true, y_score)
+    0.416...
+
+    """</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="relational-operator">!=</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"y_true and y_score have different shape"</span><span class="grouping">)</span>
+
+    <span class="comment"># Handle badly formatted array and the degenerate case with one label</span>
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">y_type</span> <span class="relational-operator">!=</span> <span class="string-literal">"multilabel-indicator"</span> <span class="logical-operator">and</span>
+            <span class="logical-operator">not</span> <span class="grouping">(</span><span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary"</span> <span class="logical-operator">and</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"{0} format is not supported"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">y_type</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">csr_matrix</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">y_score</span>
+
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+    <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">start</span><span class="punctuation">,</span> <span class="identifier">stop</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">indptr</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">relevant</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">indices</span><span class="grouping">[</span><span class="identifier">start</span><span class="punctuation">:</span><span class="identifier">stop</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">relevant</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">relevant</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">==</span> <span class="identifier">n_labels</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># If all labels are relevant or unrelevant, the score is also</span>
+            <span class="comment"># equal to 1. The label ranking has no meaning.</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">scores_i</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_score</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="identifier">rank</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rankdata</span><span class="grouping">(</span><span class="identifier">scores_i</span><span class="punctuation">,</span> <span class="string-literal">'max'</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">relevant</span><span class="grouping">]</span>
+            <span class="identifier">L</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rankdata</span><span class="grouping">(</span><span class="identifier">scores_i</span><span class="grouping">[</span><span class="identifier">relevant</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="string-literal">'max'</span><span class="grouping">)</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">L</span> <span class="arithmetic-operator">/</span> <span class="identifier">rank</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">aux</span> <span class="arithmetic-operator">*</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+        <span class="identifier">out</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">aux</span>
+
+    <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">out</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">n_samples</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">out</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">out</span>
+
+
+<span class="keyword">def</span> <span class="identifier">coverage_error</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Coverage error measure.
+
+    Compute how far we need to go through the ranked scores to cover all
+    true labels. The best value is equal to the average number
+    of labels in ``y_true`` per sample.
+
+    Ties in ``y_scores`` are broken by giving maximal rank that would have
+    been assigned to all tied values.
+
+    Note: Our implementation's score is 1 greater than the one given in
+    Tsoumakas et al., 2010. This extends it to handle the degenerate case
+    in which an instance has 0 true labels.
+
+    Read more in the :ref:`User Guide &lt;coverage_error&gt;`.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples, n_labels)
+        True binary labels in binary indicator format.
+
+    y_score : ndarray of shape (n_samples, n_labels)
+        Target scores, can either be probability estimates of the positive
+        class, confidence values, or non-thresholded measure of decisions
+        (as returned by "decision_function" on some classifiers).
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    coverage_error : float
+
+    References
+    ----------
+    .. [1] Tsoumakas, G., Katakis, I., & Vlahavas, I. (2010).
+           Mining multi-label data. In Data mining and knowledge discovery
+           handbook (pp. 667-685). Springer US.
+
+    """</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">!=</span> <span class="string-literal">"multilabel-indicator"</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"{0} format is not supported"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">y_type</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="relational-operator">!=</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"y_true and y_score have different shape"</span><span class="grouping">)</span>
+
+    <span class="identifier">y_score_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ma</span><span class="punctuation">.</span><span class="identifier">masked_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_not</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">y_min_relevant</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_score_mask</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">coverage</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">y_score</span> <span class="relational-operator">&gt;=</span> <span class="identifier">y_min_relevant</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="identifier">coverage</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coverage</span><span class="punctuation">.</span><span class="identifier">filled</span><span class="grouping">(</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">coverage</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">label_ranking_loss</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Ranking loss measure.
+
+    Compute the average number of label pairs that are incorrectly ordered
+    given y_score weighted by the size of the label set and the number of
+    labels not in the label set.
+
+    This is similar to the error set size, but weighted by the number of
+    relevant and irrelevant labels. The best performance is achieved with
+    a ranking loss of zero.
+
+    Read more in the :ref:`User Guide &lt;label_ranking_loss&gt;`.
+
+    .. versionadded:: 0.17
+       A function *label_ranking_loss*
+
+    Parameters
+    ----------
+    y_true : {ndarray, sparse matrix} of shape (n_samples, n_labels)
+        True binary labels in binary indicator format.
+
+    y_score : ndarray of shape (n_samples, n_labels)
+        Target scores, can either be probability estimates of the positive
+        class, confidence values, or non-thresholded measure of decisions
+        (as returned by "decision_function" on some classifiers).
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights.
+
+    Returns
+    -------
+    loss : float
+
+    References
+    ----------
+    .. [1] Tsoumakas, G., Katakis, I., & Vlahavas, I. (2010).
+           Mining multi-label data. In Data mining and knowledge discovery
+           handbook (pp. 667-685). Springer US.
+    """</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"multilabel-indicator"</span><span class="punctuation">,</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"{0} format is not supported"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">y_type</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="relational-operator">!=</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"y_true and y_score have different shape"</span><span class="grouping">)</span>
+
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">csr_matrix</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+
+    <span class="identifier">loss</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">start</span><span class="punctuation">,</span> <span class="identifier">stop</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">indptr</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Sort and bin the label scores</span>
+        <span class="identifier">unique_scores</span><span class="punctuation">,</span> <span class="identifier">unique_inverse</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                  <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">true_at_reversed_rank</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">bincount</span><span class="grouping">(</span>
+            <span class="identifier">unique_inverse</span><span class="grouping">[</span><span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">indices</span><span class="grouping">[</span><span class="identifier">start</span><span class="punctuation">:</span><span class="identifier">stop</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="identifier">minlength</span><span class="arithmetic-assignment">=</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">unique_scores</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">all_at_reversed_rank</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">bincount</span><span class="grouping">(</span><span class="identifier">unique_inverse</span><span class="punctuation">,</span>
+                                           <span class="identifier">minlength</span><span class="arithmetic-assignment">=</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">unique_scores</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">false_at_reversed_rank</span> <span class="arithmetic-assignment">=</span> <span class="identifier">all_at_reversed_rank</span> <span class="arithmetic-operator">-</span> <span class="identifier">true_at_reversed_rank</span>
+
+        <span class="comment"># if the scores are ordered, it's possible to count the number of</span>
+        <span class="comment"># incorrectly ordered paires in linear time by cumulatively counting</span>
+        <span class="comment"># how many false labels of a given score have a score higher than the</span>
+        <span class="comment"># accumulated true labels with lower score.</span>
+        <span class="identifier">loss</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">true_at_reversed_rank</span><span class="punctuation">.</span><span class="identifier">cumsum</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                         <span class="identifier">false_at_reversed_rank</span><span class="grouping">)</span>
+
+    <span class="identifier">n_positives</span> <span class="arithmetic-assignment">=</span> <span class="identifier">count_nonzero</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="keyword">with</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">errstate</span><span class="grouping">(</span><span class="identifier">divide</span><span class="arithmetic-assignment">=</span><span class="string-literal">"ignore", invalid="ignore"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">loss</span> <span class="arithmetic-assignment">/=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_labels</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_positives</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_positives</span><span class="grouping">)</span>
+
+    <span class="comment"># When there is no positive or no negative labels, those values should</span>
+    <span class="comment"># be consider as correct, i.e. the ranking doesn't matter.</span>
+    <span class="identifier">loss</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_or</span><span class="grouping">(</span><span class="identifier">n_positives</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">n_positives</span> <span class="relational-operator">==</span> <span class="identifier">n_labels</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">loss</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_dcg_sample_scores</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                       <span class="identifier">log_base</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Discounted Cumulative Gain.
+
+    Sum the true scores ranked in the order induced by the predicted scores,
+    after applying a logarithmic discount.
+
+    This ranking metric yields a high value if true labels are ranked high by
+    ``y_score``.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples, n_labels)
+        True targets of multilabel classification, or true scores of entities
+        to be ranked.
+
+    y_score : ndarray of shape (n_samples, n_labels)
+        Target scores, can either be probability estimates, confidence values,
+        or non-thresholded measure of decisions (as returned by
+        "decision_function" on some classifiers).
+
+    k : int, default=None
+        Only consider the highest k scores in the ranking. If None, use all
+        outputs.
+
+    log_base : float, default=2
+        Base of the logarithm used for the discount. A low value means a
+        sharper discount (top results are more important).
+
+    ignore_ties : bool, default=False
+        Assume that there are no ties in y_score (which is likely to be the
+        case if y_score is continuous) for efficiency gains.
+
+    Returns
+    -------
+    discounted_cumulative_gain : ndarray of shape (n_samples,)
+        The DCG score for each sample.
+
+    See Also
+    --------
+    ndcg_score : The Discounted Cumulative Gain divided by the Ideal Discounted
+        Cumulative Gain (the DCG obtained for a perfect ranking), in order to
+        have a score between 0 and 1.
+    """</span>
+    <span class="identifier">discount</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">log_base</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">k</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">discount</span><span class="grouping">[</span><span class="identifier">k</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="keyword">if</span> <span class="identifier">ignore_ties</span><span class="punctuation">:</span>
+        <span class="identifier">ranking</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">ranked</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_true</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">ranking</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">ranking</span><span class="grouping">]</span>
+        <span class="identifier">cumulative_gains</span> <span class="arithmetic-assignment">=</span> <span class="identifier">discount</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">ranked</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">discount_cumsum</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cumsum</span><span class="grouping">(</span><span class="identifier">discount</span><span class="grouping">)</span>
+        <span class="identifier">cumulative_gains</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">_tie_averaged_dcg</span><span class="grouping">(</span><span class="identifier">y_t</span><span class="punctuation">,</span> <span class="identifier">y_s</span><span class="punctuation">,</span> <span class="identifier">discount_cumsum</span><span class="grouping">)</span>
+                            <span class="keyword">for</span> <span class="identifier">y_t</span><span class="punctuation">,</span> <span class="identifier">y_s</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">cumulative_gains</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">cumulative_gains</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">cumulative_gains</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_tie_averaged_dcg</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">discount_cumsum</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Compute DCG by averaging over possible permutations of ties.
+
+    The gain (`y_true`) of an index falling inside a tied group (in the order
+    induced by `y_score`) is replaced by the average gain within this group.
+    The discounted gain for a tied group is then the average `y_true` within
+    this group times the sum of discounts of the corresponding ranks.
+
+    This amounts to averaging scores for all possible orderings of the tied
+    groups.
+
+    (note in the case of dcg@k the discount is 0 after index k)
+
+    Parameters
+    ----------
+    y_true : ndarray
+        The true relevance scores.
+
+    y_score : ndarray
+        Predicted scores.
+
+    discount_cumsum : ndarray
+        Precomputed cumulative sum of the discounts.
+
+    Returns
+    -------
+    discounted_cumulative_gain : float
+        The discounted cumulative gain.
+
+    References
+    ----------
+    McSherry, F., & Najork, M. (2008, March). Computing information retrieval
+    performance measures efficiently in the presence of tied scores. In
+    European conference on information retrieval (pp. 414-421). Springer,
+    Berlin, Heidelberg.
+    """</span>
+    <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">inv</span><span class="punctuation">,</span> <span class="identifier">counts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span>
+        <span class="arithmetic-operator">-</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">v</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">s</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">o</span><span class="invalid">u</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+    <span class="identifier">ranked</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">counts</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">add</span><span class="punctuation">.</span><span class="identifier">at</span><span class="grouping">(</span><span class="identifier">ranked</span><span class="punctuation">,</span> <span class="identifier">inv</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="identifier">ranked</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">counts</span>
+    <span class="identifier">groups</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cumsum</span><span class="grouping">(</span><span class="identifier">counts</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+    <span class="identifier">discount_sums</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">counts</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">discount_sums</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">discount_cumsum</span><span class="grouping">[</span><span class="identifier">groups</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span>
+    <span class="identifier">discount_sums</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diff</span><span class="grouping">(</span><span class="identifier">discount_cumsum</span><span class="grouping">[</span><span class="identifier">groups</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">ranked</span> <span class="arithmetic-operator">*</span> <span class="identifier">discount_sums</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_check_dcg_target_type</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="identifier">supported_fmt</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"multilabel-indicator", "continuous-multioutput"</span><span class="punctuation">,</span>
+                     <span class="string-literal">"multiclass-multioutput"</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">supported_fmt</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">"Only {} formats are supported. Got {} instead"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                <span class="identifier">supported_fmt</span><span class="punctuation">,</span> <span class="identifier">y_type</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">dcg_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+              <span class="identifier">log_base</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Discounted Cumulative Gain.
+
+    Sum the true scores ranked in the order induced by the predicted scores,
+    after applying a logarithmic discount.
+
+    This ranking metric yields a high value if true labels are ranked high by
+    ``y_score``.
+
+    Usually the Normalized Discounted Cumulative Gain (NDCG, computed by
+    ndcg_score) is preferred.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples, n_labels)
+        True targets of multilabel classification, or true scores of entities
+        to be ranked.
+
+    y_score : ndarray of shape (n_samples, n_labels)
+        Target scores, can either be probability estimates, confidence values,
+        or non-thresholded measure of decisions (as returned by
+        "decision_function" on some classifiers).
+
+    k : int, default=None
+        Only consider the highest k scores in the ranking. If None, use all
+        outputs.
+
+    log_base : float, default=2
+        Base of the logarithm used for the discount. A low value means a
+        sharper discount (top results are more important).
+
+    sample_weight : ndarray of shape (n_samples,), default=None
+        Sample weights. If None, all samples are given the same weight.
+
+    ignore_ties : bool, default=False
+        Assume that there are no ties in y_score (which is likely to be the
+        case if y_score is continuous) for efficiency gains.
+
+    Returns
+    -------
+    discounted_cumulative_gain : float
+        The averaged sample DCG scores.
+
+    See Also
+    --------
+    ndcg_score : The Discounted Cumulative Gain divided by the Ideal Discounted
+        Cumulative Gain (the DCG obtained for a perfect ranking), in order to
+        have a score between 0 and 1.
+
+    References
+    ----------
+    `Wikipedia entry for Discounted Cumulative Gain
+    &lt;https://en.wikipedia.org/wiki/Discounted_cumulative_gain&gt;`_.
+
+    Jarvelin, K., & Kekalainen, J. (2002).
+    Cumulated gain-based evaluation of IR techniques. ACM Transactions on
+    Information Systems (TOIS), 20(4), 422-446.
+
+    Wang, Y., Wang, L., Li, Y., He, D., Chen, W., & Liu, T. Y. (2013, May).
+    A theoretical analysis of NDCG ranking measures. In Proceedings of the 26th
+    Annual Conference on Learning Theory (COLT 2013).
+
+    McSherry, F., & Najork, M. (2008, March). Computing information retrieval
+    performance measures efficiently in the presence of tied scores. In
+    European conference on information retrieval (pp. 414-421). Springer,
+    Berlin, Heidelberg.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import dcg_score
+    &gt;&gt;&gt; # we have groud-truth relevance of some answers to a query:
+    &gt;&gt;&gt; true_relevance = np.asarray([[10, 0, 0, 1, 5]])
+    &gt;&gt;&gt; # we predict scores for the answers
+    &gt;&gt;&gt; scores = np.asarray([[.1, .2, .3, 4, 70]])
+    &gt;&gt;&gt; dcg_score(true_relevance, scores)
+    9.49...
+    &gt;&gt;&gt; # we can set k to truncate the sum; only top k answers contribute
+    &gt;&gt;&gt; dcg_score(true_relevance, scores, k=2)
+    5.63...
+    &gt;&gt;&gt; # now we have some ties in our prediction
+    &gt;&gt;&gt; scores = np.asarray([[1, 0, 0, 0, 1]])
+    &gt;&gt;&gt; # by default ties are averaged, so here we get the average true
+    &gt;&gt;&gt; # relevance of our top predictions: (10 + 5) / 2 = 7.5
+    &gt;&gt;&gt; dcg_score(true_relevance, scores, k=1)
+    7.5
+    &gt;&gt;&gt; # we can choose to ignore ties for faster results, but only
+    &gt;&gt;&gt; # if we know there aren't ties in our scores, otherwise we get
+    &gt;&gt;&gt; # wrong results:
+    &gt;&gt;&gt; dcg_score(true_relevance,
+    ...           scores, k=1, ignore_ties=True)
+    5.0
+
+    """</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">_check_dcg_target_type</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span>
+        <span class="identifier">_dcg_sample_scores</span><span class="grouping">(</span>
+            <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">log_base</span><span class="arithmetic-assignment">=</span><span class="identifier">log_base</span><span class="punctuation">,</span>
+            <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="identifier">ignore_ties</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_ndcg_sample_scores</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Normalized Discounted Cumulative Gain.
+
+    Sum the true scores ranked in the order induced by the predicted scores,
+    after applying a logarithmic discount. Then divide by the best possible
+    score (Ideal DCG, obtained for a perfect ranking) to obtain a score between
+    0 and 1.
+
+    This ranking metric yields a high value if true labels are ranked high by
+    ``y_score``.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples, n_labels)
+        True targets of multilabel classification, or true scores of entities
+        to be ranked.
+
+    y_score : ndarray of shape (n_samples, n_labels)
+        Target scores, can either be probability estimates, confidence values,
+        or non-thresholded measure of decisions (as returned by
+        "decision_function" on some classifiers).
+
+    k : int, default=None
+        Only consider the highest k scores in the ranking. If None, use all
+        outputs.
+
+    ignore_ties : bool, default=False
+        Assume that there are no ties in y_score (which is likely to be the
+        case if y_score is continuous) for efficiency gains.
+
+    Returns
+    -------
+    normalized_discounted_cumulative_gain : ndarray of shape (n_samples,)
+        The NDCG score for each sample (float in [0., 1.]).
+
+    See Also
+    --------
+    dcg_score : Discounted Cumulative Gain (not normalized).
+
+    """</span>
+    <span class="identifier">gain</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_dcg_sample_scores</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="identifier">ignore_ties</span><span class="grouping">)</span>
+    <span class="comment"># Here we use the order induced by y_true so we can ignore ties since</span>
+    <span class="comment"># the gain associated to tied indices is the same (permuting ties doesn't</span>
+    <span class="comment"># change the value of the re-ordered y_true)</span>
+    <span class="identifier">normalizing_gain</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_dcg_sample_scores</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+    <span class="identifier">all_irrelevant</span> <span class="arithmetic-assignment">=</span> <span class="identifier">normalizing_gain</span> <span class="relational-operator">==</span> <span class="int-literal">0</span>
+    <span class="identifier">gain</span><span class="grouping">[</span><span class="identifier">all_irrelevant</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="identifier">gain</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">all_irrelevant</span><span class="grouping">]</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">normalizing_gain</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">all_irrelevant</span><span class="grouping">]</span>
+    <span class="keyword">return</span> <span class="identifier">gain</span>
+
+
+<span class="keyword">def</span> <span class="identifier">ndcg_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+               <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute Normalized Discounted Cumulative Gain.
+
+    Sum the true scores ranked in the order induced by the predicted scores,
+    after applying a logarithmic discount. Then divide by the best possible
+    score (Ideal DCG, obtained for a perfect ranking) to obtain a score between
+    0 and 1.
+
+    This ranking metric yields a high value if true labels are ranked high by
+    ``y_score``.
+
+    Parameters
+    ----------
+    y_true : ndarray of shape (n_samples, n_labels)
+        True targets of multilabel classification, or true scores of entities
+        to be ranked.
+
+    y_score : ndarray of shape (n_samples, n_labels)
+        Target scores, can either be probability estimates, confidence values,
+        or non-thresholded measure of decisions (as returned by
+        "decision_function" on some classifiers).
+
+    k : int, default=None
+        Only consider the highest k scores in the ranking. If None, use all
+        outputs.
+
+    sample_weight : ndarray of shape (n_samples,), default=None
+        Sample weights. If None, all samples are given the same weight.
+
+    ignore_ties : bool, default=False
+        Assume that there are no ties in y_score (which is likely to be the
+        case if y_score is continuous) for efficiency gains.
+
+    Returns
+    -------
+    normalized_discounted_cumulative_gain : float in [0., 1.]
+        The averaged NDCG scores for all samples.
+
+    See Also
+    --------
+    dcg_score : Discounted Cumulative Gain (not normalized).
+
+    References
+    ----------
+    `Wikipedia entry for Discounted Cumulative Gain
+    &lt;https://en.wikipedia.org/wiki/Discounted_cumulative_gain&gt;`_
+
+    Jarvelin, K., & Kekalainen, J. (2002).
+    Cumulated gain-based evaluation of IR techniques. ACM Transactions on
+    Information Systems (TOIS), 20(4), 422-446.
+
+    Wang, Y., Wang, L., Li, Y., He, D., Chen, W., & Liu, T. Y. (2013, May).
+    A theoretical analysis of NDCG ranking measures. In Proceedings of the 26th
+    Annual Conference on Learning Theory (COLT 2013)
+
+    McSherry, F., & Najork, M. (2008, March). Computing information retrieval
+    performance measures efficiently in the presence of tied scores. In
+    European conference on information retrieval (pp. 414-421). Springer,
+    Berlin, Heidelberg.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import ndcg_score
+    &gt;&gt;&gt; # we have groud-truth relevance of some answers to a query:
+    &gt;&gt;&gt; true_relevance = np.asarray([[10, 0, 0, 1, 5]])
+    &gt;&gt;&gt; # we predict some scores (relevance) for the answers
+    &gt;&gt;&gt; scores = np.asarray([[.1, .2, .3, 4, 70]])
+    &gt;&gt;&gt; ndcg_score(true_relevance, scores)
+    0.69...
+    &gt;&gt;&gt; scores = np.asarray([[.05, 1.1, 1., .5, .0]])
+    &gt;&gt;&gt; ndcg_score(true_relevance, scores)
+    0.49...
+    &gt;&gt;&gt; # we can set k to truncate the sum; only top k answers contribute.
+    &gt;&gt;&gt; ndcg_score(true_relevance, scores, k=4)
+    0.35...
+    &gt;&gt;&gt; # the normalization takes k into account so a perfect answer
+    &gt;&gt;&gt; # would still get 1.0
+    &gt;&gt;&gt; ndcg_score(true_relevance, true_relevance, k=4)
+    1.0
+    &gt;&gt;&gt; # now we have some ties in our prediction
+    &gt;&gt;&gt; scores = np.asarray([[1, 0, 0, 0, 1]])
+    &gt;&gt;&gt; # by default ties are averaged, so here we get the average (normalized)
+    &gt;&gt;&gt; # true relevance of our top predictions: (10 / 10 + 5 / 10) / 2 = .75
+    &gt;&gt;&gt; ndcg_score(true_relevance, scores, k=1)
+    0.75
+    &gt;&gt;&gt; # we can choose to ignore ties for faster results, but only
+    &gt;&gt;&gt; # if we know there aren't ties in our scores, otherwise we get
+    &gt;&gt;&gt; # wrong results:
+    &gt;&gt;&gt; ndcg_score(true_relevance,
+    ...           scores, k=1, ignore_ties=True)
+    0.5
+
+    """</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="identifier">_check_dcg_target_type</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="identifier">gain</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ndcg_sample_scores</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">ignore_ties</span><span class="arithmetic-assignment">=</span><span class="identifier">ignore_ties</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">gain</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">top_k_accuracy_score</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">normalize</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                         <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Top-k Accuracy classification score.
+
+    This metric computes the number of times where the correct label is among
+    the top `k` labels predicted (ranked by predicted scores). Note that the
+    multilabel case isn't covered here.
+
+    Read more in the :ref:`User Guide &lt;top_k_accuracy_score&gt;`
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True labels.
+
+    y_score : array-like of shape (n_samples,) or (n_samples, n_classes)
+        Target scores. These can be either probability estimates or
+        non-thresholded decision values (as returned by
+        :term:`decision_function` on some classifiers). The binary case expects
+        scores with shape (n_samples,) while the multiclass case expects scores
+        with shape (n_samples, n_classes). In the multiclass case, the order of
+        the class scores must correspond to the order of ``labels``, if
+        provided, or else to the numerical or lexicographical order of the
+        labels in ``y_true``.
+
+    k : int, default=2
+        Number of most likely outcomes considered to find the correct label.
+
+    normalize : bool, default=True
+        If `True`, return the fraction of correctly classified samples.
+        Otherwise, return the number of correctly classified samples.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Sample weights. If `None`, all samples are given the same weight.
+
+    labels : array-like of shape (n_classes,), default=None
+        Multiclass only. List of labels that index the classes in ``y_score``.
+        If ``None``, the numerical or lexicographical order of the labels in
+        ``y_true`` is used.
+
+    Returns
+    -------
+    score : float
+        The top-k accuracy score. The best performance is 1 with
+        `normalize == True` and the number of samples with
+        `normalize == False`.
+
+    See also
+    --------
+    accuracy_score
+
+    Notes
+    -----
+    In cases where two or more labels are assigned equal predicted scores,
+    the labels with the highest indices will be chosen first. This might
+    impact the result if the correct label falls after the threshold because
+    of that.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.metrics import top_k_accuracy_score
+    &gt;&gt;&gt; y_true = np.array([0, 1, 2, 2])
+    &gt;&gt;&gt; y_score = np.array([[0.5, 0.2, 0.2],  # 0 is in top 2
+    ...                     [0.3, 0.4, 0.2],  # 1 is in top 2
+    ...                     [0.2, 0.4, 0.3],  # 2 is in top 2
+    ...                     [0.7, 0.2, 0.1]]) # 2 isn't in top 2
+    &gt;&gt;&gt; top_k_accuracy_score(y_true, y_score, k=2)
+    0.75
+    &gt;&gt;&gt; # Not normalizing gives the number of "correctly" classified samples
+    &gt;&gt;&gt; top_k_accuracy_score(y_true, y_score, k=2, normalize=False)
+    3
+
+    """</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+    <span class="identifier">y_true</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary"</span> <span class="logical-operator">and</span> <span class="identifier">labels</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"multiclass"</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">y_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">'binary'</span> <span class="keyword">else</span> <span class="identifier">y_score</span>
+    <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">{</span><span class="string-literal">'binary', 'multiclass'</span><span class="grouping">}</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="identifier">f</span><span class="string-literal">"y type must be 'binary' or 'multiclass', got '{y_type}' instead."</span>
+        <span class="grouping">)</span>
+
+    <span class="identifier">y_score_n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span> <span class="keyword">else</span> <span class="int-literal">2</span>
+
+    <span class="keyword">if</span> <span class="identifier">labels</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_unique</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="grouping">)</span>
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">!=</span> <span class="identifier">y_score_n_classes</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Number of classes in 'y_true' ({n_classes}) not equal "</span>
+                <span class="identifier">f</span><span class="string-literal">"to the number of classes in 'y_score' ({y_score_n_classes})."</span>
+            <span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">column_or_1d</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_unique</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="identifier">n_labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">!=</span> <span class="identifier">n_labels</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Parameter 'labels' must be unique."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array_equal</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Parameter 'labels' must be ordered."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_classes</span> <span class="relational-operator">!=</span> <span class="identifier">y_score_n_classes</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Number of given labels ({n_classes}) not equal to the "</span>
+                <span class="identifier">f</span><span class="string-literal">"number of classes in 'y_score' ({y_score_n_classes})."</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">setdiff1d</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"'y_true' contains labels not in parameter 'labels'."</span>
+            <span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">k</span> <span class="relational-operator">&gt;=</span> <span class="identifier">n_classes</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span>
+            <span class="identifier">f</span><span class="string-literal">"'k' ({k}) greater than or equal to 'n_classes' ({n_classes}) "</span>
+            <span class="string-literal">"will result in a perfect score and is therefore meaningless."</span><span class="punctuation">,</span>
+            <span class="identifier">UndefinedMetricWarning</span>
+        <span class="grouping">)</span>
+
+    <span class="identifier">y_true_encoded</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_encode</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">uniques</span><span class="arithmetic-assignment">=</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">'binary'</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">k</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">.5</span> <span class="keyword">if</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">0</span> <span class="logical-operator">and</span> <span class="identifier">y_score</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span> <span class="keyword">else</span> <span class="int-literal">0</span>
+            <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">y_score</span> <span class="relational-operator">&gt;</span> <span class="identifier">threshold</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int64</span><span class="grouping">)</span>
+            <span class="identifier">hits</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_pred</span> <span class="relational-operator">==</span> <span class="identifier">y_true_encoded</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">hits</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones_like</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">bool_</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">'multiclass'</span><span class="punctuation">:</span>
+        <span class="identifier">sorted_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">y_score</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'mergesort'</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">hits</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">y_true_encoded</span> <span class="relational-operator">==</span> <span class="identifier">sorted_pred</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="identifier">k</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">normalize</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">hits</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">hits</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">hits</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

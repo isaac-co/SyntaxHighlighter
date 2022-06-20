@@ -1,0 +1,641 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Alexandre Gramfort &lt;alexandre.gramfort@inria.fr&gt;</span>
+<span class="comment">#          Vincent Michel &lt;vincent.michel@inria.fr&gt;</span>
+<span class="comment">#          Gilles Louppe &lt;g.louppe@gmail.com&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="comment">"""Recursive feature elimination for feature ranking"""</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+<span class="keyword">from</span> <span class="identifier">joblib</span> <span class="keyword">import</span> <span class="identifier">Parallel</span><span class="punctuation">,</span> <span class="identifier">effective_n_jobs</span>
+
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">metaestimators</span> <span class="keyword">import</span> <span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">metaestimators</span> <span class="keyword">import</span> <span class="identifier">_safe_split</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_tags</span> <span class="keyword">import</span> <span class="identifier">_safe_tags</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">MetaEstimatorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">clone</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">is_classifier</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">model_selection</span> <span class="keyword">import</span> <span class="identifier">check_cv</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">model_selection</span><span class="punctuation">.</span><span class="identifier">_validation</span> <span class="keyword">import</span> <span class="identifier">_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">check_scoring</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">SelectorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_get_feature_importances</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_rfe_single_fit</span><span class="grouping">(</span><span class="identifier">rfe</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">train</span><span class="punctuation">,</span> <span class="identifier">test</span><span class="punctuation">,</span> <span class="identifier">scorer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Return the score for a fit across one fold.
+    """</span>
+    <span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_split</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">train</span><span class="grouping">)</span>
+    <span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">y_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_split</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">test</span><span class="punctuation">,</span> <span class="identifier">train</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">rfe</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span>
+        <span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span>
+        <span class="keyword">lambda</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="punctuation">:</span> <span class="identifier">_score</span><span class="grouping">(</span>
+            <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">scorer</span>
+        <span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">scores_</span>
+
+
+<span class="keyword">class</span> <span class="identifier">RFE</span><span class="grouping">(</span><span class="identifier">SelectorMixin</span><span class="punctuation">,</span> <span class="identifier">MetaEstimatorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Feature ranking with recursive feature elimination.
+
+    Given an external estimator that assigns weights to features (e.g., the
+    coefficients of a linear model), the goal of recursive feature elimination
+    (RFE) is to select features by recursively considering smaller and smaller
+    sets of features. First, the estimator is trained on the initial set of
+    features and the importance of each feature is obtained either through
+    any specific attribute or callable.
+    Then, the least important features are pruned from current set of features.
+    That procedure is recursively repeated on the pruned set until the desired
+    number of features to select is eventually reached.
+
+    Read more in the :ref:`User Guide &lt;rfe&gt;`.
+
+    Parameters
+    ----------
+    estimator : ``Estimator`` instance
+        A supervised learning estimator with a ``fit`` method that provides
+        information about feature importance
+        (e.g. `coef_`, `feature_importances_`).
+
+    n_features_to_select : int or float, default=None
+        The number of features to select. If `None`, half of the features are
+        selected. If integer, the parameter is the absolute number of features
+        to select. If float between 0 and 1, it is the fraction of features to
+        select.
+
+        .. versionchanged:: 0.24
+           Added float values for fractions.
+
+    step : int or float, default=1
+        If greater than or equal to 1, then ``step`` corresponds to the
+        (integer) number of features to remove at each iteration.
+        If within (0.0, 1.0), then ``step`` corresponds to the percentage
+        (rounded down) of features to remove at each iteration.
+
+    verbose : int, default=0
+        Controls verbosity of output.
+
+    importance_getter : str or callable, default='auto'
+        If 'auto', uses the feature importance either through a `coef_`
+        or `feature_importances_` attributes of estimator.
+
+        Also accepts a string that specifies an attribute name/path
+        for extracting feature importance (implemented with `attrgetter`).
+        For example, give `regressor_.coef_` in case of
+        :class:`~sklearn.compose.TransformedTargetRegressor`  or
+        `named_steps.clf.feature_importances_` in case of
+        class:`~sklearn.pipeline.Pipeline` with its last step named `clf`.
+
+        If `callable`, overrides the default feature importance getter.
+        The callable is passed with the fitted estimator and it should
+        return importance for each feature.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    estimator_ : ``Estimator`` instance
+        The fitted estimator used to select features.
+
+    n_features_ : int
+        The number of selected features.
+
+    ranking_ : ndarray of shape (n_features,)
+        The feature ranking, such that ``ranking_[i]`` corresponds to the
+        ranking position of the i-th feature. Selected (i.e., estimated
+        best) features are assigned rank 1.
+
+    support_ : ndarray of shape (n_features,)
+        The mask of selected features.
+
+    Examples
+    --------
+    The following example shows how to retrieve the 5 most informative
+    features in the Friedman #1 dataset.
+
+    &gt;&gt;&gt; from sklearn.datasets import make_friedman1
+    &gt;&gt;&gt; from sklearn.feature_selection import RFE
+    &gt;&gt;&gt; from sklearn.svm import SVR
+    &gt;&gt;&gt; X, y = make_friedman1(n_samples=50, n_features=10, random_state=0)
+    &gt;&gt;&gt; estimator = SVR(kernel="linear")
+    &gt;&gt;&gt; selector = RFE(estimator, n_features_to_select=5, step=1)
+    &gt;&gt;&gt; selector = selector.fit(X, y)
+    &gt;&gt;&gt; selector.support_
+    array([ True,  True,  True,  True,  True, False, False, False, False,
+           False])
+    &gt;&gt;&gt; selector.ranking_
+    array([1, 1, 1, 1, 1, 6, 4, 3, 2, 5])
+
+    Notes
+    -----
+    Allows NaN/Inf in the input if the underlying estimator does as well.
+
+    See Also
+    --------
+    RFECV : Recursive feature elimination with built-in cross-validated
+        selection of the best number of features.
+    SelectFromModel : Feature selection based on thresholds of importance
+        weights.
+    SequentialFeatureSelector : Sequential cross-validation based feature
+        selection. Does not rely on importance weights.
+
+    References
+    ----------
+
+    .. [1] Guyon, I., Weston, J., Barnhill, S., & Vapnik, V., "Gene selection
+           for cancer classification using support vector machines",
+           Mach. Learn., 46(1-3), 389--422, 2002.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">n_features_to_select</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">step</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                 <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_to_select</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features_to_select</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">step</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span> <span class="arithmetic-assignment">=</span> <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_estimator_type</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">_estimator_type</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the RFE model and then the underlying estimator on the selected
+           features.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The training input samples.
+
+        y : array-like of shape (n_samples,)
+            The target values.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">step_score</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Parameter step_score controls the calculation of self.scores_</span>
+        <span class="comment"># step_score is not exposed to users</span>
+        <span class="comment"># and is used when implementing RFECV</span>
+        <span class="comment"># self.scores_ will not be calculated when calling _fit through fit</span>
+
+        <span class="identifier">tags</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_tags</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">"csc"</span><span class="punctuation">,</span>
+            <span class="identifier">ensure_min_features</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="logical-operator">not</span> <span class="identifier">tags</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"allow_nan"</span><span class="punctuation">,</span> <span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">multi_output</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span>
+        <span class="grouping">)</span>
+        <span class="identifier">error_msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"n_features_to_select must be either None, a "</span>
+                     <span class="string-literal">"positive integer representing the absolute "</span>
+                     <span class="string-literal">"number of features or a float in (0.0, 1.0] "</span>
+                     <span class="string-literal">"representing a percentage of features to "</span>
+                     <span class="identifier">f</span><span class="string-literal">"select. Got {self.n_features_to_select}"</span><span class="grouping">)</span>
+
+        <span class="comment"># Initialization</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_to_select</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_features_to_select</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span> <span class="arithmetic-operator">//</span> <span class="int-literal">2</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_to_select</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">error_msg</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_to_select</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># int</span>
+            <span class="identifier">n_features_to_select</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_to_select</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_to_select</span> <span class="relational-operator">&gt;</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>  <span class="comment"># float &gt; 1</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">error_msg</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># float</span>
+            <span class="identifier">n_features_to_select</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_to_select</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="float-literal">0.0</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span> <span class="relational-operator">&lt;</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">step</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Step must be &gt;0"</span><span class="grouping">)</span>
+
+        <span class="identifier">support_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+        <span class="identifier">ranking_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">step_score</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+        <span class="comment"># Elimination</span>
+        <span class="keyword">while</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">support_</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_features_to_select</span><span class="punctuation">:</span>
+            <span class="comment"># Remaining features</span>
+            <span class="identifier">features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">support_</span><span class="grouping">]</span>
+
+            <span class="comment"># Rank the remaining features</span>
+            <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Fitting estimator with %d features."</span> <span class="arithmetic-operator">%</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">support_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+            <span class="comment"># Get importance and rank them</span>
+            <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_feature_importances</span><span class="grouping">(</span>
+                <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">,</span> <span class="identifier">transform_func</span><span class="arithmetic-assignment">=</span><span class="string-literal">"square"</span><span class="punctuation">,</span>
+            <span class="grouping">)</span>
+            <span class="identifier">ranks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+            <span class="comment"># for sparse case ranks is matrix</span>
+            <span class="identifier">ranks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="identifier">ranks</span><span class="grouping">)</span>
+
+            <span class="comment"># Eliminate the worse features</span>
+            <span class="identifier">threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">step</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">support_</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_features_to_select</span><span class="grouping">)</span>
+
+            <span class="comment"># Compute step score on the previous selection iteration</span>
+            <span class="comment"># because 'estimator' must use features</span>
+            <span class="comment"># that have not been eliminated yet</span>
+            <span class="keyword">if</span> <span class="identifier">step_score</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">step_score</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">support_</span><span class="grouping">[</span><span class="identifier">features</span><span class="grouping">[</span><span class="identifier">ranks</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">threshold</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+            <span class="identifier">ranking_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_not</span><span class="grouping">(</span><span class="identifier">support_</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+        <span class="comment"># Set final attributes</span>
+        <span class="identifier">features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">support_</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+        <span class="comment"># Compute step score when only n_features_to_select features left</span>
+        <span class="keyword">if</span> <span class="identifier">step_score</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scores_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">step_score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">support_</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">support_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">ranking_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ranking_</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Reduce X to the selected features and then predict using the
+           underlying estimator.
+
+        Parameters
+        ----------
+        X : array of shape [n_samples, n_features]
+            The input samples.
+
+        Returns
+        -------
+        y : array of shape [n_samples]
+            The predicted target values.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Reduce X to the selected features and then return the score of the
+           underlying estimator.
+
+        Parameters
+        ----------
+        X : array of shape [n_samples, n_features]
+            The input samples.
+
+        y : array of shape [n_samples]
+            The target values.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_support_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute the decision function of ``X``.
+
+        Parameters
+        ----------
+        X : {array-like or sparse matrix} of shape (n_samples, n_features)
+            The input samples. Internally, it will be converted to
+            ``dtype=np.float32`` and if a sparse matrix is provided
+            to a sparse ``csr_matrix``.
+
+        Returns
+        -------
+        score : array, shape = [n_samples, n_classes] or [n_samples]
+            The decision function of the input samples. The order of the
+            classes corresponds to that in the attribute :term:`classes_`.
+            Regression and binary classification produce an array of shape
+            [n_samples].
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict class probabilities for X.
+
+        Parameters
+        ----------
+        X : {array-like or sparse matrix} of shape (n_samples, n_features)
+            The input samples. Internally, it will be converted to
+            ``dtype=np.float32`` and if a sparse matrix is provided
+            to a sparse ``csr_matrix``.
+
+        Returns
+        -------
+        p : array of shape (n_samples, n_classes)
+            The class probabilities of the input samples. The order of the
+            classes corresponds to that in the attribute :term:`classes_`.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">h</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span><span class="grouping">(</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">g</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'estimator'</span><span class="grouping">)</span>
+    <span class="keyword">def</span> <span class="identifier">predict_log_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict class log-probabilities for X.
+
+        Parameters
+        ----------
+        X : array of shape [n_samples, n_features]
+            The input samples.
+
+        Returns
+        -------
+        p : array of shape (n_samples, n_classes)
+            The class log-probabilities of the input samples. The order of the
+            classes corresponds to that in the attribute :term:`classes_`.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">predict_log_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="string-literal">'poor_score'</span><span class="punctuation">:</span> <span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="string-literal">'allow_nan': _safe_tags(self.estimator, key='allow_nan'</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="string-literal">'requires_y'</span><span class="punctuation">:</span> <span class="bool-literal">True</span><span class="punctuation">,</span>
+        <span class="grouping">}</span>
+
+
+<span class="keyword">class</span> <span class="identifier">RFECV</span><span class="grouping">(</span><span class="identifier">RFE</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Feature ranking with recursive feature elimination and cross-validated
+    selection of the best number of features.
+
+    See glossary entry for :term:`cross-validation estimator`.
+
+    Read more in the :ref:`User Guide &lt;rfe&gt;`.
+
+    Parameters
+    ----------
+    estimator : ``Estimator`` instance
+        A supervised learning estimator with a ``fit`` method that provides
+        information about feature importance either through a ``coef_``
+        attribute or through a ``feature_importances_`` attribute.
+
+    step : int or float, default=1
+        If greater than or equal to 1, then ``step`` corresponds to the
+        (integer) number of features to remove at each iteration.
+        If within (0.0, 1.0), then ``step`` corresponds to the percentage
+        (rounded down) of features to remove at each iteration.
+        Note that the last iteration may remove fewer than ``step`` features in
+        order to reach ``min_features_to_select``.
+
+    min_features_to_select : int, default=1
+        The minimum number of features to be selected. This number of features
+        will always be scored, even if the difference between the original
+        feature count and ``min_features_to_select`` isn't divisible by
+        ``step``.
+
+        .. versionadded:: 0.20
+
+    cv : int, cross-validation generator or an iterable, default=None
+        Determines the cross-validation splitting strategy.
+        Possible inputs for cv are:
+
+        - None, to use the default 5-fold cross-validation,
+        - integer, to specify the number of folds.
+        - :term:`CV splitter`,
+        - An iterable yielding (train, test) splits as arrays of indices.
+
+        For integer/None inputs, if ``y`` is binary or multiclass,
+        :class:`~sklearn.model_selection.StratifiedKFold` is used. If the
+        estimator is a classifier or if ``y`` is neither binary nor multiclass,
+        :class:`~sklearn.model_selection.KFold` is used.
+
+        Refer :ref:`User Guide &lt;cross_validation&gt;` for the various
+        cross-validation strategies that can be used here.
+
+        .. versionchanged:: 0.22
+            ``cv`` default value of None changed from 3-fold to 5-fold.
+
+    scoring : string, callable or None, default=None
+        A string (see model evaluation documentation) or
+        a scorer callable object / function with signature
+        ``scorer(estimator, X, y)``.
+
+    verbose : int, default=0
+        Controls verbosity of output.
+
+    n_jobs : int or None, default=None
+        Number of cores to run in parallel while fitting across folds.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+        .. versionadded:: 0.18
+
+    importance_getter : str or callable, default='auto'
+        If 'auto', uses the feature importance either through a `coef_`
+        or `feature_importances_` attributes of estimator.
+
+        Also accepts a string that specifies an attribute name/path
+        for extracting feature importance.
+        For example, give `regressor_.coef_` in case of
+        :class:`~sklearn.compose.TransformedTargetRegressor`  or
+        `named_steps.clf.feature_importances_` in case of
+        :class:`~sklearn.pipeline.Pipeline` with its last step named `clf`.
+
+        If `callable`, overrides the default feature importance getter.
+        The callable is passed with the fitted estimator and it should
+        return importance for each feature.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    estimator_ : ``Estimator`` instance
+        The fitted estimator used to select features.
+
+    grid_scores_ : ndarray of shape (n_subsets_of_features,)
+        The cross-validation scores such that
+        ``grid_scores_[i]`` corresponds to
+        the CV score of the i-th subset of features.
+
+    n_features_ : int
+        The number of selected features with cross-validation.
+
+    ranking_ : narray of shape (n_features,)
+        The feature ranking, such that `ranking_[i]`
+        corresponds to the ranking
+        position of the i-th feature.
+        Selected (i.e., estimated best)
+        features are assigned rank 1.
+
+    support_ : ndarray of shape (n_features,)
+        The mask of selected features.
+
+    Notes
+    -----
+    The size of ``grid_scores_`` is equal to
+    ``ceil((n_features - min_features_to_select) / step) + 1``,
+    where step is the number of features removed at each iteration.
+
+    Allows NaN/Inf in the input if the underlying estimator does as well.
+
+    Examples
+    --------
+    The following example shows how to retrieve the a-priori not known 5
+    informative features in the Friedman #1 dataset.
+
+    &gt;&gt;&gt; from sklearn.datasets import make_friedman1
+    &gt;&gt;&gt; from sklearn.feature_selection import RFECV
+    &gt;&gt;&gt; from sklearn.svm import SVR
+    &gt;&gt;&gt; X, y = make_friedman1(n_samples=50, n_features=10, random_state=0)
+    &gt;&gt;&gt; estimator = SVR(kernel="linear")
+    &gt;&gt;&gt; selector = RFECV(estimator, step=1, cv=5)
+    &gt;&gt;&gt; selector = selector.fit(X, y)
+    &gt;&gt;&gt; selector.support_
+    array([ True,  True,  True,  True,  True, False, False, False, False,
+           False])
+    &gt;&gt;&gt; selector.ranking_
+    array([1, 1, 1, 1, 1, 6, 4, 3, 2, 5])
+
+    See Also
+    --------
+    RFE : Recursive feature elimination.
+
+    References
+    ----------
+
+    .. [1] Guyon, I., Weston, J., Barnhill, S., & Vapnik, V., "Gene selection
+           for cancer classification using support vector machines",
+           Mach. Learn., 46(1-3), 389--422, 2002.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">step</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">min_features_to_select</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                 <span class="identifier">cv</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">step</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span> <span class="arithmetic-assignment">=</span> <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cv</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scoring</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scoring</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_features_to_select</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min_features_to_select</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">groups</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the RFE model and automatically tune the number of selected
+           features.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Training vector, where `n_samples` is the number of samples and
+            `n_features` is the total number of features.
+
+        y : array-like of shape (n_samples,)
+            Target values (integers for classification, real numbers for
+            regression).
+
+        groups : array-like of shape (n_samples,) or None, default=None
+            Group labels for the samples used while splitting the dataset into
+            train/test set. Only used in conjunction with a "Group" :term:`cv`
+            instance (e.g., :class:`~sklearn.model_selection.GroupKFold`).
+
+            .. versionadded:: 0.20
+        """</span>
+        <span class="identifier">tags</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_tags</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">"csr"</span><span class="punctuation">,</span> <span class="identifier">ensure_min_features</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+            <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="logical-operator">not</span> <span class="identifier">tags</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">'allow_nan'</span><span class="punctuation">,</span> <span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">multi_output</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span>
+        <span class="grouping">)</span>
+
+        <span class="comment"># Initialization</span>
+        <span class="identifier">cv</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_cv</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">cv</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="identifier">is_classifier</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_scoring</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scoring</span><span class="grouping">)</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="float-literal">0.0</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span> <span class="relational-operator">&lt;</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">step</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">step</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Step must be &gt;0"</span><span class="grouping">)</span>
+
+        <span class="comment"># Build an RFE object, which will evaluate and score each possible</span>
+        <span class="comment"># feature count, down to self.min_features_to_select</span>
+        <span class="identifier">rfe</span> <span class="arithmetic-assignment">=</span> <span class="identifier">RFE</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">,</span>
+                  <span class="identifier">n_features_to_select</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_features_to_select</span><span class="punctuation">,</span>
+                  <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">,</span>
+                  <span class="identifier">step</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">)</span>
+
+        <span class="comment"># Determine the number of subsets of features by fitting across</span>
+        <span class="comment"># the train folds and choosing the "features_to_select" parameter</span>
+        <span class="comment"># that gives the least averaged error across all folds.</span>
+
+        <span class="comment"># Note that joblib raises a non-picklable error for bound methods</span>
+        <span class="comment"># even if n_jobs is set to 1 with the default multiprocessing</span>
+        <span class="comment"># backend.</span>
+        <span class="comment"># This branching is done so that to</span>
+        <span class="comment"># make sure that user code that sets n_jobs to 1</span>
+        <span class="comment"># and provides bound methods as scorers is not broken with the</span>
+        <span class="comment"># addition of n_jobs parameter in version 0.18.</span>
+
+        <span class="keyword">if</span> <span class="identifier">effective_n_jobs</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">parallel</span><span class="punctuation">,</span> <span class="identifier">func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="punctuation">,</span> <span class="identifier">_rfe_single_fit</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">parallel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+            <span class="identifier">func</span> <span class="arithmetic-assignment">=</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span><span class="grouping">(</span><span class="identifier">_rfe_single_fit</span><span class="grouping">)</span>
+
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parallel</span><span class="grouping">(</span>
+            <span class="identifier">func</span><span class="grouping">(</span><span class="identifier">rfe</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">train</span><span class="punctuation">,</span> <span class="identifier">test</span><span class="punctuation">,</span> <span class="identifier">scorer</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">train</span><span class="punctuation">,</span> <span class="identifier">test</span> <span class="relational-operator">in</span> <span class="identifier">cv</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">groups</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">scores</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">scores_rev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scores</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">argmax_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">scores</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">scores_rev</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+        <span class="identifier">n_features_to_select</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span>
+            <span class="identifier">n_features</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="identifier">argmax_idx</span> <span class="arithmetic-operator">*</span> <span class="identifier">step</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">min_features_to_select</span><span class="grouping">)</span>
+
+        <span class="comment"># Re-execute an elimination with best_k over the whole set</span>
+        <span class="identifier">rfe</span> <span class="arithmetic-assignment">=</span> <span class="identifier">RFE</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="punctuation">,</span>
+                  <span class="identifier">n_features_to_select</span><span class="arithmetic-assignment">=</span><span class="identifier">n_features_to_select</span><span class="punctuation">,</span> <span class="identifier">step</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">step</span><span class="punctuation">,</span>
+                  <span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">g</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="punctuation">,</span>
+                  <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">)</span>
+
+        <span class="identifier">rfe</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+        <span class="comment"># Set final attributes</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rfe</span><span class="punctuation">.</span><span class="identifier">support_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rfe</span><span class="punctuation">.</span><span class="identifier">n_features_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">ranking_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rfe</span><span class="punctuation">.</span><span class="identifier">ranking_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimator_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+        <span class="comment"># Fixing a normalization error, n is equal to get_n_splits(X, y) - 1</span>
+        <span class="comment"># here, the scores are normalized by get_n_splits(X, y)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">grid_scores_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scores</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">cv</span><span class="punctuation">.</span><span class="identifier">get_n_splits</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">groups</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    </pre>
+  </body>
+</html>

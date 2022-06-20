@@ -1,0 +1,173 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Original Model
+Based on the original https://www.reddit.com/r/deepfakes/ code sample + contributions.
+
+This model is heavily documented as it acts as a template that other model plugins can be developed
+from.
+"""</span>
+<span class="keyword">from</span> <span class="identifier">keras</span><span class="punctuation">.</span><span class="identifier">layers</span> <span class="keyword">import</span> <span class="identifier">Dense</span><span class="punctuation">,</span> <span class="identifier">Flatten</span><span class="punctuation">,</span> <span class="identifier">Reshape</span><span class="punctuation">,</span> <span class="identifier">Input</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">nn_blocks</span> <span class="keyword">import</span> <span class="identifier">Conv2DOutput</span><span class="punctuation">,</span> <span class="identifier">Conv2DBlock</span><span class="punctuation">,</span> <span class="identifier">UpscaleBlock</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">KerasModel</span><span class="punctuation">,</span> <span class="identifier">ModelBase</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Model</span><span class="grouping">(</span><span class="identifier">ModelBase</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Original Faceswap Model.
+
+    This is the original faceswap model and acts as a template for plugin development.
+
+    All plugins must define the following attribute override after calling the parent's
+    :func:`__init__` method:
+
+        * :attr:`input_shape` (`tuple` or `list`): a tuple of ints defining the shape of the \
+        faces that the model takes as input. If the input size is the same for both sides, this \
+        can be a single 3 dimensional tuple. If the inputs have different sizes for "A" and "B" \
+        this should be a list of 2 3 dimensional shape tuples, 1 for each side.
+
+    Any additional attributes used exclusively by this model should be defined here, but make sure
+    that you are not accidentally overriding any existing
+    :class:`~plugins.train.model._base.ModelBase` attributes.
+
+    Parameters
+    ----------
+    args: varies
+        The default command line arguments passed in from :class:`~scripts.train.Train` or
+        :class:`~scripts.train.Convert`
+    kwargs: varies
+        The default keyword arguments passed in from :class:`~scripts.train.Train` or
+        :class:`~scripts.train.Convert`
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="int-literal">64</span><span class="punctuation">,</span> <span class="int-literal">64</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">low_mem</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">config</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"lowmem"</span><span class="punctuation">,</span> <span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learn_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">[</span><span class="string-literal">"learn_mask"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">encoder_dim</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">512</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">low_mem</span> <span class="keyword">else</span> <span class="int-literal">1024</span>
+
+    <span class="keyword">def</span> <span class="identifier">build_model</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Create the model's structure.
+
+        This function is automatically called immediately after :func:`__init__` has been called if
+        a new model is being created. It is ignored if an existing model is being loaded from disk
+        as the model structure will be defined in the saved model file.
+
+        The model's final structure is defined here.
+
+        For the original model, An encoder instance is defined, then the same instance is
+        referenced twice, one for each input "A" and "B" so that the same model is used for
+        both inputs.
+
+        2 Decoders are then defined (one for each side) with the encoder instances passed in as
+        input to the corresponding decoders.
+
+        It is important to note that any models and sub-models should not call
+        :class:`keras.models.Model` directly, but rather call
+        :class:`plugins.train.model._base.KerasModel`. This acts as a wrapper for Keras' Model
+        class, but handles some minor differences which need to be handled between Nvidia and AMD
+        backends.
+
+        The final output of the model should always call :class:`lib.model.nn_blocks.Conv2DOutput`
+        so that the correct data type is set for the final activation, to support Mixed Precision
+        Training. Failure to do so is likely to lead to issues when Mixed Precision is enabled.
+
+        Parameters
+        ----------
+        inputs: list
+            A list of input tensors for the model. This will be a list of 2 tensors of
+            shape :attr:`input_shape`, the first for side "a", the second for side "b".
+
+        Returns
+        -------
+        :class:`keras.models.Model`
+            The output of this function must be a keras model generated from
+            :class:`plugins.train.model._base.KerasModel`. See Keras documentation for the correct
+            structure, but note that parameter :attr:`name` is a required rather than an optional
+            argument in Faceswap. You should assign this to the attribute ``self.name`` that is
+            automatically generated from the plugin's filename.
+        """</span>
+        <span class="identifier">input_a</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inputs</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">input_b</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inputs</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="identifier">encoder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">encoder</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">encoder_a</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">encoder</span><span class="grouping">(</span><span class="identifier">input_a</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">encoder_b</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">encoder</span><span class="grouping">(</span><span class="identifier">input_b</span><span class="grouping">)</span><span class="grouping">]</span>
+
+        <span class="identifier">outputs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">decoder</span><span class="grouping">(</span><span class="string-literal">"a")(encoder_a), self.decoder("b"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">encoder_b</span><span class="grouping">)</span><span class="grouping">]</span>
+
+        <span class="identifier">autoencoder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">KerasModel</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="punctuation">,</span> <span class="identifier">outputs</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">name</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">autoencoder</span>
+
+    <span class="keyword">def</span> <span class="identifier">encoder</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" The original Faceswap Encoder Network.
+
+        The encoder for the original model has it's weights shared between both the "A" and "B"
+        side of the model, so only one instance is created :func:`build_model`. However this same
+        instance is then used twice (once for A and once for B) meaning that the weights get
+        shared.
+
+        Returns
+        -------
+        :class:`keras.models.Model`
+            The Keras encoder model, for sharing between inputs from both sides.
+        """</span>
+        <span class="identifier">input_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Input</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_shape</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DBlock</span><span class="grouping">(</span><span class="int-literal">128</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DBlock</span><span class="grouping">(</span><span class="int-literal">256</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DBlock</span><span class="grouping">(</span><span class="int-literal">512</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">low_mem</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DBlock</span><span class="grouping">(</span><span class="int-literal">1024</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Dense</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">encoder_dim</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">Flatten</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Dense</span><span class="grouping">(</span><span class="int-literal">4</span> <span class="arithmetic-operator">*</span> <span class="int-literal">4</span> <span class="arithmetic-operator">*</span> <span class="int-literal">1024</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">4</span><span class="punctuation">,</span> <span class="int-literal">4</span><span class="punctuation">,</span> <span class="int-literal">1024</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="int-literal">512</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">KerasModel</span><span class="grouping">(</span><span class="identifier">input_</span><span class="punctuation">,</span> <span class="identifier">var_x</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"encoder"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">decoder</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">side</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" The original Faceswap Decoder Network.
+
+        The decoders for the original model have separate weights for each side "A" and "B", so two
+        instances are created in :func:`build_model`, one for each side.
+
+        Parameters
+        ----------
+        side: str
+            Either `"a` or `"b"`. This is used for naming the decoder model.
+
+        Returns
+        -------
+        :class:`keras.models.Model`
+            The Keras decoder model. This will be called twice, once for each side.
+        """</span>
+        <span class="identifier">input_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Input</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">8</span><span class="punctuation">,</span> <span class="int-literal">8</span><span class="punctuation">,</span> <span class="int-literal">512</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="int-literal">256</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="int-literal">128</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="int-literal">64</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DOutput</span><span class="grouping">(</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"face_out_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">side</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">outputs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">var_x</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">learn_mask</span><span class="punctuation">:</span>
+            <span class="identifier">var_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_</span>
+            <span class="identifier">var_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="int-literal">256</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_y</span><span class="grouping">)</span>
+            <span class="identifier">var_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="int-literal">128</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_y</span><span class="grouping">)</span>
+            <span class="identifier">var_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="int-literal">64</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_y</span><span class="grouping">)</span>
+            <span class="identifier">var_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DOutput</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"mask_out_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">side</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_y</span><span class="grouping">)</span>
+            <span class="identifier">outputs</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">var_y</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">KerasModel</span><span class="grouping">(</span><span class="identifier">input_</span><span class="punctuation">,</span> <span class="identifier">outputs</span><span class="arithmetic-assignment">=</span><span class="identifier">outputs</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"decoder_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">side</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_legacy_mapping</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" The mapping of legacy separate model names to single model names """</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">"{}_encoder.h5".format(self.name): "encoder"</span><span class="punctuation">,</span>
+                <span class="string-literal">"{}_decoder_A.h5".format(self.name): "decoder_a"</span><span class="punctuation">,</span>
+                <span class="string-literal">"{}_decoder_B.h5".format(self.name): "decoder_b"</span><span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

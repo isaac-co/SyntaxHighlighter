@@ -1,0 +1,272 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+=======================================
+Visualizing the stock market structure
+=======================================
+
+This example employs several unsupervised learning techniques to extract
+the stock market structure from variations in historical quotes.
+
+The quantity that we use is the daily variation in quote price: quotes
+that are linked tend to cofluctuate during a day.
+
+.. _stock_market:
+
+Learning a graph structure
+--------------------------
+
+We use sparse inverse covariance estimation to find which quotes are
+correlated conditionally on the others. Specifically, sparse inverse
+covariance gives us a graph, that is a list of connection. For each
+symbol, the symbols that it is connected too are those useful to explain
+its fluctuations.
+
+Clustering
+----------
+
+We use clustering to group together quotes that behave similarly. Here,
+amongst the :ref:`various clustering techniques &lt;clustering&gt;` available
+in the scikit-learn, we use :ref:`affinity_propagation` as it does
+not enforce equal-size clusters, and it can choose automatically the
+number of clusters from the data.
+
+Note that this gives us a different indication than the graph, as the
+graph reflects conditional relations between variables, while the
+clustering reflects marginal properties: variables clustered together can
+be considered as having a similar impact at the level of the full stock
+market.
+
+Embedding in 2D space
+---------------------
+
+For visualization purposes, we need to lay out the different symbols on a
+2D canvas. For this we use :ref:`manifold` techniques to retrieve 2D
+embedding.
+
+
+Visualization
+-------------
+
+The output of the 3 models are combined in a 2D graph where nodes
+represents the stocks and edges the:
+
+- cluster labels are used to define the color of the nodes
+- the sparse covariance model is used to display the strength of the edges
+- the 2D embedding is used to position the nodes in the plan
+
+This example has a fair amount of visualization-related code, as
+visualization is crucial here to display the graph. One of the challenge
+is to position the labels minimizing overlap. For this we use an
+heuristic based on the direction of the nearest neighbor along each
+axis.
+"""</span>
+
+<span class="comment"># Author: Gael Varoquaux gael.varoquaux@normalesup.org</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">sys</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>
+<span class="keyword">from</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">collections</span> <span class="keyword">import</span> <span class="identifier">LineCollection</span>
+
+<span class="keyword">import</span> <span class="identifier">pandas</span> <span class="keyword">as</span> <span class="identifier">pd</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span> <span class="keyword">import</span> <span class="identifier">cluster</span><span class="punctuation">,</span> <span class="identifier">covariance</span><span class="punctuation">,</span> <span class="identifier">manifold</span>
+
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">__doc__</span><span class="grouping">)</span>
+
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Retrieve the data from Internet</span>
+
+<span class="comment"># The data is from 2003 - 2008. This is reasonably calm: (not too long ago so</span>
+<span class="comment"># that we get high-tech firms, and before the 2008 crash). This kind of</span>
+<span class="comment"># historical data can be obtained for from APIs like the quandl.com and</span>
+<span class="comment"># alphavantage.co ones.</span>
+
+<span class="identifier">symbol_dict</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span>
+    <span class="string-literal">'TOT': 'Total'</span><span class="punctuation">,</span>
+    <span class="string-literal">'XOM': 'Exxon'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CVX': 'Chevron'</span><span class="punctuation">,</span>
+    <span class="string-literal">'COP': 'ConocoPhillips'</span><span class="punctuation">,</span>
+    <span class="string-literal">'VLO': 'Valero Energy'</span><span class="punctuation">,</span>
+    <span class="string-literal">'MSFT': 'Microsoft'</span><span class="punctuation">,</span>
+    <span class="string-literal">'IBM': 'IBM'</span><span class="punctuation">,</span>
+    <span class="string-literal">'TWX': 'Time Warner'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CMCSA': 'Comcast'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CVC': 'Cablevision'</span><span class="punctuation">,</span>
+    <span class="string-literal">'YHOO': 'Yahoo'</span><span class="punctuation">,</span>
+    <span class="string-literal">'DELL': 'Dell'</span><span class="punctuation">,</span>
+    <span class="string-literal">'HPQ': 'HP'</span><span class="punctuation">,</span>
+    <span class="string-literal">'AMZN': 'Amazon'</span><span class="punctuation">,</span>
+    <span class="string-literal">'TM': 'Toyota'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CAJ': 'Canon'</span><span class="punctuation">,</span>
+    <span class="string-literal">'SNE': 'Sony'</span><span class="punctuation">,</span>
+    <span class="string-literal">'F': 'Ford'</span><span class="punctuation">,</span>
+    <span class="string-literal">'HMC': 'Honda'</span><span class="punctuation">,</span>
+    <span class="string-literal">'NAV': 'Navistar'</span><span class="punctuation">,</span>
+    <span class="string-literal">'NOC': 'Northrop Grumman'</span><span class="punctuation">,</span>
+    <span class="string-literal">'BA': 'Boeing'</span><span class="punctuation">,</span>
+    <span class="string-literal">'KO': 'Coca Cola'</span><span class="punctuation">,</span>
+    <span class="string-literal">'MMM': '3M'</span><span class="punctuation">,</span>
+    <span class="string-literal">'MCD': 'McDonald\'s'</span><span class="punctuation">,</span>
+    <span class="string-literal">'PEP': 'Pepsi'</span><span class="punctuation">,</span>
+    <span class="string-literal">'K': 'Kellogg'</span><span class="punctuation">,</span>
+    <span class="string-literal">'UN': 'Unilever'</span><span class="punctuation">,</span>
+    <span class="string-literal">'MAR': 'Marriott'</span><span class="punctuation">,</span>
+    <span class="string-literal">'PG': 'Procter Gamble'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CL': 'Colgate-Palmolive'</span><span class="punctuation">,</span>
+    <span class="string-literal">'GE': 'General Electrics'</span><span class="punctuation">,</span>
+    <span class="string-literal">'WFC': 'Wells Fargo'</span><span class="punctuation">,</span>
+    <span class="string-literal">'JPM': 'JPMorgan Chase'</span><span class="punctuation">,</span>
+    <span class="string-literal">'AIG': 'AIG'</span><span class="punctuation">,</span>
+    <span class="string-literal">'AXP': 'American express'</span><span class="punctuation">,</span>
+    <span class="string-literal">'BAC': 'Bank of America'</span><span class="punctuation">,</span>
+    <span class="string-literal">'GS': 'Goldman Sachs'</span><span class="punctuation">,</span>
+    <span class="string-literal">'AAPL': 'Apple'</span><span class="punctuation">,</span>
+    <span class="string-literal">'SAP': 'SAP'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CSCO': 'Cisco'</span><span class="punctuation">,</span>
+    <span class="string-literal">'TXN': 'Texas Instruments'</span><span class="punctuation">,</span>
+    <span class="string-literal">'XRX': 'Xerox'</span><span class="punctuation">,</span>
+    <span class="string-literal">'WMT': 'Wal-Mart'</span><span class="punctuation">,</span>
+    <span class="string-literal">'HD': 'Home Depot'</span><span class="punctuation">,</span>
+    <span class="string-literal">'GSK': 'GlaxoSmithKline'</span><span class="punctuation">,</span>
+    <span class="string-literal">'PFE': 'Pfizer'</span><span class="punctuation">,</span>
+    <span class="string-literal">'SNY': 'Sanofi-Aventis'</span><span class="punctuation">,</span>
+    <span class="string-literal">'NVS': 'Novartis'</span><span class="punctuation">,</span>
+    <span class="string-literal">'KMB': 'Kimberly-Clark'</span><span class="punctuation">,</span>
+    <span class="string-literal">'R': 'Ryder'</span><span class="punctuation">,</span>
+    <span class="string-literal">'GD': 'General Dynamics'</span><span class="punctuation">,</span>
+    <span class="string-literal">'RTN': 'Raytheon'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CVS': 'CVS'</span><span class="punctuation">,</span>
+    <span class="string-literal">'CAT': 'Caterpillar'</span><span class="punctuation">,</span>
+    <span class="string-literal">'DD': 'DuPont de Nemours'</span><span class="grouping">}</span>
+
+
+<span class="identifier">symbols</span><span class="punctuation">,</span> <span class="identifier">names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">symbol_dict</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+<span class="identifier">quotes</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+<span class="keyword">for</span> <span class="identifier">symbol</span> <span class="relational-operator">in</span> <span class="identifier">symbols</span><span class="punctuation">:</span>
+    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'Fetching quote history for %r'</span> <span class="arithmetic-operator">%</span> <span class="identifier">symbol</span><span class="punctuation">,</span> <span class="identifier">file</span><span class="arithmetic-assignment">=</span><span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">stderr</span><span class="grouping">)</span>
+    <span class="identifier">url</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">'https://raw.githubusercontent.com/scikit-learn/examples-data/'</span>
+           <span class="string-literal">'master/financial-data/{}.csv'</span><span class="grouping">)</span>
+    <span class="identifier">quotes</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">read_csv</span><span class="grouping">(</span><span class="identifier">url</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">symbol</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="identifier">close_prices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">q</span><span class="grouping">[</span><span class="string-literal">'close'</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">q</span> <span class="relational-operator">in</span> <span class="identifier">quotes</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">open_prices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">q</span><span class="grouping">[</span><span class="string-literal">'open'</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">q</span> <span class="relational-operator">in</span> <span class="identifier">quotes</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="comment"># The daily variations of the quotes are what carry most information</span>
+<span class="identifier">variation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">close_prices</span> <span class="arithmetic-operator">-</span> <span class="identifier">open_prices</span>
+
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Learn a graphical structure from the correlations</span>
+<span class="identifier">edge_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">covariance</span><span class="punctuation">.</span><span class="identifier">GraphicalLassoCV</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># standardize the time series: using correlations rather than covariance</span>
+<span class="comment"># is more efficient for structure recovery</span>
+<span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">variation</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+<span class="identifier">X</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+<span class="identifier">edge_model</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Cluster using affinity propagation</span>
+
+<span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cluster</span><span class="punctuation">.</span><span class="identifier">affinity_propagation</span><span class="grouping">(</span><span class="identifier">edge_model</span><span class="punctuation">.</span><span class="identifier">covariance_</span><span class="punctuation">,</span>
+                                         <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+<span class="identifier">n_labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">labels</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_labels</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'Cluster %i: %s' % ((i + 1), ', '</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">names</span><span class="grouping">[</span><span class="identifier">labels</span> <span class="relational-operator">==</span> <span class="identifier">i</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Find a low-dimension embedding for visualization: find the best position of</span>
+<span class="comment"># the nodes (the stocks) on a 2D plane</span>
+
+<span class="comment"># We use a dense eigen_solver to achieve reproducibility (arpack is</span>
+<span class="comment"># initiated with random vectors that we don't control). In addition, we</span>
+<span class="comment"># use a large number of neighbors to capture the large-scale structure.</span>
+<span class="identifier">node_position_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">manifold</span><span class="punctuation">.</span><span class="identifier">LocallyLinearEmbedding</span><span class="grouping">(</span>
+    <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">eigen_solver</span><span class="arithmetic-assignment">=</span><span class="string-literal">'dense'</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">6</span><span class="grouping">)</span>
+
+<span class="identifier">embedding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">node_position_model</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Visualization</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">facecolor</span><span class="arithmetic-assignment">=</span><span class="string-literal">'w'</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="int-literal">8</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">clf</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axes</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">(</span><span class="string-literal">'off'</span><span class="grouping">)</span>
+
+<span class="comment"># Display a graph of the partial correlations</span>
+<span class="identifier">partial_correlations</span> <span class="arithmetic-assignment">=</span> <span class="identifier">edge_model</span><span class="punctuation">.</span><span class="identifier">precision_</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">d</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">partial_correlations</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">partial_correlations</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">d</span>
+<span class="identifier">partial_correlations</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">d</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+<span class="identifier">non_zero</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">triu</span><span class="grouping">(</span><span class="identifier">partial_correlations</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="float-literal">0.02</span><span class="grouping">)</span>
+
+<span class="comment"># Plot the nodes using the coordinates of our embedding</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">s</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span> <span class="arithmetic-operator">*</span> <span class="identifier">d</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">c</span><span class="arithmetic-assignment">=</span><span class="identifier">labels</span><span class="punctuation">,</span>
+            <span class="identifier">cmap</span><span class="arithmetic-assignment">=</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">cm</span><span class="punctuation">.</span><span class="identifier">nipy_spectral</span><span class="grouping">)</span>
+
+<span class="comment"># Plot the edges</span>
+<span class="identifier">start_idx</span><span class="punctuation">,</span> <span class="identifier">end_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">non_zero</span><span class="grouping">)</span>
+<span class="comment"># a sequence of (*line0*, *line1*, *line2*), where::</span>
+<span class="comment">#            linen = (x0, y0), (x1, y1), ... (xm, ym)</span>
+<span class="identifier">segments</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">[</span><span class="identifier">embedding</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">start</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">stop</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="keyword">for</span> <span class="identifier">start</span><span class="punctuation">,</span> <span class="identifier">stop</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">start_idx</span><span class="punctuation">,</span> <span class="identifier">end_idx</span><span class="grouping">)</span><span class="grouping">]</span>
+<span class="identifier">values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">partial_correlations</span><span class="grouping">[</span><span class="identifier">non_zero</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">lc</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LineCollection</span><span class="grouping">(</span><span class="identifier">segments</span><span class="punctuation">,</span>
+                    <span class="identifier">zorder</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">cmap</span><span class="arithmetic-assignment">=</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">cm</span><span class="punctuation">.</span><span class="identifier">hot_r</span><span class="punctuation">,</span>
+                    <span class="identifier">norm</span><span class="arithmetic-assignment">=</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">Normalize</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="float-literal">.7</span> <span class="arithmetic-operator">*</span> <span class="identifier">values</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">lc</span><span class="punctuation">.</span><span class="identifier">set_array</span><span class="grouping">(</span><span class="identifier">values</span><span class="grouping">)</span>
+<span class="identifier">lc</span><span class="punctuation">.</span><span class="identifier">set_linewidths</span><span class="grouping">(</span><span class="int-literal">15</span> <span class="arithmetic-operator">*</span> <span class="identifier">values</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">add_collection</span><span class="grouping">(</span><span class="identifier">lc</span><span class="grouping">)</span>
+
+<span class="comment"># Add a label to each node. The challenge here is that we want to</span>
+<span class="comment"># position the labels to avoid overlap with other labels</span>
+<span class="keyword">for</span> <span class="identifier">index</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">label</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span>
+        <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">names</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">embedding</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+    <span class="identifier">dx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x</span> <span class="arithmetic-operator">-</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="identifier">dx</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+    <span class="identifier">dy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">dy</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+    <span class="identifier">this_dx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dx</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmin</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">dy</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span>
+    <span class="identifier">this_dy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dy</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmin</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">dx</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="identifier">this_dx</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="identifier">horizontalalignment</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'left'</span>
+        <span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x</span> <span class="arithmetic-operator">+</span> <span class="float-literal">.002</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">horizontalalignment</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'right'</span>
+        <span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x</span> <span class="arithmetic-operator">-</span> <span class="float-literal">.002</span>
+    <span class="keyword">if</span> <span class="identifier">this_dy</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="identifier">verticalalignment</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'bottom'</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span> <span class="arithmetic-operator">+</span> <span class="float-literal">.002</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">verticalalignment</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'top'</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span> <span class="arithmetic-operator">-</span> <span class="float-literal">.002</span>
+    <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">text</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span>
+             <span class="identifier">horizontalalignment</span><span class="arithmetic-assignment">=</span><span class="identifier">horizontalalignment</span><span class="punctuation">,</span>
+             <span class="identifier">verticalalignment</span><span class="arithmetic-assignment">=</span><span class="identifier">verticalalignment</span><span class="punctuation">,</span>
+             <span class="identifier">bbox</span><span class="arithmetic-assignment">=</span><span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">facecolor</span><span class="arithmetic-assignment">=</span><span class="string-literal">'w'</span><span class="punctuation">,</span>
+                       <span class="identifier">edgecolor</span><span class="arithmetic-assignment">=</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">cm</span><span class="punctuation">.</span><span class="identifier">nipy_spectral</span><span class="grouping">(</span><span class="identifier">label</span> <span class="arithmetic-operator">/</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">n_labels</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                       <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">.6</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="float-literal">.15</span> <span class="arithmetic-operator">*</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">ptp</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+         <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="float-literal">.10</span> <span class="arithmetic-operator">*</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">ptp</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="float-literal">.03</span> <span class="arithmetic-operator">*</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">ptp</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+         <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="float-literal">.03</span> <span class="arithmetic-operator">*</span> <span class="identifier">embedding</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">ptp</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">show</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

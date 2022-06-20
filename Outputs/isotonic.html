@@ -1,0 +1,427 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Fabian Pedregosa &lt;fabian@fseoane.net&gt;</span>
+<span class="comment">#          Alexandre Gramfort &lt;alexandre.gramfort@inria.fr&gt;</span>
+<span class="comment">#          Nelle Varoquaux &lt;nelle.varoquaux@gmail.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">interpolate</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">stats</span> <span class="keyword">import</span> <span class="identifier">spearmanr</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">import</span> <span class="identifier">math</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span><span class="punctuation">,</span> <span class="identifier">check_consistent_length</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_isotonic</span> <span class="keyword">import</span> <span class="identifier">_inplace_contiguous_isotonic_regression</span><span class="punctuation">,</span> <span class="identifier">_make_unique</span>
+
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'check_increasing', 'isotonic_regression'</span><span class="punctuation">,</span>
+           <span class="string-literal">'IsotonicRegression'</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">check_increasing</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Determine whether y is monotonically correlated with x.
+
+    y is found increasing or decreasing with respect to x based on a Spearman
+    correlation test.
+
+    Parameters
+    ----------
+    x : array-like of shape (n_samples,)
+            Training data.
+
+    y : array-like of shape (n_samples,)
+        Training target.
+
+    Returns
+    -------
+    increasing_bool : boolean
+        Whether the relationship is increasing or decreasing.
+
+    Notes
+    -----
+    The Spearman correlation coefficient is estimated from the data, and the
+    sign of the resulting estimate is used as the result.
+
+    In the event that the 95% confidence interval based on Fisher transform
+    spans zero, a warning is raised.
+
+    References
+    ----------
+    Fisher transformation. Wikipedia.
+    https://en.wikipedia.org/wiki/Fisher_transformation
+    """</span>
+
+    <span class="comment"># Calculate Spearman rho estimate and set return accordingly.</span>
+    <span class="identifier">rho</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">spearmanr</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+    <span class="identifier">increasing_bool</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rho</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">0</span>
+
+    <span class="comment"># Run Fisher transform to get the rho CI, but handle rho=+/-1</span>
+    <span class="keyword">if</span> <span class="identifier">rho</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="float-literal">-1.0</span><span class="punctuation">,</span> <span class="float-literal">1.0</span><span class="grouping">]</span> <span class="logical-operator">and</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">x</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">3</span><span class="punctuation">:</span>
+        <span class="identifier">F</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">math</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">+</span> <span class="identifier">rho</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="identifier">rho</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">F_se</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="identifier">math</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">x</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">3</span><span class="grouping">)</span>
+
+        <span class="comment"># Use a 95% CI, i.e., +/-1.96 S.E.</span>
+        <span class="comment"># https://en.wikipedia.org/wiki/Fisher_transformation</span>
+        <span class="identifier">rho_0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">math</span><span class="punctuation">.</span><span class="identifier">tanh</span><span class="grouping">(</span><span class="identifier">F</span> <span class="arithmetic-operator">-</span> <span class="float-literal">1.96</span> <span class="arithmetic-operator">*</span> <span class="identifier">F_se</span><span class="grouping">)</span>
+        <span class="identifier">rho_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">math</span><span class="punctuation">.</span><span class="identifier">tanh</span><span class="grouping">(</span><span class="identifier">F</span> <span class="arithmetic-operator">+</span> <span class="float-literal">1.96</span> <span class="arithmetic-operator">*</span> <span class="identifier">F_se</span><span class="grouping">)</span>
+
+        <span class="comment"># Warn if the CI spans zero.</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sign</span><span class="grouping">(</span><span class="identifier">rho_0</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sign</span><span class="grouping">(</span><span class="identifier">rho_1</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Confidence interval of the Spearman "</span>
+                          <span class="string-literal">"correlation coefficient spans zero. "</span>
+                          <span class="string-literal">"Determination of ``increasing`` may be "</span>
+                          <span class="string-literal">"suspect."</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">increasing_bool</span>
+
+
+<span class="keyword">def</span> <span class="identifier">isotonic_regression</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">y_min</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">y_max</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                        <span class="identifier">increasing</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Solve the isotonic regression model.
+
+    Read more in the :ref:`User Guide &lt;isotonic&gt;`.
+
+    Parameters
+    ----------
+    y : array-like of shape (n_samples,)
+        The data.
+
+    sample_weight : array-like of shape (n_samples,), default=None
+        Weights on each point of the regression.
+        If None, weight is set to 1 (equal weights).
+
+    y_min : float, default=None
+        Lower bound on the lowest predicted value (the minimum value may
+        still be higher). If not set, defaults to -inf.
+
+    y_max : float, default=None
+        Upper bound on the highest predicted value (the maximum may still be
+        lower). If not set, defaults to +inf.
+
+    increasing : bool, default=True
+        Whether to compute ``y_`` is increasing (if set to True) or decreasing
+        (if set to False)
+
+    Returns
+    -------
+    y_ : list of floats
+        Isotonic fit of y.
+
+    References
+    ----------
+    "Active set algorithms for isotonic regression; A unifying framework"
+    by Michael J. Best and Nilotpal Chakravarti, section 3.
+    """</span>
+    <span class="identifier">order</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">s_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">increasing</span> <span class="keyword">else</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">s_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">[</span><span class="identifier">order</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">c</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">u</span><span class="invalid">o</span><span class="invalid">u</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">order</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="identifier">_inplace_contiguous_isotonic_regression</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">y_min</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">y_max</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="comment"># Older versions of np.clip don't accept None as a bound, so use np.inf</span>
+        <span class="keyword">if</span> <span class="identifier">y_min</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">y_min</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+        <span class="keyword">if</span> <span class="identifier">y_max</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">y_max</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_min</span><span class="punctuation">,</span> <span class="identifier">y_max</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">y</span><span class="grouping">[</span><span class="identifier">order</span><span class="grouping">]</span>
+
+
+<span class="keyword">class</span> <span class="identifier">IsotonicRegression</span><span class="grouping">(</span><span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Isotonic regression model.
+
+    Read more in the :ref:`User Guide &lt;isotonic&gt;`.
+
+    .. versionadded:: 0.13
+
+    Parameters
+    ----------
+    y_min : float, default=None
+        Lower bound on the lowest predicted value (the minimum value may
+        still be higher). If not set, defaults to -inf.
+
+    y_max : float, default=None
+        Upper bound on the highest predicted value (the maximum may still be
+        lower). If not set, defaults to +inf.
+
+    increasing : bool or 'auto', default=True
+        Determines whether the predictions should be constrained to increase
+        or decrease with `X`. 'auto' will decide based on the Spearman
+        correlation estimate's sign.
+
+    out_of_bounds : {'nan', 'clip', 'raise'}, default='nan'
+        Handles how `X` values outside of the training domain are handled
+        during prediction.
+
+        - 'nan', predictions will be NaN.
+        - 'clip', predictions will be set to the value corresponding to
+          the nearest train interval endpoint.
+        - 'raise', a `ValueError` is raised.
+
+    Attributes
+    ----------
+    X_min_ : float
+        Minimum value of input array `X_` for left bound.
+
+    X_max_ : float
+        Maximum value of input array `X_` for right bound.
+
+    X_thresholds_ : ndarray of shape (n_thresholds,)
+        Unique ascending `X` values used to interpolate
+        the y = f(X) monotonic function.
+
+        .. versionadded:: 0.24
+
+    y_thresholds_ : ndarray of shape (n_thresholds,)
+        De-duplicated `y` values suitable to interpolate the y = f(X)
+        monotonic function.
+
+        .. versionadded:: 0.24
+
+    f_ : function
+        The stepwise interpolating function that covers the input domain ``X``.
+
+    increasing_ : bool
+        Inferred value for ``increasing``.
+
+    Notes
+    -----
+    Ties are broken using the secondary method from de Leeuw, 1977.
+
+    References
+    ----------
+    Isotonic Median Regression: A Linear Programming Approach
+    Nilotpal Chakravarti
+    Mathematics of Operations Research
+    Vol. 14, No. 2 (May, 1989), pp. 303-308
+
+    Isotone Optimization in R : Pool-Adjacent-Violators
+    Algorithm (PAVA) and Active Set Methods
+    de Leeuw, Hornik, Mair
+    Journal of Statistical Software 2009
+
+    Correctness of Kruskal's algorithms for monotone regression with ties
+    de Leeuw, Psychometrica, 1977
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.datasets import make_regression
+    &gt;&gt;&gt; from sklearn.isotonic import IsotonicRegression
+    &gt;&gt;&gt; X, y = make_regression(n_samples=10, n_features=1, random_state=41)
+    &gt;&gt;&gt; iso_reg = IsotonicRegression().fit(X, y)
+    &gt;&gt;&gt; iso_reg.predict([.1, .2])
+    array([1.8628..., 3.7256...])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">y_min</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">y_max</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">increasing</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">out_of_bounds</span><span class="arithmetic-assignment">=</span><span class="string-literal">'nan'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_min</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_min</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_max</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y_max</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">increasing</span> <span class="arithmetic-assignment">=</span> <span class="identifier">increasing</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">out_of_bounds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out_of_bounds</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_input_data_shape</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span> <span class="logical-operator">and</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Isotonic regression input X should be a 1d array or "</span> <span class="invalid">\</span>
+                  <span class="string-literal">"2d array with 1 feature"</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_build_f</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Build the f_ interp1d function."""</span>
+
+        <span class="comment"># Handle the out_of_bounds argument by setting bounds_error</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">out_of_bounds</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">"raise", "nan", "clip"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"The argument ``out_of_bounds`` must be in "</span>
+                             <span class="string-literal">"'nan', 'clip', 'raise'; got {0}"</span>
+                             <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">out_of_bounds</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">bounds_error</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">out_of_bounds</span> <span class="relational-operator">==</span> <span class="string-literal">"raise"</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="comment"># single y, constant prediction</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">f_</span> <span class="arithmetic-assignment">=</span> <span class="keyword">lambda</span> <span class="identifier">x</span><span class="punctuation">:</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">repeat</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">f_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">interpolate</span><span class="punctuation">.</span><span class="identifier">interp1d</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'linear'</span><span class="punctuation">,</span>
+                                           <span class="identifier">bounds_error</span><span class="arithmetic-assignment">=</span><span class="identifier">bounds_error</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_build_y</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">trim_duplicates</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Build the y_ IsotonicRegression."""</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_input_data_shape</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>  <span class="comment"># use 1d view</span>
+
+        <span class="comment"># Determine increasing if auto-determination requested</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">increasing</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">increasing_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_increasing</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">increasing_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">increasing</span>
+
+        <span class="comment"># If sample_weights is passed, removed zero-weight values and clean</span>
+        <span class="comment"># order</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+
+        <span class="identifier">order</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">lexsort</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">array</span><span class="grouping">[</span><span class="identifier">order</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">array</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="identifier">unique_X</span><span class="punctuation">,</span> <span class="identifier">unique_y</span><span class="punctuation">,</span> <span class="identifier">unique_sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_make_unique</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">unique_X</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">isotonic_regression</span><span class="grouping">(</span><span class="identifier">unique_y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">unique_sample_weight</span><span class="punctuation">,</span>
+                                <span class="identifier">y_min</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_min</span><span class="punctuation">,</span> <span class="identifier">y_max</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_max</span><span class="punctuation">,</span>
+                                <span class="identifier">increasing</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">increasing_</span><span class="grouping">)</span>
+
+        <span class="comment"># Handle the left and right bounds on X</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_min_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_max_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">trim_duplicates</span><span class="punctuation">:</span>
+            <span class="comment"># Remove unnecessary points for faster prediction</span>
+            <span class="identifier">keep_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">,</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+            <span class="comment"># Aside from the 1st and last point, remove points whose y values</span>
+            <span class="comment"># are equal to both the point before and the point after it.</span>
+            <span class="identifier">keep_data</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_or</span><span class="grouping">(</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">not_equal</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">not_equal</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">[</span><span class="int-literal">2</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">keep_data</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">[</span><span class="identifier">keep_data</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># The ability to turn off trim_duplicates is only used to it make</span>
+            <span class="comment"># easier to unit test that removing duplicates in y does not have</span>
+            <span class="comment"># any impact the resulting interpolation function (besides</span>
+            <span class="comment"># prediction speed).</span>
+            <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model using X, y as training data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples,) or (n_samples, 1)
+            Training data.
+
+            .. versionchanged:: 0.24
+               Also accepts 2d array with 1 feature.
+
+        y : array-like of shape (n_samples,)
+            Training target.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Weights. If set to None, all weights will be set to 1 (equal
+            weights).
+
+        Returns
+        -------
+        self : object
+            Returns an instance of self.
+
+        Notes
+        -----
+        X is stored for future use, as :meth:`transform` needs X to interpolate
+        new input data.
+        """</span>
+        <span class="identifier">check_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">check_params</span><span class="grouping">)</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">check_params</span><span class="grouping">)</span>
+        <span class="identifier">check_consistent_length</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="comment"># Transform y by running the isotonic regression algorithm and</span>
+        <span class="comment"># transform X accordingly.</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_build_y</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="comment"># It is necessary to store the non-redundant part of the training set</span>
+        <span class="comment"># on the model to make it possible to support model persistence via</span>
+        <span class="comment"># the pickle module as the object built by scipy.interp1d is not</span>
+        <span class="comment"># picklable directly.</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_thresholds_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_thresholds_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span>
+
+        <span class="comment"># Build the interpolation function</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_build_f</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">T</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Transform new data by linear interpolation
+
+        Parameters
+        ----------
+        T : array-like of shape (n_samples,) or (n_samples, 1)
+            Data to transform.
+
+            .. versionchanged:: 0.24
+               Also accepts 2d array with 1 feature.
+
+        Returns
+        -------
+        y_pred : ndarray of shape (n_samples,)
+            The transformed data
+        """</span>
+
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">'X_thresholds_'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_thresholds_</span><span class="punctuation">.</span><span class="identifier">dtype</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span>
+
+        <span class="identifier">T</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_input_data_shape</span><span class="grouping">(</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="identifier">T</span> <span class="arithmetic-assignment">=</span> <span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>  <span class="comment"># use 1d view</span>
+
+        <span class="comment"># Handle the out_of_bounds argument by clipping if needed</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">out_of_bounds</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">"raise", "nan", "clip"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"The argument ``out_of_bounds`` must be in "</span>
+                             <span class="string-literal">"'nan', 'clip', 'raise'; got {0}"</span>
+                             <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">out_of_bounds</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">out_of_bounds</span> <span class="relational-operator">==</span> <span class="string-literal">"clip"</span><span class="punctuation">:</span>
+            <span class="identifier">T</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">clip</span><span class="grouping">(</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_min_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_max_</span><span class="grouping">)</span>
+
+        <span class="identifier">res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">f_</span><span class="grouping">(</span><span class="identifier">T</span><span class="grouping">)</span>
+
+        <span class="comment"># on scipy 0.17, interp1d up-casts to float64, so we cast back</span>
+        <span class="identifier">res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">res</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">res</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">T</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict new data by linear interpolation.
+
+        Parameters
+        ----------
+        T : array-like of shape (n_samples,) or (n_samples, 1)
+            Data to transform.
+
+        Returns
+        -------
+        y_pred : ndarray of shape (n_samples,)
+            Transformed data.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">T</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">__getstate__</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Pickle-protocol - return state of the estimator. """</span>
+        <span class="identifier">state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__getstate__</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="comment"># remove interpolation method</span>
+        <span class="identifier">state</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="string-literal">'f_'</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">state</span>
+
+    <span class="keyword">def</span> <span class="identifier">__setstate__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">state</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Pickle-protocol - set state of the estimator.
+
+        We need to rebuild the interpolation function.
+        """</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__setstate__</span><span class="grouping">(</span><span class="identifier">state</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">'X_thresholds_') and hasattr(self, 'y_thresholds_'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_build_f</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_thresholds_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_thresholds_</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'X_types': ['1darray'</span><span class="grouping">]</span><span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

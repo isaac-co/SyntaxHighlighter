@@ -1,0 +1,1043 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Alignments handling for Faceswap's Manual Adjustments tool. Handles the conversion of
+alignments data to :class:`~lib.align.DetectedFace` objects, and the update of these faces
+when edits are made in the GUI. """</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">import</span> <span class="identifier">sys</span>
+<span class="keyword">import</span> <span class="identifier">tkinter</span> <span class="keyword">as</span> <span class="identifier">tk</span>
+<span class="keyword">from</span> <span class="identifier">copy</span> <span class="keyword">import</span> <span class="identifier">deepcopy</span>
+<span class="keyword">from</span> <span class="identifier">queue</span> <span class="keyword">import</span> <span class="identifier">Queue</span><span class="punctuation">,</span> <span class="identifier">Empty</span>
+<span class="keyword">from</span> <span class="identifier">time</span> <span class="keyword">import</span> <span class="identifier">sleep</span>
+<span class="keyword">from</span> <span class="identifier">threading</span> <span class="keyword">import</span> <span class="identifier">Lock</span>
+
+<span class="keyword">import</span> <span class="identifier">cv2</span>
+<span class="keyword">import</span> <span class="identifier">imageio</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">tqdm</span> <span class="keyword">import</span> <span class="identifier">tqdm</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">align</span> <span class="keyword">import</span> <span class="identifier">Alignments</span><span class="punctuation">,</span> <span class="identifier">AlignedFace</span><span class="punctuation">,</span> <span class="identifier">DetectedFace</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">gui</span><span class="punctuation">.</span><span class="identifier">custom_widgets</span> <span class="keyword">import</span> <span class="identifier">PopupProgress</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">gui</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">FileHandler</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">image</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">SingleFrameLoader</span><span class="punctuation">,</span> <span class="identifier">ImagesLoader</span><span class="punctuation">,</span> <span class="identifier">ImagesSaver</span><span class="punctuation">,</span> <span class="identifier">encode_image</span><span class="punctuation">,</span>
+                       <span class="identifier">generate_thumbnail</span><span class="grouping">)</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">multithreading</span> <span class="keyword">import</span> <span class="identifier">MultiThread</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">get_folder</span>
+
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+
+<span class="keyword">class</span> <span class="identifier">DetectedFaces</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Handles the manipulation of :class:`~lib.align.DetectedFace` objects stored
+    in the alignments file. Acts as a parent class for the IO operations (saving and loading from
+    an alignments file), the face update operations (when changes are made to alignments in the
+    GUI) and the face filters (when a user changes the filter navigation mode.)
+
+    Parameters
+    ----------
+    tk_globals: :class:`~tools.manual.manual.TkGlobals`
+        The tkinter variables that apply to the whole of the GUI
+    alignments_path: str
+        The full path to the alignments file
+    input_location: str
+        The location of the input folder of frames or video file
+    extractor: :class:`~tools.manual.manual.Aligner`
+        The pipeline for passing faces through the aligner and retrieving results
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">tk_globals</span><span class="punctuation">,</span> <span class="identifier">alignments_path</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="punctuation">,</span> <span class="identifier">extractor</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (tk_globals: %s. alignments_path: %s, input_location: %s "</span>
+                     <span class="string-literal">"extractor: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">tk_globals</span><span class="punctuation">,</span> <span class="identifier">alignments_path</span><span class="punctuation">,</span>
+                     <span class="identifier">input_location</span><span class="punctuation">,</span> <span class="identifier">extractor</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tk_globals</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">set</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_alignments</span><span class="grouping">(</span><span class="identifier">alignments_path</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">extractor</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_vars</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_tk_vars</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_children</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">io</span><span class="arithmetic-assignment">=</span><span class="identifier">_DiskIO</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">update</span><span class="arithmetic-assignment">=</span><span class="identifier">FaceUpdate</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">filter</span><span class="arithmetic-assignment">=</span><span class="identifier">Filter</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;&lt;&lt;&lt; PUBLIC PROPERTIES &gt;&gt;&gt;&gt; #</span>
+    <span class="comment"># &lt;&lt; SUBCLASSES &gt;&gt; #</span>
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">extractor</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`~tools.manual.manual.Aligner`: The pipeline for passing faces through the
+        aligner and retrieving results. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">filter</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`Filter`: Handles returning of faces and stats based on the current user set
+        navigation mode filter. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_children</span><span class="grouping">[</span><span class="string-literal">"filter"</span><span class="grouping">]</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">update</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`FaceUpdate`: Handles the adding, removing and updating of
+        :class:`~lib.align.DetectedFace` stored within the alignments file. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_children</span><span class="grouping">[</span><span class="string-literal">"update"</span><span class="grouping">]</span>
+
+    <span class="comment"># &lt;&lt; TKINTER VARIABLES &gt;&gt; #</span>
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">tk_unsaved</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`tkinter.BooleanVar`: The variable indicating whether the alignments have been
+        updated since the last save. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_vars</span><span class="grouping">[</span><span class="string-literal">"unsaved"</span><span class="grouping">]</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">tk_edited</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`tkinter.BooleanVar`: The variable indicating whether an edit has occurred
+        meaning a GUI redraw needs to be triggered. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_vars</span><span class="grouping">[</span><span class="string-literal">"edited"</span><span class="grouping">]</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">tk_face_count_changed</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`tkinter.BooleanVar`: The variable indicating whether a face has been added or
+        removed meaning the :class:`FaceViewer` grid redraw needs to be triggered. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_vars</span><span class="grouping">[</span><span class="string-literal">"face_count_changed"</span><span class="grouping">]</span>
+
+    <span class="comment"># &lt;&lt; STATISTICS &gt;&gt; #</span>
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">available_masks</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The mask type names stored in the alignments; type as key with the number
+        of faces which possess the mask type as value. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">mask_summary</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">current_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" list: The most up to date full list of :class:`~lib.align.DetectedFace`
+        objects. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">video_meta_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The frame meta data stored in the alignments file. If data does not exist in the
+        alignments file then ``None`` is returned for each Key """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">video_meta_data</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">face_count_per_index</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" list: Count of faces for each frame. List is in frame index order.
+
+        The list needs to be calculated on the fly as the number of faces in a frame
+        can change based on user actions. """</span>
+        <span class="keyword">return</span> <span class="grouping">[</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">faces</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">faces</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">]</span>
+
+    <span class="comment"># &lt;&lt;&lt;&lt; PUBLIC METHODS &gt;&gt;&gt;&gt; #</span>
+    <span class="keyword">def</span> <span class="identifier">is_frame_updated</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if the given frame index has updated faces within it otherwise
+        ``False`` """</span>
+        <span class="keyword">return</span> <span class="identifier">frame_index</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span>
+
+    <span class="keyword">def</span> <span class="identifier">load_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the faces as :class:`~lib.align.DetectedFace` objects from the alignments
+        file. """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_children</span><span class="grouping">[</span><span class="string-literal">"io"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">save</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Save the alignments file with the latest edits. """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_children</span><span class="grouping">[</span><span class="string-literal">"io"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">revert_to_saved</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Revert the frame's alignments to their saved version for the given frame index.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that should have their faces reverted to their saved version
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_children</span><span class="grouping">[</span><span class="string-literal">"io"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">revert_to_saved</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">extract</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Extract the faces in the current video to a user supplied folder. """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_children</span><span class="grouping">[</span><span class="string-literal">"io"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">extract</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">save_video_meta_data</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Save video meta data to the alignments file. This is executed if the video meta data
+        does not already exist in the alignments file, so the video does not need to be scanned
+        on every use of the Manual Tool.
+
+        Parameters
+        ----------
+        pts_time: list
+            A list of presentation timestamps (`float`) in frame index order for every frame in
+            the input video
+        keyframes: list
+            A list of frame indices corresponding to the key frames in the input video.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">save_video_meta_data</span><span class="grouping">(</span><span class="identifier">pts_time</span><span class="punctuation">,</span> <span class="identifier">keyframes</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;&lt;&lt;&lt; PRIVATE METHODS &gt;&gt;&gt; #</span>
+    <span class="comment"># &lt;&lt; INIT &gt;&gt; #</span>
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_set_tk_vars</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the required tkinter variables.
+
+        The alignments specific `unsaved` and `edited` are set here.
+        The global variables are added into the dictionary with `None` as value, so the
+        objects exist. Their actual variables are populated during :func:`load_faces`.
+
+        Returns
+        -------
+        dict
+            The internal variable name as key with the tkinter variable as value
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">name</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"unsaved", "edited", "face_count_changed"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tk</span><span class="punctuation">.</span><span class="identifier">BooleanVar</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">var</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">var</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_alignments</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">alignments_path</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get the :class:`~lib.align.Alignments` object for the given location.
+
+        Parameters
+        ----------
+        alignments_path: str
+            Full path to the alignments file. If empty string is passed then location is calculated
+            from the source folder
+        input_location: str
+            The location of the input folder of frames or video file
+
+        Returns
+        -------
+        :class:`~lib.align.Alignments`
+            The alignments object for the given input location
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"alignments_path: %s, input_location: %s"</span><span class="punctuation">,</span> <span class="identifier">alignments_path</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">alignments_path</span><span class="punctuation">:</span>
+            <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">alignments_path</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"alignments.fsa"</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="punctuation">:</span>
+                <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">vid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">input_location</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">vid</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">folder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_location</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Alignments</span><span class="grouping">(</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">version</span> <span class="relational-operator">==</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">error</span><span class="grouping">(</span><span class="string-literal">"The Manual Tool is not compatible with legacy Alignments files."</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"You can update legacy Alignments files by using the Extract job in the "</span>
+                        <span class="string-literal">"Alignments tool to re-extract the faces in full-head format."</span><span class="grouping">)</span>
+            <span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">exit</span><span class="grouping">(</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"folder: %s, filename: %s, alignments: %s"</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_DiskIO</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Handles the loading of :class:`~lib.align.DetectedFaces` from the alignments file
+    into :class:`DetectedFaces` and the saving of this data (in the opposite direction) to an
+    alignments file.
+
+    Parameters
+    ----------
+    detected_faces: :class:`DetectedFaces`
+        The parent :class:`DetectedFaces` object
+    input_location: str
+        The location of the input folder of frames or video file
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (detected_faces: %s, input_location: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_input_location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_location</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_alignments</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_unsaved</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">tk_unsaved</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_edited</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">tk_edited</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_face_count_changed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">tk_face_count_changed</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_globals</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sorted_frame_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">load</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the faces from the alignments file, convert to
+        :class:`~lib.align.DetectedFace`. objects and add to :attr:`_frame_faces`. """</span>
+        <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">this_frame_faces</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+            <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="identifier">face</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">item</span><span class="punctuation">,</span> <span class="invalid">w</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">b</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+                <span class="identifier">this_frame_faces</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">this_frame_faces</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">save</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Convert updated :class:`~lib.align.DetectedFace` objects to alignments format
+        and save the alignments file. """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_unsaved</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Alignments not updated. Returning"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">frames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Saving alignments for %s updated frames"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">frames</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">faces</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">frames</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">frames</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sorted_frame_names</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">frame</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">to_alignment</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">faces</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">backup</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span><span class="punctuation">.</span><span class="identifier">clear</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_unsaved</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">revert_to_saved</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Revert the frame's alignments to their saved version for the given frame index.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that should have their faces reverted to their saved version
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">frame_index</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Alignments not amended. Returning"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Reverting alignments for frame_index %s"</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="identifier">alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sorted_frame_names</span><span class="grouping">[</span><span class="identifier">frame_index</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">[</span><span class="string-literal">"faces"</span><span class="grouping">]</span>
+        <span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">[</span><span class="identifier">frame_index</span><span class="grouping">]</span>
+
+        <span class="identifier">reset_grid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_remove_faces</span><span class="grouping">(</span><span class="identifier">alignments</span><span class="punctuation">,</span> <span class="identifier">faces</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">detected_face</span><span class="punctuation">,</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">faces</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">detected_face</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">,</span> <span class="invalid">w</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">b</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span><span class="punctuation">.</span><span class="identifier">remove</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_unsaved</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">reset_grid</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_face_count_changed</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_edited</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_add_remove_faces</span><span class="grouping">(</span><span class="identifier">cls</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="punctuation">,</span> <span class="identifier">faces</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" On a revert, ensure that the alignments and detected face object counts for each frame
+        are in sync. """</span>
+        <span class="identifier">num_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">alignments</span><span class="grouping">)</span>
+        <span class="identifier">num_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">faces</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">num_alignments</span> <span class="relational-operator">==</span> <span class="identifier">num_faces</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">elif</span> <span class="identifier">num_alignments</span> <span class="relational-operator">&gt;</span> <span class="identifier">num_faces</span><span class="punctuation">:</span>
+            <span class="identifier">faces</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">num_faces</span><span class="punctuation">,</span> <span class="identifier">num_alignments</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">del</span> <span class="identifier">faces</span><span class="grouping">[</span><span class="identifier">num_alignments</span><span class="punctuation">:</span><span class="grouping">]</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">extract</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Extract the current faces to a folder.
+
+        To stop the GUI becoming completely unresponsive (particularly in Windows) the extract is
+        done in a background thread, with the process count passed back in a queue to the main
+        thread to update the progress bar.
+        """</span>
+        <span class="identifier">dirname</span> <span class="arithmetic-assignment">=</span> <span class="identifier">FileHandler</span><span class="grouping">(</span><span class="string-literal">"dir"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span>
+                              <span class="identifier">initial_folder</span><span class="arithmetic-assignment">=</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_input_location</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">title</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Select output folder..."</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">l</span><span class="invalid">e</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">dirname</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="identifier">dirname</span><span class="grouping">)</span>
+
+        <span class="identifier">queue</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Queue</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">pbar</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PopupProgress</span><span class="grouping">(</span><span class="string-literal">"Extracting Faces..."</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">frames_count</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">thread</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MultiThread</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_background_extract</span><span class="punctuation">,</span> <span class="identifier">dirname</span><span class="punctuation">,</span> <span class="identifier">queue</span><span class="grouping">)</span>
+        <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">start</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_monitor_extract</span><span class="grouping">(</span><span class="identifier">thread</span><span class="punctuation">,</span> <span class="identifier">queue</span><span class="punctuation">,</span> <span class="identifier">pbar</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_monitor_extract</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">thread</span><span class="punctuation">,</span> <span class="identifier">queue</span><span class="punctuation">,</span> <span class="identifier">progress_bar</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Monitor the extraction thread, and update the progress bar.
+
+        On completion, save alignments and clear progress bar.
+
+        Parameters
+        ----------
+        thread: :class:`lib.multithreading.MultiThread`
+            The thread that is performing the extraction task
+        queue: :class:`queue.Queue`
+            The queue that the worker thread is putting it's incremental counts to
+        progress_bar: :class:`lib.gui.custom_widget.PopupProgress`
+            The popped up progress bar
+        """</span>
+        <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">check_and_raise_error</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">is_alive</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">progress_bar</span><span class="punctuation">.</span><span class="identifier">stop</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">progress_bar</span><span class="punctuation">.</span><span class="identifier">step</span><span class="grouping">(</span><span class="identifier">queue</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="identifier">Empty</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+        <span class="identifier">progress_bar</span><span class="punctuation">.</span><span class="identifier">after</span><span class="grouping">(</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_monitor_extract</span><span class="punctuation">,</span> <span class="identifier">thread</span><span class="punctuation">,</span> <span class="identifier">queue</span><span class="punctuation">,</span> <span class="identifier">progress_bar</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_background_extract</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">output_folder</span><span class="punctuation">,</span> <span class="identifier">progress_queue</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Perform the background extraction in a thread so GUI doesn't become unresponsive.
+
+        Parameters
+        ----------
+        output_folder: str
+            The location to save the output faces to
+        progress_queue: :class:`queue.Queue`
+            The queue to place incremental counts to for updating the GUI's progress bar
+        """</span>
+        <span class="identifier">saver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ImagesSaver</span><span class="grouping">(</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">get_folder</span><span class="grouping">(</span><span class="identifier">output_folder</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">b</span><span class="invalid">y</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">loader</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ImagesLoader</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_input_location</span><span class="punctuation">,</span> <span class="identifier">count</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">frames_count</span><span class="grouping">)</span>
+        <span class="identifier">extension</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">".png"</span>
+
+        <span class="keyword">for</span> <span class="identifier">frame_idx</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">loader</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Outputting frame: %s: %s"</span><span class="punctuation">,</span> <span class="identifier">frame_idx</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+            <span class="identifier">src_filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+            <span class="identifier">frame_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">src_filename</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">progress_queue</span><span class="punctuation">.</span><span class="identifier">put</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+            <span class="keyword">for</span> <span class="identifier">face_idx</span><span class="punctuation">,</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">[</span><span class="identifier">frame_idx</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">output</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}_{}{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">face_idx</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">extension</span><span class="grouping">)</span>
+                <span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                                      <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">image</span><span class="punctuation">,</span>
+                                      <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"head"</span><span class="punctuation">,</span>
+                                      <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">512</span><span class="grouping">)</span>  <span class="comment"># TODO user selectable size</span>
+                <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">alignments</span><span class="arithmetic-assignment">=</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">to_png_meta</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                            <span class="identifier">source</span><span class="arithmetic-assignment">=</span><span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">alignments_version</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">version</span><span class="punctuation">,</span>
+                                        <span class="identifier">original_filename</span><span class="arithmetic-assignment">=</span><span class="identifier">output</span><span class="punctuation">,</span>
+                                        <span class="identifier">face_index</span><span class="arithmetic-assignment">=</span><span class="identifier">face_idx</span><span class="punctuation">,</span>
+                                        <span class="identifier">source_filename</span><span class="arithmetic-assignment">=</span><span class="identifier">src_filename</span><span class="punctuation">,</span>
+                                        <span class="identifier">source_is_video</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="grouping">)</span><span class="grouping">)</span>
+
+                <span class="identifier">b_image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">encode_image</span><span class="grouping">(</span><span class="identifier">aligned</span><span class="punctuation">.</span><span class="identifier">face</span><span class="punctuation">,</span> <span class="identifier">extension</span><span class="punctuation">,</span> <span class="identifier">metadata</span><span class="arithmetic-assignment">=</span><span class="identifier">meta</span><span class="grouping">)</span>
+                <span class="identifier">saver</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="identifier">output</span><span class="punctuation">,</span> <span class="identifier">b_image</span><span class="grouping">)</span>
+        <span class="identifier">saver</span><span class="punctuation">.</span><span class="identifier">close</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Filter</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Returns stats and frames for filtered frames based on the user selected navigation mode
+    filter.
+
+    Parameters
+    ----------
+    detected_faces: :class:`DetectedFaces`
+        The parent :class:`DetectedFaces` object
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (detected_faces: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_globals</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">count</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The number of frames that meet the filter criteria returned by
+        :attr:`~tools.manual.manual.TkGlobals.filter_mode`. """</span>
+        <span class="identifier">face_count_per_index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span><span class="punctuation">.</span><span class="identifier">face_count_per_index</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">==</span> <span class="string-literal">"No Faces"</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="int-literal">1</span> <span class="keyword">for</span> <span class="identifier">fcount</span> <span class="relational-operator">in</span> <span class="identifier">face_count_per_index</span> <span class="keyword">if</span> <span class="identifier">fcount</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">==</span> <span class="string-literal">"Has Face(s)"</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="int-literal">1</span> <span class="keyword">for</span> <span class="identifier">fcount</span> <span class="relational-operator">in</span> <span class="identifier">face_count_per_index</span> <span class="keyword">if</span> <span class="identifier">fcount</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">==</span> <span class="string-literal">"Multiple Faces"</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="int-literal">1</span> <span class="keyword">for</span> <span class="identifier">fcount</span> <span class="relational-operator">in</span> <span class="identifier">face_count_per_index</span> <span class="keyword">if</span> <span class="identifier">fcount</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">face_count_per_index</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"filter mode: %s, frame count: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">raw_indices</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: The frame and face indices that meet the current filter criteria for each
+        displayed face. """</span>
+        <span class="identifier">frame_indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">face_indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">!=</span> <span class="string-literal">"No Faces"</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">frame_idx</span><span class="punctuation">,</span> <span class="identifier">face_count</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span><span class="punctuation">.</span><span class="identifier">face_count_per_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">face_count</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">==</span> <span class="string-literal">"Multiple Faces"</span><span class="punctuation">:</span>
+                    <span class="keyword">continue</span>
+                <span class="keyword">for</span> <span class="identifier">face_idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">face_count</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">frame_indices</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">frame_idx</span><span class="grouping">)</span>
+                    <span class="identifier">face_indices</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">face_idx</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"frame_indices: %s, face_indices: %s"</span><span class="punctuation">,</span> <span class="identifier">frame_indices</span><span class="punctuation">,</span> <span class="identifier">face_indices</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">frame</span><span class="arithmetic-assignment">=</span><span class="identifier">frame_indices</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="arithmetic-assignment">=</span><span class="identifier">face_indices</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">frames_list</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" list: The list of frame indices that meet the filter criteria returned by
+        :attr:`~tools.manual.manual.TkGlobals.filter_mode`. """</span>
+        <span class="identifier">face_count_per_index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span><span class="punctuation">.</span><span class="identifier">face_count_per_index</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">==</span> <span class="string-literal">"No Faces"</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">idx</span> <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">count</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">face_count_per_index</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">count</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">==</span> <span class="string-literal">"Multiple Faces"</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">idx</span> <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">count</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">face_count_per_index</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">count</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span> <span class="relational-operator">==</span> <span class="string-literal">"Has Face(s)"</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">idx</span> <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">count</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">face_count_per_index</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">count</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">face_count_per_index</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"filter mode: %s, number_frames: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">filter_mode</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">FaceUpdate</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Perform updates on :class:`~lib.align.DetectedFace` objects stored in
+    :class:`DetectedFaces` when changes are made within the GUI.
+
+    Parameters
+    ----------
+    detected_faces: :class:`DetectedFaces`
+        The parent :class:`DetectedFaces` object
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (detected_faces: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_globals</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_unsaved</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">tk_unsaved</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">extractor</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_tk_edited</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`tkinter.BooleanVar`: The variable indicating whether an edit has occurred
+        meaning a GUI redraw needs to be triggered.
+
+        Notes
+        -----
+        The variable is still a ``None`` when this class is initialized, so referenced explicitly.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span><span class="punctuation">.</span><span class="identifier">tk_edited</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_tk_face_count_changed</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`tkinter.BooleanVar`: The variable indicating whether an edit has occurred
+        meaning a GUI redraw needs to be triggered.
+
+        Notes
+        -----
+        The variable is still a ``None`` when this class is initialized, so referenced explicitly.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span><span class="punctuation">.</span><span class="identifier">tk_face_count_changed</span>
+
+    <span class="keyword">def</span> <span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Checks whether the frame has already been added to :attr:`_updated_frame_indices` and
+        adds it. Triggers the unsaved variable if this is the first edited frame. Returns the
+        detected face objects for the given frame.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame index to check whether there are updated alignments available
+
+        Returns
+        -------
+        list
+            The :class:`~lib.align.DetectedFace` objects for the requested frame
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_unsaved</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_unsaved</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_updated_frame_indices</span><span class="punctuation">.</span><span class="identifier">add</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">[</span><span class="identifier">frame_index</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">add</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">pnt_x</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="punctuation">,</span> <span class="identifier">pnt_y</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a :class:`~lib.align.DetectedFace` object to the current frame with the
+        given dimensions.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        pnt_x: int
+            The left point of the bounding box
+        width: int
+            The width of the bounding box
+        pnt_y: int
+            The top point of the bounding box
+        height: int
+            The height of the bounding box
+        """</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="identifier">faces</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">)</span>
+        <span class="identifier">face_index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">faces</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bounding_box</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">pnt_x</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="punctuation">,</span> <span class="identifier">pnt_y</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="punctuation">,</span> <span class="identifier">aligner</span><span class="arithmetic-assignment">=</span><span class="string-literal">"cv2-dnn"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_face_count_changed</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Delete the :class:`~lib.align.DetectedFace` object for the given frame and face
+        indices.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Deleting face at frame index: %s face index: %s"</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span>
+        <span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="keyword">del</span> <span class="identifier">faces</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_face_count_changed</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">bounding_box</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">pnt_x</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="punctuation">,</span> <span class="identifier">pnt_y</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="punctuation">,</span> <span class="identifier">aligner</span><span class="arithmetic-assignment">=</span><span class="string-literal">"FAN"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update the bounding box for the :class:`~lib.align.DetectedFace` object at the
+        given frame and face indices, with the given dimensions and update the 68 point landmarks
+        from the :class:`~tools.manual.manual.Aligner` for the updated bounding box.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        pnt_x: int
+            The left point of the bounding box
+        width: int
+            The width of the bounding box
+        pnt_y: int
+            The top point of the bounding box
+        height: int
+            The height of the bounding box
+        aligner: ["cv2-dnn", "FAN"], optional
+            The aligner to use to generate the landmarks. Default: "FAN"
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"frame_index: %s, face_index %s, pnt_x %s, width %s, pnt_y %s, height %s, "</span>
+                     <span class="string-literal">"aligner: %s"</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">pnt_x</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="punctuation">,</span> <span class="identifier">pnt_y</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="punctuation">,</span> <span class="identifier">aligner</span><span class="grouping">)</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pnt_x</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">w</span> <span class="arithmetic-assignment">=</span> <span class="identifier">width</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pnt_y</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">h</span> <span class="arithmetic-assignment">=</span> <span class="identifier">height</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">.</span><span class="identifier">get_landmarks</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">aligner</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">landmark</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">landmark_index</span><span class="punctuation">,</span> <span class="identifier">shift_x</span><span class="punctuation">,</span> <span class="identifier">shift_y</span><span class="punctuation">,</span> <span class="identifier">is_zoomed</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Shift a single landmark point for the :class:`~lib.align.DetectedFace` object
+        at the given frame and face indices by the given x and y values.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        landmark_index: int or list
+            The landmark index to shift. If a list is provided, this should be a list of landmark
+            indices to be shifted
+        shift_x: int
+            The amount to shift the landmark by along the x axis
+        shift_y: int
+            The amount to shift the landmark by along the y axis
+        is_zoomed: bool
+            ``True`` if landmarks are being adjusted on a zoomed image otherwise ``False``
+        """</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">is_zoomed</span><span class="punctuation">:</span>
+            <span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                                  <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"face"</span><span class="punctuation">,</span>
+                                  <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">frame_display_dims</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">landmark</span> <span class="arithmetic-assignment">=</span> <span class="identifier">aligned</span><span class="punctuation">.</span><span class="identifier">landmarks</span><span class="grouping">[</span><span class="identifier">landmark_index</span><span class="grouping">]</span>
+            <span class="identifier">landmark</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span><span class="identifier">shift_x</span><span class="punctuation">,</span> <span class="identifier">shift_y</span><span class="grouping">)</span>
+            <span class="identifier">matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">aligned</span><span class="punctuation">.</span><span class="identifier">adjusted_matrix</span>
+            <span class="identifier">matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">invertAffineTransform</span><span class="grouping">(</span><span class="identifier">matrix</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">landmark</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">landmark</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">landmark</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">landmark</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">landmark</span><span class="punctuation">,</span> <span class="identifier">matrix</span><span class="punctuation">,</span> <span class="identifier">landmark</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="grouping">[</span><span class="identifier">landmark_index</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">landmark</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">for</span> <span class="identifier">lmk</span><span class="punctuation">,</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">landmark</span><span class="punctuation">,</span> <span class="identifier">landmark_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">lmk</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">lmk</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="identifier">lmk</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">lmk</span><span class="punctuation">,</span> <span class="identifier">matrix</span><span class="punctuation">,</span> <span class="identifier">lmk</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="grouping">)</span>
+                    <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lmk</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="grouping">[</span><span class="identifier">landmark_index</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span><span class="identifier">shift_x</span><span class="punctuation">,</span> <span class="identifier">shift_y</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">.</span><span class="identifier">get_masks</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">landmarks</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">shift_x</span><span class="punctuation">,</span> <span class="identifier">shift_y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Shift all of the landmarks and bounding box for the
+        :class:`~lib.align.DetectedFace` object at the given frame and face indices by the
+        given x and y values and update the masks.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        shift_x: int
+            The amount to shift the landmarks by along the x axis
+        shift_y: int
+            The amount to shift the landmarks by along the y axis
+
+        Notes
+        -----
+        Whilst the bounding box does not need to be shifted, it is anyway, to ensure that it is
+        aligned with the newly adjusted landmarks.
+        """</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">shift_x</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">shift_y</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span><span class="identifier">shift_x</span><span class="punctuation">,</span> <span class="identifier">shift_y</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">.</span><span class="identifier">get_masks</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">landmarks_rotate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">angle</span><span class="punctuation">,</span> <span class="identifier">center</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Rotate the landmarks on an Extract Box rotate for the
+        :class:`~lib.align.DetectedFace` object at the given frame and face indices for the
+        given angle from the given center point.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        angle: :class:`numpy.ndarray`
+            The angle, in radians to rotate the points by
+        center: :class:`numpy.ndarray`
+            The center point of the Landmark's Extract Box
+        """</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">rot_mat</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">getRotationMatrix2D</span><span class="grouping">(</span><span class="identifier">tuple</span><span class="grouping">(</span><span class="identifier">center</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">angle</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">expand_dims</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                          <span class="identifier">rot_mat</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">.</span><span class="identifier">get_masks</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">landmarks_scale</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">scale</span><span class="punctuation">,</span> <span class="identifier">center</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Scale the landmarks on an Extract Box resize for the
+        :class:`~lib.align.DetectedFace` object at the given frame and face indices from the
+        given center point.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        scale: float
+            The amount to scale the landmarks by
+        center: :class:`numpy.ndarray`
+            The center point of the Landmark's Extract Box
+        """</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-operator">-</span> <span class="identifier">center</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">scale</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">center</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">.</span><span class="identifier">get_masks</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">mask_type</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update the mask on an edit for the :class:`~lib.align.DetectedFace` object at
+        the given frame and face indices, for the given mask and mask type.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        mask: class:`numpy.ndarray`:
+            The mask to replace
+        mask_type: str
+            The name of the mask that is to be replaced
+        """</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">mask_type</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">replace_mask</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_edited</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">direction</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Copy the alignments from the previous or next frame that has alignments
+        to the current frame.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the needs to have alignments copied to it
+        direction: ["prev", "next"]
+            Whether to copy alignments from the previous frame with alignments, or the next
+            frame with alignments
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"frame: %s, direction: %s"</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">direction</span><span class="grouping">)</span>
+        <span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="identifier">frames_with_faces</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">idx</span> <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">faces</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detected_faces</span><span class="punctuation">.</span><span class="identifier">current_faces</span><span class="grouping">)</span>
+                             <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">faces</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">direction</span> <span class="relational-operator">==</span> <span class="string-literal">"prev"</span><span class="punctuation">:</span>
+            <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">idx</span> <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">reversed</span><span class="grouping">(</span><span class="identifier">frames_with_faces</span><span class="grouping">)</span>
+                        <span class="keyword">if</span> <span class="identifier">idx</span> <span class="relational-operator">&lt;</span> <span class="identifier">frame_index</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">idx</span> <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">frames_with_faces</span>
+                        <span class="keyword">if</span> <span class="identifier">idx</span> <span class="relational-operator">&gt;</span> <span class="identifier">frame_index</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">idx</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="comment"># No previous/next frame available</span>
+            <span class="keyword">return</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Copying alignments from frame %s to frame: %s"</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="identifier">faces</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">deepcopy</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_at_frame_index</span><span class="grouping">(</span><span class="identifier">idx</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_face_count_changed</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">tk_update</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">post_edit_trigger</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="punctuation">,</span> <span class="identifier">face_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Update the jpg thumbnail and the viewport thumbnail on a face edit.
+
+        Parameters
+        ----------
+        frame_index: int
+            The frame that the face is being set for
+        face_index: int
+            The face index within the frame
+        """</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">[</span><span class="identifier">frame_index</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">face_index</span><span class="grouping">]</span>
+        <span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                              <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_globals</span><span class="punctuation">.</span><span class="identifier">current_frame</span><span class="grouping">[</span><span class="string-literal">"image"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                              <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"head"</span><span class="punctuation">,</span>
+                              <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">96</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">thumbnail</span> <span class="arithmetic-assignment">=</span> <span class="identifier">generate_thumbnail</span><span class="grouping">(</span><span class="identifier">aligned</span><span class="punctuation">.</span><span class="identifier">face</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">96</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_tk_edited</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">ThumbsCreator</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Background loader to generate thumbnails for the alignments file. Generates low resolution
+    thumbnails in parallel threads for faster processing.
+
+    Parameters
+    ----------
+    detected_faces: :class:`~tool.manual.faces.DetectedFaces`
+        The :class:`~lib.align.DetectedFace` objects for this video
+    input_location: str
+        The location of the input folder of frames or video file
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="punctuation">,</span> <span class="identifier">input_location</span><span class="punctuation">,</span> <span class="identifier">single_process</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (detected_faces: %s, input_location: %s, "</span>
+                     <span class="string-literal">"single_process: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="punctuation">,</span>
+                     <span class="identifier">input_location</span><span class="punctuation">,</span> <span class="identifier">single_process</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">80</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pbar</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">pbar</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">lock</span><span class="arithmetic-assignment">=</span><span class="identifier">Lock</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">key_frames</span><span class="arithmetic-assignment">=</span><span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">video_meta_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"keyframes"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span>
+                          <span class="identifier">pts_times</span><span class="arithmetic-assignment">=</span><span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">video_meta_data</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"pts_time"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_location</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_alignments</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_video</span> <span class="arithmetic-assignment">=</span> <span class="identifier">all</span><span class="grouping">(</span><span class="identifier">val</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">for</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">cpu_count</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">2</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_video</span> <span class="logical-operator">and</span> <span class="identifier">single_process</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_video</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">single_process</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span><span class="grouping">[</span><span class="string-literal">"key_frames"</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span><span class="punctuation">,</span> <span class="int-literal">32</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">has_thumbs</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if the underlying alignments file holds thumbnail images
+        otherwise ``False``. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">thumbnails</span><span class="punctuation">.</span><span class="identifier">has_thumbnails</span>
+
+    <span class="keyword">def</span> <span class="identifier">generate_cache</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Extract the face thumbnails from a video or folder of images into the
+        alignments file. """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pbar</span><span class="grouping">[</span><span class="string-literal">"pbar"] = tqdm(desc="Caching Thumbnails"</span><span class="punctuation">,</span>
+                                  <span class="identifier">leave</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                  <span class="identifier">total</span><span class="arithmetic-assignment">=</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_is_video</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_launch_video</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_launch_folder</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_and_raise_error</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">all</span><span class="grouping">(</span><span class="logical-operator">not</span> <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">is_alive</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">thread</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+            <span class="identifier">sleep</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_join_threads</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pbar</span><span class="grouping">[</span><span class="string-literal">"pbar"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">close</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># &lt;&lt; PRIVATE METHODS &gt;&gt; #</span>
+    <span class="keyword">def</span> <span class="identifier">_check_and_raise_error</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Monitor the loading threads for errors and raise if any occur. """</span>
+        <span class="keyword">for</span> <span class="identifier">thread</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="punctuation">:</span>
+            <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">check_and_raise_error</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_join_threads</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Join the loading threads """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Joining face viewer loading threads"</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">thread</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="punctuation">:</span>
+            <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_launch_video</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Launch multiple :class:`lib.multithreading.MultiThread` objects to load faces from
+        a video file.
+
+        Splits the video into segments and passes each of these segments to separate background
+        threads for some speed up.
+        """</span>
+        <span class="identifier">key_frame_split</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span><span class="grouping">[</span><span class="string-literal">"key_frames"</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">//</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span>
+        <span class="identifier">key_frames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span><span class="grouping">[</span><span class="string-literal">"key_frames"</span><span class="grouping">]</span>
+        <span class="identifier">pts_times</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_meta</span><span class="grouping">[</span><span class="string-literal">"pts_times"</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">is_final</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idx</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+            <span class="identifier">start_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idx</span> <span class="arithmetic-operator">*</span> <span class="identifier">key_frame_split</span>
+            <span class="identifier">keyframe_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">key_frames</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">is_final</span> <span class="keyword">else</span> <span class="identifier">start_idx</span> <span class="arithmetic-operator">+</span> <span class="identifier">key_frame_split</span>
+            <span class="identifier">end_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">key_frames</span><span class="grouping">[</span><span class="identifier">keyframe_idx</span><span class="grouping">]</span>
+            <span class="identifier">start_pts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pts_times</span><span class="grouping">[</span><span class="identifier">key_frames</span><span class="grouping">[</span><span class="identifier">start_idx</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="identifier">end_pts</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span> <span class="keyword">if</span> <span class="identifier">idx</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span> <span class="keyword">else</span> <span class="identifier">pts_times</span><span class="grouping">[</span><span class="identifier">end_idx</span><span class="grouping">]</span>
+            <span class="identifier">starting_index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pts_times</span><span class="punctuation">.</span><span class="identifier">index</span><span class="grouping">(</span><span class="identifier">start_pts</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">end_pts</span><span class="punctuation">:</span>
+                <span class="identifier">segment_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">pts_times</span><span class="grouping">[</span><span class="identifier">key_frames</span><span class="grouping">[</span><span class="identifier">start_idx</span><span class="grouping">]</span><span class="punctuation">:</span><span class="identifier">end_idx</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">segment_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">pts_times</span><span class="grouping">[</span><span class="identifier">key_frames</span><span class="grouping">[</span><span class="identifier">start_idx</span><span class="grouping">]</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"thread index: %s, start_idx: %s, end_idx: %s, start_pts: %s, "</span>
+                         <span class="string-literal">"end_pts: %s, starting_index: %s, segment_count: %s"</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">start_idx</span><span class="punctuation">,</span>
+                         <span class="identifier">end_idx</span><span class="punctuation">,</span> <span class="identifier">start_pts</span><span class="punctuation">,</span> <span class="identifier">end_pts</span><span class="punctuation">,</span> <span class="identifier">starting_index</span><span class="punctuation">,</span> <span class="identifier">segment_count</span><span class="grouping">)</span>
+            <span class="identifier">thread</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MultiThread</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_load_from_video</span><span class="punctuation">,</span>
+                                 <span class="identifier">start_pts</span><span class="punctuation">,</span>
+                                 <span class="identifier">end_pts</span><span class="punctuation">,</span>
+                                 <span class="identifier">starting_index</span><span class="punctuation">,</span>
+                                 <span class="identifier">segment_count</span><span class="grouping">)</span>
+            <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">start</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">thread</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_launch_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Launch :class:`lib.multithreading.MultiThread` to retrieve faces from a
+        folder of images.
+
+        Goes through the file list one at a time, passing each file to a separate background
+        thread for some speed up.
+        """</span>
+        <span class="identifier">reader</span> <span class="arithmetic-assignment">=</span> <span class="identifier">SingleFrameLoader</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_location</span><span class="grouping">)</span>
+        <span class="identifier">num_threads</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">reader</span><span class="punctuation">.</span><span class="identifier">count</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span><span class="grouping">)</span>
+        <span class="identifier">frame_split</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reader</span><span class="punctuation">.</span><span class="identifier">count</span> <span class="arithmetic-operator">//</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_num_threads</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"total images: %s, num_threads: %s, frames_per_thread: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">reader</span><span class="punctuation">.</span><span class="identifier">count</span><span class="punctuation">,</span> <span class="identifier">num_threads</span><span class="punctuation">,</span> <span class="identifier">frame_split</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">num_threads</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">is_final</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idx</span> <span class="relational-operator">==</span> <span class="identifier">num_threads</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+            <span class="identifier">start_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idx</span> <span class="arithmetic-operator">*</span> <span class="identifier">frame_split</span>
+            <span class="identifier">end_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reader</span><span class="punctuation">.</span><span class="identifier">count</span> <span class="keyword">if</span> <span class="identifier">is_final</span> <span class="keyword">else</span> <span class="identifier">start_idx</span> <span class="arithmetic-operator">+</span> <span class="identifier">frame_split</span>
+            <span class="identifier">thread</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MultiThread</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_load_from_folder</span><span class="punctuation">,</span> <span class="identifier">reader</span><span class="punctuation">,</span> <span class="identifier">start_idx</span><span class="punctuation">,</span> <span class="identifier">end_idx</span><span class="grouping">)</span>
+            <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">start</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">thread</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_load_from_video</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">pts_start</span><span class="punctuation">,</span> <span class="identifier">pts_end</span><span class="punctuation">,</span> <span class="identifier">start_index</span><span class="punctuation">,</span> <span class="identifier">segment_count</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Loads faces from video for the given segment of the source video.
+
+        Each segment of the video is extracted from in a different background thread.
+
+        Parameters
+        ----------
+        pts_start: float
+            The start time to cut the segment out of the video
+        pts_end: float
+            The end time to cut the segment out of the video
+        start_index: int
+            The frame index that this segment starts from. Used for calculating the actual frame
+            index of each frame extracted
+        segment_count: int
+            The number of frames that appear in this segment. Used for ending early in case more
+            frames come out of the segment than should appear (sometimes more frames are picked up
+            at the end of the segment, so these are discarded)
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"pts_start: %s, pts_end: %s, start_index: %s, segment_count: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">pts_start</span><span class="punctuation">,</span> <span class="identifier">pts_end</span><span class="punctuation">,</span> <span class="identifier">start_index</span><span class="punctuation">,</span> <span class="identifier">segment_count</span><span class="grouping">)</span>
+        <span class="identifier">reader</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_reader</span><span class="grouping">(</span><span class="identifier">pts_start</span><span class="punctuation">,</span> <span class="identifier">pts_end</span><span class="grouping">)</span>
+        <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">sample_filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="identifier">fname</span> <span class="keyword">for</span> <span class="identifier">fname</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">)</span>
+        <span class="identifier">vidname</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_filename</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">sample_filename</span><span class="punctuation">.</span><span class="identifier">rfind</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">frame</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">reader</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">frame_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">idx</span> <span class="arithmetic-operator">+</span> <span class="identifier">start_index</span>
+            <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}_{:06d}.png"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">vidname</span><span class="punctuation">,</span> <span class="identifier">frame_idx</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_thumbail</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">frame_idx</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">idx</span> <span class="relational-operator">==</span> <span class="identifier">segment_count</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="comment"># Sometimes extra frames are picked up at the end of a segment, so stop</span>
+                <span class="comment"># processing when segment frame count has been hit.</span>
+                <span class="keyword">break</span>
+        <span class="identifier">reader</span><span class="punctuation">.</span><span class="identifier">close</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Segment complete: (starting_frame_index: %s, processed_count: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">start_index</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_reader</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">pts_start</span><span class="punctuation">,</span> <span class="identifier">pts_end</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get an imageio iterator for this thread's segment.
+
+        Parameters
+        ----------
+        pts_start: float
+            The start time to cut the segment out of the video
+        pts_end: float
+            The end time to cut the segment out of the video
+
+        Returns
+        -------
+        :class:`imageio.Reader`
+            A reader iterator for the requested segment of video
+        """</span>
+        <span class="identifier">input_params</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">"-ss"</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">pts_start</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">pts_end</span><span class="punctuation">:</span>
+            <span class="identifier">input_params</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="grouping">[</span><span class="string-literal">"-to"</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">pts_end</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"pts_start: %s, pts_end: %s, input_params: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">pts_start</span><span class="punctuation">,</span> <span class="identifier">pts_end</span><span class="punctuation">,</span> <span class="identifier">input_params</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">imageio</span><span class="punctuation">.</span><span class="identifier">get_reader</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_location</span><span class="punctuation">,</span> <span class="string-literal">"ffmpeg"</span><span class="punctuation">,</span> <span class="identifier">input_params</span><span class="arithmetic-assignment">=</span><span class="identifier">input_params</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_load_from_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">reader</span><span class="punctuation">,</span> <span class="identifier">start_index</span><span class="punctuation">,</span> <span class="identifier">end_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Loads faces from the given range of frame indices from a folder of images.
+
+        Each frame range is extracted in a different background thread.
+
+        Parameters
+        ----------
+        reader: :class:`lib.image.SingleFrameLoader`
+            The reader that is used to retrieve the requested frame
+        start_index: int
+            The starting frame index for the images to extract faces from
+        end_index: int
+            The end frame index for the images to extract faces from
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"reader: %s, start_index: %s, end_index: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">reader</span><span class="punctuation">,</span> <span class="identifier">start_index</span><span class="punctuation">,</span> <span class="identifier">end_index</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">frame_index</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">start_index</span><span class="punctuation">,</span> <span class="identifier">end_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reader</span><span class="punctuation">.</span><span class="identifier">image_from_index</span><span class="grouping">(</span><span class="identifier">frame_index</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_thumbail</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Segment complete: (start_index: %s, processed_count: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">start_index</span><span class="punctuation">,</span> <span class="identifier">end_index</span> <span class="arithmetic-operator">-</span> <span class="identifier">start_index</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_set_thumbail</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">frame_index</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Extracts the faces from the frame and adds to alignments file
+
+        Parameters
+        ----------
+        filename: str
+            The filename of the frame within the alignments file
+        frame: :class:`numpy.ndarray`
+            The frame that contains the faces
+        frame_index: int
+            The frame index of this frame in the :attr:`_frame_faces`
+        """</span>
+        <span class="keyword">for</span> <span class="identifier">face_idx</span><span class="punctuation">,</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_faces</span><span class="grouping">[</span><span class="identifier">frame_index</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                                  <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">frame</span><span class="punctuation">,</span>
+                                  <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"head"</span><span class="punctuation">,</span>
+                                  <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">96</span><span class="grouping">)</span>
+            <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">thumbnail</span> <span class="arithmetic-assignment">=</span> <span class="identifier">generate_thumbnail</span><span class="grouping">(</span><span class="identifier">aligned</span><span class="punctuation">.</span><span class="identifier">face</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">96</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">thumbnails</span><span class="punctuation">.</span><span class="identifier">add_thumbnail</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">face_idx</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">thumbnail</span><span class="grouping">)</span>
+        <span class="keyword">with</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pbar</span><span class="grouping">[</span><span class="string-literal">"lock"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pbar</span><span class="grouping">[</span><span class="string-literal">"pbar"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">update</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

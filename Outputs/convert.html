@@ -1,0 +1,1127 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin python3</span>
+<span class="comment">""" Main entry point to the convert process of FaceSwap """</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">re</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">import</span> <span class="identifier">sys</span>
+<span class="keyword">from</span> <span class="identifier">threading</span> <span class="keyword">import</span> <span class="identifier">Event</span>
+<span class="keyword">from</span> <span class="identifier">time</span> <span class="keyword">import</span> <span class="identifier">sleep</span>
+
+<span class="keyword">import</span> <span class="identifier">cv2</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">tqdm</span> <span class="keyword">import</span> <span class="identifier">tqdm</span>
+
+<span class="keyword">from</span> <span class="identifier">scripts</span><span class="punctuation">.</span><span class="identifier">fsmedia</span> <span class="keyword">import</span> <span class="identifier">Alignments</span><span class="punctuation">,</span> <span class="identifier">PostProcess</span><span class="punctuation">,</span> <span class="identifier">finalize</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">serializer</span> <span class="keyword">import</span> <span class="identifier">get_serializer</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">convert</span> <span class="keyword">import</span> <span class="identifier">Converter</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">align</span> <span class="keyword">import</span> <span class="identifier">AlignedFace</span><span class="punctuation">,</span> <span class="identifier">DetectedFace</span><span class="punctuation">,</span> <span class="identifier">update_legacy_png_header</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">gpu_stats</span> <span class="keyword">import</span> <span class="identifier">GPUStats</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">image</span> <span class="keyword">import</span> <span class="identifier">read_image_meta_batch</span><span class="punctuation">,</span> <span class="identifier">ImagesLoader</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">multithreading</span> <span class="keyword">import</span> <span class="identifier">MultiThread</span><span class="punctuation">,</span> <span class="identifier">total_cpus</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">queue_manager</span> <span class="keyword">import</span> <span class="identifier">queue_manager</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">FaceswapError</span><span class="punctuation">,</span> <span class="identifier">get_backend</span><span class="punctuation">,</span> <span class="identifier">get_folder</span><span class="punctuation">,</span> <span class="identifier">get_image_paths</span>
+<span class="keyword">from</span> <span class="identifier">plugins</span><span class="punctuation">.</span><span class="identifier">extract</span><span class="punctuation">.</span><span class="identifier">pipeline</span> <span class="keyword">import</span> <span class="identifier">Extractor</span><span class="punctuation">,</span> <span class="identifier">ExtractMedia</span>
+<span class="keyword">from</span> <span class="identifier">plugins</span><span class="punctuation">.</span><span class="identifier">plugin_loader</span> <span class="keyword">import</span> <span class="identifier">PluginLoader</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Convert</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" The Faceswap Face Conversion Process.
+
+    The conversion process is responsible for swapping the faces on source frames with the output
+    from a trained model.
+
+    It leverages a series of user selected post-processing plugins, executed from
+    :class:`lib.convert.Converter`.
+
+    The convert process is self contained and should not be referenced by any other scripts, so it
+    contains no public properties.
+
+    Parameters
+    ----------
+    arguments: :class:`argparse.Namespace`
+        The arguments to be passed to the convert process as generated from Faceswap's command
+        line arguments
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (args: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span> <span class="arithmetic-assignment">=</span> <span class="identifier">arguments</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_patch_threads</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ImagesLoader</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">input_dir</span><span class="punctuation">,</span> <span class="identifier">fast_count</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Alignments</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">,</span> <span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_opts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">OptionalActions</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">file_list</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_queues</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DiskIO</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span><span class="punctuation">.</span><span class="identifier">load_queue</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queue_size</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="grouping">)</span>
+        <span class="identifier">get_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">output_dir</span><span class="grouping">)</span>
+
+        <span class="identifier">configfile</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">configfile</span> <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">,</span> <span class="string-literal">"configfile"</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_converter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Converter</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span><span class="punctuation">.</span><span class="identifier">output_size</span><span class="punctuation">,</span>
+                                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span><span class="punctuation">.</span><span class="identifier">coverage_ratio</span><span class="punctuation">,</span>
+                                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span><span class="punctuation">.</span><span class="identifier">centering</span><span class="punctuation">,</span>
+                                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span><span class="punctuation">.</span><span class="identifier">draw_transparent</span><span class="punctuation">,</span>
+                                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span><span class="punctuation">.</span><span class="identifier">pre_encode</span><span class="punctuation">,</span>
+                                    <span class="identifier">arguments</span><span class="punctuation">,</span>
+                                    <span class="identifier">configfile</span><span class="arithmetic-assignment">=</span><span class="identifier">configfile</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_queue_size</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: Size of the converter queues. 16 for single process otherwise 32 """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">singleprocess</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">16</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">32</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_pool_processes</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The number of threads to run in parallel. Based on user options and number of
+        available processors. """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">singleprocess</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">jobs</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">jobs</span><span class="punctuation">,</span> <span class="identifier">total_cpus</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">count</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">total_cpus</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">count</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">retval</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="keyword">else</span> <span class="identifier">retval</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_validate</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Validate the Command Line Options.
+
+        Ensure that certain cli selections are valid and won't result in an error. Checks:
+            * If frames have been passed in with video output, ensure user supplies reference
+            video.
+            * If "on-the-fly" and an NN mask is selected, output warning and switch to 'extended'
+            * If a mask-type is selected, ensure it exists in the alignments file.
+            * If a predicted mask-type is selected, ensure model has been trained with a mask
+            otherwise attempt to select first available masks, otherwise raise error.
+
+        Raises
+        ------
+        FaceswapError
+            If an invalid selection has been found.
+
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">version</span> <span class="relational-operator">==</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">error</span><span class="grouping">(</span><span class="string-literal">"The alignments file format has been updated since the given alignments "</span>
+                         <span class="string-literal">"file was generated. You need to update the file to proceed."</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">error</span><span class="grouping">(</span><span class="string-literal">"To do this run the 'Alignments Tool' &gt; 'Extract' Job."</span><span class="grouping">)</span>
+            <span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">exit</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">writer</span> <span class="relational-operator">==</span> <span class="string-literal">"ffmpeg"</span> <span class="logical-operator">and</span>
+                <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">is_video</span> <span class="logical-operator">and</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">reference_video</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"Output as video selected, but using frames as input. You must "</span>
+                                <span class="string-literal">"provide a reference video ('-ref', '--reference-video')."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">on_the_fly</span> <span class="logical-operator">and</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"none", "extended", "components"</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"You have selected an incompatible mask type ('%s') for On-The-Fly "</span>
+                           <span class="string-literal">"conversion. Switching to 'extended'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"extended"</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">on_the_fly</span> <span class="logical-operator">and</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"none", "predicted"</span><span class="grouping">)</span> <span class="logical-operator">and</span>
+                <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">mask_is_valid</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"You have selected the Mask Type `{}` but at least one face does not have this "</span>
+                   <span class="string-literal">"mask stored in the Alignments File.\nYou should generate the required masks "</span>
+                   <span class="string-literal">"with the Mask Tool or set the Mask Type option to an existing Mask Type.\nA "</span>
+                   <span class="string-literal">"summary of existing masks is as follows:\nTotal faces: {}, Masks: "</span>
+                   <span class="string-literal">"{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">faces_count</span><span class="punctuation">,</span>
+                               <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">mask_summary</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span> <span class="relational-operator">==</span> <span class="string-literal">"predicted"</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span><span class="punctuation">.</span><span class="identifier">has_predicted_mask</span><span class="punctuation">:</span>
+            <span class="identifier">available_masks</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">k</span> <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">mask_summary</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span>
+                               <span class="keyword">if</span> <span class="identifier">k</span> <span class="relational-operator">!=</span> <span class="string-literal">"none"</span> <span class="logical-operator">and</span> <span class="identifier">v</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">faces_count</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">available_masks</span><span class="punctuation">:</span>
+                <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Predicted Mask selected, but the model was not trained with a mask and no "</span>
+                       <span class="string-literal">"masks are stored in the Alignments File.\nYou should generate the "</span>
+                       <span class="string-literal">"required masks with the Mask Tool or set the Mask Type to `none`."</span><span class="grouping">)</span>
+                <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+            <span class="identifier">mask_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">available_masks</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Predicted Mask selected, but the model was not trained with a "</span>
+                           <span class="string-literal">"mask. Selecting first available mask: '%s'"</span><span class="punctuation">,</span> <span class="identifier">mask_type</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask_type</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_queues</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add the queues for in, patch and out. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding queues. Queue size: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queue_size</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">qname</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"convert_in", "convert_out", "patch"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">queue_manager</span><span class="punctuation">.</span><span class="identifier">add_queue</span><span class="grouping">(</span><span class="identifier">qname</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queue_size</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">process</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" The entry point for triggering the Conversion Process.
+
+        Should only be called from  :class:`lib.cli.launcher.ScriptExecutor`
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Starting Conversion"</span><span class="grouping">)</span>
+        <span class="comment"># queue_manager.debug_monitor(5)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_convert_images</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span><span class="punctuation">.</span><span class="identifier">save_thread</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">queue_manager</span><span class="punctuation">.</span><span class="identifier">terminate_queues</span><span class="grouping">(</span><span class="grouping">)</span>
+
+            <span class="identifier">finalize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">count</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span><span class="punctuation">.</span><span class="identifier">faces_count</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span><span class="punctuation">.</span><span class="identifier">verify_output</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Completed Conversion"</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">MemoryError</span> <span class="keyword">as</span> <span class="identifier">err</span><span class="punctuation">:</span>
+            <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Faceswap ran out of RAM running convert. Conversion is very system RAM "</span>
+                   <span class="string-literal">"heavy, so this can happen in certain circumstances when you have a lot of "</span>
+                   <span class="string-literal">"cpus but not enough RAM to support them all."</span>
+                   <span class="string-literal">"\nYou should lower the number of processes in use by either setting the "</span>
+                   <span class="string-literal">"'singleprocess' flag (-sp) or lowering the number of parallel jobs (-j)."</span><span class="grouping">)</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">err</span>
+
+    <span class="keyword">def</span> <span class="identifier">_convert_images</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Start the multi-threaded patching process, monitor all threads for errors and join on
+        completion. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Converting images"</span><span class="grouping">)</span>
+        <span class="identifier">save_queue</span> <span class="arithmetic-assignment">=</span> <span class="identifier">queue_manager</span><span class="punctuation">.</span><span class="identifier">get_queue</span><span class="grouping">(</span><span class="string-literal">"convert_out"</span><span class="grouping">)</span>
+        <span class="identifier">patch_queue</span> <span class="arithmetic-assignment">=</span> <span class="identifier">queue_manager</span><span class="punctuation">.</span><span class="identifier">get_queue</span><span class="grouping">(</span><span class="string-literal">"patch"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_patch_threads</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MultiThread</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_converter</span><span class="punctuation">.</span><span class="identifier">process</span><span class="punctuation">,</span> <span class="identifier">patch_queue</span><span class="punctuation">,</span> <span class="identifier">save_queue</span><span class="punctuation">,</span>
+                                          <span class="identifier">thread_count</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pool_processes</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"patch"</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_patch_threads</span><span class="punctuation">.</span><span class="identifier">start</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_thread_error</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span><span class="punctuation">.</span><span class="identifier">completion_event</span><span class="punctuation">.</span><span class="identifier">is_set</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"DiskIO completion event set. Joining Pool"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_patch_threads</span><span class="punctuation">.</span><span class="identifier">completed</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"All patch threads completed"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="identifier">sleep</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_patch_threads</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Putting EOF"</span><span class="grouping">)</span>
+        <span class="identifier">save_queue</span><span class="punctuation">.</span><span class="identifier">put</span><span class="grouping">(</span><span class="string-literal">"EOF"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Converted images"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_thread_error</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Monitor all running threads for errors, and raise accordingly. """</span>
+        <span class="keyword">for</span> <span class="identifier">thread</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predictor</span><span class="punctuation">.</span><span class="identifier">thread</span><span class="punctuation">,</span>
+                       <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span><span class="punctuation">.</span><span class="identifier">load_thread</span><span class="punctuation">,</span>
+                       <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_disk_io</span><span class="punctuation">.</span><span class="identifier">save_thread</span><span class="punctuation">,</span>
+                       <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_patch_threads</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">check_and_raise_error</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">DiskIO</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Disk Input/Output for the converter process.
+
+    Background threads to:
+        * Load images from disk and get the detected faces
+        * Save images back to disk
+
+    Parameters
+    ----------
+    alignments: :class:`lib.alignmnents.Alignments`
+        The alignments for the input video
+    images: :class:`lib.image.ImagesLoader`
+        The input images
+    arguments: :class:`argparse.Namespace`
+        The arguments that were passed to the convert process as generated from Faceswap's command
+        line arguments
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="punctuation">,</span> <span class="identifier">images</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (alignments: %s, images: %s, arguments: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="punctuation">,</span> <span class="identifier">images</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignments</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span> <span class="arithmetic-assignment">=</span> <span class="identifier">images</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span> <span class="arithmetic-assignment">=</span> <span class="identifier">arguments</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pre_process</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PostProcess</span><span class="grouping">(</span><span class="identifier">arguments</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_completion_event</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Event</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="comment"># For frame skipping</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_imageidxre</span> <span class="arithmetic-assignment">=</span> <span class="identifier">re</span><span class="punctuation">.</span><span class="identifier">compile</span><span class="grouping">(</span><span class="identifier">r</span><span class="string-literal">"(\d+)(?!.*\d\.)(?=\.\w+$)"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_ranges</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_frame_ranges</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_writer</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="comment"># Extractor for on the fly detection</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_load_extractor</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">load</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">save</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">oad</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">save</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_init_threads</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">completion_event</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`event.Event`: Event is set when the DiskIO Save task is complete """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_completion_event</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">draw_transparent</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if the selected writer's Draw_transparent configuration item is set
+        otherwise ``False`` """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span><span class="punctuation">.</span><span class="identifier">config</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"draw_transparent"</span><span class="punctuation">,</span> <span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">pre_encode</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" python function: Selected writer's pre-encode function, if it has one,
+        otherwise ``None`` """</span>
+        <span class="identifier">dummy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">20</span><span class="punctuation">,</span> <span class="int-literal">20</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"uint8"</span><span class="grouping">)</span>
+        <span class="identifier">test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span><span class="punctuation">.</span><span class="identifier">pre_encode</span><span class="grouping">(</span><span class="identifier">dummy</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span> <span class="keyword">if</span> <span class="identifier">test</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span><span class="punctuation">.</span><span class="identifier">pre_encode</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Writer pre_encode function: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">save_thread</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`lib.multithreading.MultiThread`: The thread that is running the image writing
+        operation. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="grouping">[</span><span class="string-literal">"save"</span><span class="grouping">]</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">load_thread</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`lib.multithreading.MultiThread`: The thread that is running the image loading
+        operation. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="grouping">[</span><span class="string-literal">"load"</span><span class="grouping">]</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">load_queue</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`queue.Queue()`: The queue that images and detected faces are loaded into. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="string-literal">"load"</span><span class="grouping">]</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_total_count</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The total number of frames to be converted """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_ranges</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">keep_unchanged</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">fr</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">fr</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span> <span class="keyword">for</span> <span class="identifier">fr</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_ranges</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">count</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="comment"># Initialization</span>
+    <span class="keyword">def</span> <span class="identifier">_get_writer</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the selected writer plugin.
+
+        Returns
+        -------
+        :mod:`plugins.convert.writer` plugin
+            The requested writer plugin
+        """</span>
+        <span class="identifier">args</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">output_dir</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">writer</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"ffmpeg", "gif"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">args</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_total_count</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_ranges</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">writer</span> <span class="relational-operator">==</span> <span class="string-literal">"ffmpeg"</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="punctuation">:</span>
+                <span class="identifier">args</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">input_dir</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">args</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">reference_video</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Writer args: %s"</span><span class="punctuation">,</span> <span class="identifier">args</span><span class="grouping">)</span>
+        <span class="identifier">configfile</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">configfile</span> <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">,</span> <span class="string-literal">"configfile"</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="keyword">return</span> <span class="identifier">PluginLoader</span><span class="punctuation">.</span><span class="identifier">get_converter</span><span class="grouping">(</span><span class="string-literal">"writer"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">writer</span><span class="grouping">)</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span>
+                                                                       <span class="identifier">configfile</span><span class="arithmetic-assignment">=</span><span class="identifier">configfile</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_frame_ranges</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the frame ranges that are to be converted.
+
+        If frame ranges have been specified, then split the command line formatted arguments into
+        ranges that can be used.
+
+        Returns
+        list or ``None``
+            A list of  frames to be processed, or ``None`` if the command line argument was not
+            used
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">frame_ranges</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No frame range set"</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span>
+
+        <span class="identifier">minframe</span><span class="punctuation">,</span> <span class="identifier">maxframe</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="punctuation">:</span>
+            <span class="identifier">minframe</span><span class="punctuation">,</span> <span class="identifier">maxframe</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">count</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_imageidxre</span><span class="punctuation">.</span><span class="identifier">findall</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+                       <span class="keyword">for</span> <span class="identifier">filename</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">file_list</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">indices</span><span class="punctuation">:</span>
+                <span class="identifier">minframe</span><span class="punctuation">,</span> <span class="identifier">maxframe</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">indices</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">indices</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"minframe: %s, maxframe: %s"</span><span class="punctuation">,</span> <span class="identifier">minframe</span><span class="punctuation">,</span> <span class="identifier">maxframe</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">minframe</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">maxframe</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"Frame Ranges specified, but could not determine frame numbering "</span>
+                                <span class="string-literal">"from filenames"</span><span class="grouping">)</span>
+
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">rng</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">frame_ranges</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="string-literal">"-"</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">rng</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"Frame Ranges not specified in the correct format"</span><span class="grouping">)</span>
+            <span class="identifier">start</span><span class="punctuation">,</span> <span class="identifier">end</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rng</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="string-literal">"-"</span><span class="grouping">)</span>
+            <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">int</span><span class="grouping">(</span><span class="identifier">start</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">minframe</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">int</span><span class="grouping">(</span><span class="identifier">end</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">maxframe</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"frame ranges: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_load_extractor</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the CV2-DNN Face Extractor Chain.
+
+        For On-The-Fly conversion we use a CPU based extractor to avoid stacking the GPU.
+        Results are poor.
+
+        Returns
+        -------
+        :class:`plugins.extract.Pipeline.Extractor`
+            The face extraction chain to be used for on-the-fly conversion
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">have_alignments_file</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">on_the_fly</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">error</span><span class="grouping">(</span><span class="string-literal">"No alignments file found. Please provide an alignments file for your "</span>
+                         <span class="string-literal">"destination video (recommended) or enable on-the-fly conversion (not "</span>
+                         <span class="string-literal">"recommended)."</span><span class="grouping">)</span>
+            <span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">exit</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">have_alignments_file</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">on_the_fly</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"On-The-Fly conversion selected, but an alignments file was found. "</span>
+                            <span class="string-literal">"Using pre-existing alignments file: '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">file</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Alignments file found: '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">file</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loading extractor"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"On-The-Fly conversion selected. This will use the inferior cv2-dnn for "</span>
+                       <span class="string-literal">"extraction and will produce poor results."</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"It is recommended to generate an alignments file for your destination "</span>
+                       <span class="string-literal">"video with Extract first for superior results."</span><span class="grouping">)</span>
+        <span class="identifier">extractor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Extractor</span><span class="grouping">(</span><span class="identifier">detector</span><span class="arithmetic-assignment">=</span><span class="string-literal">"cv2-dnn"</span><span class="punctuation">,</span>
+                              <span class="identifier">aligner</span><span class="arithmetic-assignment">=</span><span class="string-literal">"cv2-dnn"</span><span class="punctuation">,</span>
+                              <span class="identifier">masker</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">mask_type</span><span class="punctuation">,</span>
+                              <span class="identifier">multiprocess</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                              <span class="identifier">rotate_images</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                              <span class="identifier">min_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">20</span><span class="grouping">)</span>
+        <span class="identifier">extractor</span><span class="punctuation">.</span><span class="identifier">launch</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loaded extractor"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">extractor</span>
+
+    <span class="keyword">def</span> <span class="identifier">_init_threads</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Initialize queues and threads.
+
+        Creates the load and save queues and the load and save threads. Starts the threads.
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing DiskIO Threads"</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">task</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"load", "save"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_add_queue</span><span class="grouping">(</span><span class="identifier">task</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_start_thread</span><span class="grouping">(</span><span class="identifier">task</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized DiskIO Threads"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_add_queue</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">task</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add the queue to queue_manager and to :attr:`self._queues` for the given task.
+
+        Parameters
+        ----------
+        task: {"load", "save"}
+            The task that the queue is to be added for
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Adding queue for task: '%s'"</span><span class="punctuation">,</span> <span class="identifier">task</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">task</span> <span class="relational-operator">==</span> <span class="string-literal">"load"</span><span class="punctuation">:</span>
+            <span class="identifier">q_name</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"convert_in"</span>
+        <span class="keyword">elif</span> <span class="identifier">task</span> <span class="relational-operator">==</span> <span class="string-literal">"save"</span><span class="punctuation">:</span>
+            <span class="identifier">q_name</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"convert_out"</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">q_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">task</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="identifier">task</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">queue_manager</span><span class="punctuation">.</span><span class="identifier">get_queue</span><span class="grouping">(</span><span class="identifier">q_name</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Added queue for task: '%s'"</span><span class="punctuation">,</span> <span class="identifier">task</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_start_thread</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">task</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Create the thread for the given task, add it it :attr:`self._threads` and start it.
+
+        Parameters
+        ----------
+        task: {"load", "save"}
+            The task that the thread is to be created for
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Starting thread: '%s'"</span><span class="punctuation">,</span> <span class="identifier">task</span><span class="grouping">)</span>
+        <span class="identifier">args</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_completion_event</span> <span class="keyword">if</span> <span class="identifier">task</span> <span class="relational-operator">==</span> <span class="string-literal">"save"</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="identifier">func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">"_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">task</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">io_thread</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MultiThread</span><span class="grouping">(</span><span class="identifier">func</span><span class="punctuation">,</span> <span class="identifier">args</span><span class="punctuation">,</span> <span class="identifier">thread_count</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">io_thread</span><span class="punctuation">.</span><span class="identifier">start</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threads</span><span class="grouping">[</span><span class="identifier">task</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">io_thread</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Started thread: '%s'"</span><span class="punctuation">,</span> <span class="identifier">task</span><span class="grouping">)</span>
+
+    <span class="comment"># Loading tasks</span>
+    <span class="keyword">def</span> <span class="identifier">_load</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint: disable=unused-argument</span>
+        <span class="comment">""" Load frames from disk.
+
+        In a background thread:
+            * Loads frames from disk.
+            * Discards or passes through cli selected skipped frames
+            * Pairs the frame with its :class:`~lib.align.DetectedFace` objects
+            * Performs any pre-processing actions
+            * Puts the frame and detected faces to the load queue
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Load Images: Start"</span><span class="grouping">)</span>
+        <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">for</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_images</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">idx</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="string-literal">"load"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">shutdown</span><span class="punctuation">.</span><span class="identifier">is_set</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Load Queue: Stop signal received. Terminating"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="keyword">if</span> <span class="identifier">image</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="logical-operator">not</span> <span class="identifier">image</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">image</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="comment"># All black frames will return not numpy.any() so check dims too</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Unable to open image. Skipping: '%s'"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+                <span class="keyword">continue</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_skipframe</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">keep_unchanged</span><span class="punctuation">:</span>
+                    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Saving unchanged frame: %s"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+                    <span class="identifier">out_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">output_dir</span><span class="punctuation">,</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="string-literal">"save"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">put</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">out_file</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Discarding frame: '%s'"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+                <span class="keyword">continue</span>
+
+            <span class="identifier">detected_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_detected_faces</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span>
+            <span class="identifier">item</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">image</span><span class="punctuation">,</span> <span class="identifier">detected_faces</span><span class="arithmetic-assignment">=</span><span class="identifier">detected_faces</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_pre_process</span><span class="punctuation">.</span><span class="identifier">do_actions</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="string-literal">"load"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">put</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Putting EOF"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="string-literal">"load"].put("EOF"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Load Images: Complete"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_skipframe</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether a frame is to be skipped.
+
+        Parameters
+        ----------
+        filename: str
+            The filename of the frame to check
+
+        Returns
+        -------
+        bool
+            ``True`` if the frame is to be skipped otherwise ``False``
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_ranges</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span>
+        <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_imageidxre</span><span class="punctuation">.</span><span class="identifier">findall</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">indices</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Could not determine frame number. Frame will be converted: '%s'"</span><span class="punctuation">,</span>
+                           <span class="identifier">filename</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="bool-literal">False</span>
+        <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">indices</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">indices</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="identifier">skipframe</span> <span class="arithmetic-assignment">=</span> <span class="logical-operator">not</span> <span class="identifier">any</span><span class="grouping">(</span><span class="identifier">map</span><span class="grouping">(</span><span class="keyword">lambda</span> <span class="identifier">b</span><span class="punctuation">:</span> <span class="identifier">b</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="identifier">idx</span> <span class="relational-operator">&lt;=</span> <span class="identifier">b</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_frame_ranges</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"idx: %s, skipframe: %s"</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">skipframe</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">skipframe</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_detected_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the detected faces for the given image.
+
+        If we have an alignments file, then the detected faces are created from that file. If
+        we're running On-The-Fly then they will be extracted from the extractor.
+
+        Parameters
+        ----------
+        filename: str
+            The filename to return the detected faces for
+        image: :class:`numpy.ndarray`
+            The frame that the detected faces exist in
+
+        Returns
+        -------
+        list
+            List of :class:`lib.align.DetectedFace` objects
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Getting faces for: '%s'"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">:</span>
+            <span class="identifier">detected_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments_faces</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">detected_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_detect_faces</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Got %s faces for: '%s'"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">detected_faces</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">detected_faces</span>
+
+    <span class="keyword">def</span> <span class="identifier">_alignments_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return detected faces from an alignments file.
+
+        Parameters
+        ----------
+        frame_name: str
+            The name of the frame to return the detected faces for
+        image: :class:`numpy.ndarray`
+            The frame that the detected faces exist in
+
+        Returns
+        -------
+        list
+            List of :class:`lib.align.DetectedFace` objects
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_alignments</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">get_faces_in_frame</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="grouping">)</span>
+        <span class="identifier">detected_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">rawface</span> <span class="relational-operator">in</span> <span class="identifier">faces</span><span class="punctuation">:</span>
+            <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">face</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">rawface</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">image</span><span class="grouping">)</span>
+            <span class="identifier">detected_faces</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">detected_faces</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_alignments</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame_name</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Ensure that we have alignments for the current frame.
+
+        If we have no alignments for this image, skip it and output a message.
+
+        Parameters
+        ----------
+        frame_name: str
+            The name of the frame to check that we have alignments for
+
+        Returns
+        -------
+        bool
+            ``True`` if we have alignments for this face, otherwise ``False``
+        """</span>
+        <span class="identifier">have_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">frame_exists</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">have_alignments</span><span class="punctuation">:</span>
+            <span class="identifier">tqdm</span><span class="punctuation">.</span><span class="identifier">write</span><span class="grouping">(</span><span class="string-literal">"No alignment found for {}, "</span>
+                       <span class="string-literal">"skipping"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">frame_name</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">have_alignments</span>
+
+    <span class="keyword">def</span> <span class="identifier">_detect_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Extract the face from a frame for On-The-Fly conversion.
+
+        Pulls detected faces out of the Extraction pipeline.
+
+        Parameters
+        ----------
+        filename: str
+            The filename to return the detected faces for
+        image: :class:`numpy.ndarray`
+            The frame that the detected faces exist in
+
+        Returns
+        -------
+        list
+            List of :class:`lib.align.DetectedFace` objects
+         """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">.</span><span class="identifier">input_queue</span><span class="punctuation">.</span><span class="identifier">put</span><span class="grouping">(</span><span class="identifier">ExtractMedia</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">next</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_extractor</span><span class="punctuation">.</span><span class="identifier">detected_faces</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">faces</span><span class="punctuation">.</span><span class="identifier">detected_faces</span>
+
+    <span class="comment"># Saving tasks</span>
+    <span class="keyword">def</span> <span class="identifier">_save</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">completion_event</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Save the converted images.
+
+        Puts the selected writer into a background thread and feeds it from the output of the
+        patch queue.
+
+        Parameters
+        ----------
+        completion_event: :class:`event.Event`
+            An even that this process triggers when it has finished saving
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Save Images: Start"</span><span class="grouping">)</span>
+        <span class="identifier">write_preview</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">redirect_gui</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span><span class="punctuation">.</span><span class="identifier">is_stream</span>
+        <span class="identifier">preview_image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span><span class="punctuation">.</span><span class="identifier">output_folder</span><span class="punctuation">,</span> <span class="string-literal">".gui_preview.jpg"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Write preview for gui: %s"</span><span class="punctuation">,</span> <span class="identifier">write_preview</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">tqdm</span><span class="grouping">(</span><span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_total_count</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">desc</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Converting"</span><span class="punctuation">,</span> <span class="identifier">file</span><span class="arithmetic-assignment">=</span><span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">stdout</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="string-literal">"save"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">shutdown</span><span class="punctuation">.</span><span class="identifier">is_set</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Save Queue: Stop signal received. Terminating"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="identifier">item</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queues</span><span class="grouping">[</span><span class="string-literal">"save"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">item</span> <span class="relational-operator">==</span> <span class="string-literal">"EOF"</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"EOF Received"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+            <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">item</span>
+            <span class="comment"># Write out preview image for the GUI every 10 frames if writing to stream</span>
+            <span class="keyword">if</span> <span class="identifier">write_preview</span> <span class="logical-operator">and</span> <span class="identifier">idx</span> <span class="arithmetic-operator">%</span> <span class="int-literal">10</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">preview_image</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Writing GUI Preview image: '%s'"</span><span class="punctuation">,</span> <span class="identifier">preview_image</span><span class="grouping">)</span>
+                <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">imwrite</span><span class="grouping">(</span><span class="identifier">preview_image</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span><span class="punctuation">.</span><span class="identifier">write</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_writer</span><span class="punctuation">.</span><span class="identifier">close</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">completion_event</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Save Faces: Complete"</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Predict</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Obtains the output from the Faceswap model.
+
+    Parameters
+    ----------
+    in_queue: :class:`queue.Queue`
+        The queue that contains images and detected faces for feeding the model
+    queue_size: int
+        The maximum size of the input queue
+    arguments: :class:`argparse.Namespace`
+        The arguments that were passed to the convert process as generated from Faceswap's command
+        line arguments
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">in_queue</span><span class="punctuation">,</span> <span class="identifier">queue_size</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (args: %s, queue_size: %s, in_queue: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="punctuation">,</span> <span class="identifier">queue_size</span><span class="punctuation">,</span> <span class="identifier">in_queue</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span> <span class="arithmetic-assignment">=</span> <span class="identifier">arguments</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_in_queue</span> <span class="arithmetic-assignment">=</span> <span class="identifier">in_queue</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_out_queue</span> <span class="arithmetic-assignment">=</span> <span class="identifier">queue_manager</span><span class="punctuation">.</span><span class="identifier">get_queue</span><span class="grouping">(</span><span class="string-literal">"patch"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_serializer</span><span class="grouping">(</span><span class="string-literal">"json"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_count</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_verify_output</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_load_model</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_batchsize</span><span class="grouping">(</span><span class="identifier">queue_size</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sizes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_io_sizes</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coverage_ratio</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">coverage_ratio</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">[</span><span class="string-literal">"centering"</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_launch_predictor</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s: (out_queue: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_out_queue</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">thread</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`~lib.multithreading.MultiThread`: The thread that is running the prediction
+        function from the Faceswap model. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_thread</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">in_queue</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`queue.Queue`: The input queue to the predictor. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_in_queue</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">out_queue</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`queue.Queue`: The output queue from the predictor. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_out_queue</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">faces_count</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The total number of faces seen by the Predictor. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_count</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">verify_output</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if multiple faces have been found in frames, otherwise ``False``. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_verify_output</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">coverage_ratio</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" float: The coverage ratio that the model was trained at. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coverage_ratio</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">centering</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" str: The centering that the model was trained on (`"face"` or `"legacy"`) """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">has_predicted_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" bool: ``True`` if the model was trained to learn a mask, otherwise ``False``. """</span>
+        <span class="keyword">return</span> <span class="identifier">bool</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">config</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"learn_mask"</span><span class="punctuation">,</span> <span class="bool-literal">False</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">output_size</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The size in pixels of the Faceswap model output. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sizes</span><span class="grouping">[</span><span class="string-literal">"output"</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_io_sizes</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the input size and output size of the model.
+
+        Returns
+        -------
+        dict
+            input_size in pixels and output_size in pixels
+        """</span>
+        <span class="identifier">input_shape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">input_shape</span>
+        <span class="identifier">input_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">input_shape</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">input_shape</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">input_shape</span>
+        <span class="identifier">output_shape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">output_shape</span>
+        <span class="identifier">output_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">output_shape</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">output_shape</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">output_shape</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">input</span><span class="arithmetic-assignment">=</span><span class="identifier">input_shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">output</span><span class="arithmetic-assignment">=</span><span class="identifier">output_shape</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_load_model</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the Faceswap model.
+
+        Returns
+        -------
+        :mod:`plugins.train.model` plugin
+            The trained model in the specified model folder
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loading Model"</span><span class="grouping">)</span>
+        <span class="identifier">model_dir</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="identifier">make_folder</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">model_dir</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"{} does not exist."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">model_dir</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">trainer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_model_name</span><span class="grouping">(</span><span class="identifier">model_dir</span><span class="grouping">)</span>
+        <span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PluginLoader</span><span class="punctuation">.</span><span class="identifier">get_model</span><span class="grouping">(</span><span class="identifier">trainer</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">model_dir</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">,</span> <span class="identifier">predict</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">build</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Loaded Model"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">model</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_batchsize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">queue_size</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Get the batch size for feeding the model.
+
+        Sets the batch size to 1 if inference is being run on CPU, otherwise the minimum of the
+        input queue size and the model's `convert_batchsize` configuration option.
+
+        Parameters
+        ----------
+        queue_size: int
+            The queue size that is feeding the predictor
+
+        Returns
+        -------
+        int
+            The batch size that the model is to be fed at.
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Getting batchsize"</span><span class="grouping">)</span>
+        <span class="identifier">is_cpu</span> <span class="arithmetic-assignment">=</span> <span class="identifier">GPUStats</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">device_count</span> <span class="relational-operator">==</span> <span class="int-literal">0</span>
+        <span class="identifier">batchsize</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">is_cpu</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">[</span><span class="string-literal">"convert_batchsize"</span><span class="grouping">]</span>
+        <span class="identifier">batchsize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">queue_size</span><span class="punctuation">,</span> <span class="identifier">batchsize</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Batchsize: %s"</span><span class="punctuation">,</span> <span class="identifier">batchsize</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Got batchsize: %s"</span><span class="punctuation">,</span> <span class="identifier">batchsize</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">batchsize</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_model_name</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">model_dir</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the name of the Faceswap model used.
+
+        If a "trainer" option has been selected in the command line arguments, use that value,
+        otherwise retrieve the name of the model from the model's state file.
+
+        Parameters
+        ----------
+        model_dir: str
+            The folder that contains the trained Faceswap model
+
+        Returns
+        -------
+        str
+            The name of the Faceswap model being used.
+
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">,</span> <span class="string-literal">"trainer"</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">trainer</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Trainer name provided: '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">trainer</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">trainer</span>
+
+        <span class="identifier">statefile</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">fname</span> <span class="keyword">for</span> <span class="identifier">fname</span> <span class="relational-operator">in</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">listdir</span><span class="grouping">(</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">model_dir</span><span class="grouping">)</span><span class="grouping">)</span>
+                     <span class="keyword">if</span> <span class="identifier">fname</span><span class="punctuation">.</span><span class="identifier">endswith</span><span class="grouping">(</span><span class="string-literal">"_state.json"</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">statefile</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"There should be 1 state file in your model folder. {} were "</span>
+                                <span class="string-literal">"found. Specify a trainer with the '-t', '--trainer' "</span>
+                                <span class="string-literal">"option."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">statefile</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">statefile</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">model_dir</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">statefile</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_serializer</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">statefile</span><span class="grouping">)</span>
+        <span class="identifier">trainer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">state</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"name"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">trainer</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"Trainer name could not be read from state file. "</span>
+                                <span class="string-literal">"Specify a trainer with the '-t', '--trainer' option."</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Trainer from state file: '%s'"</span><span class="punctuation">,</span> <span class="identifier">trainer</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">trainer</span>
+
+    <span class="keyword">def</span> <span class="identifier">_launch_predictor</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Launch the prediction process in a background thread.
+
+        Starts the prediction thread and returns the thread.
+
+        Returns
+        -------
+        :class:`~lib.multithreading.MultiThread`
+            The started Faceswap model prediction thread.
+        """</span>
+        <span class="identifier">thread</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MultiThread</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predict_faces</span><span class="punctuation">,</span> <span class="identifier">thread_count</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">thread</span><span class="punctuation">.</span><span class="identifier">start</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">thread</span>
+
+    <span class="keyword">def</span> <span class="identifier">_predict_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Run Prediction on the Faceswap model in a background thread.
+
+        Reads from the :attr:`self._in_queue`, prepares images for prediction
+        then puts the predictions back to the :attr:`self.out_queue`
+        """</span>
+        <span class="identifier">faces_seen</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">consecutive_no_faces</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">is_amd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_backend</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="string-literal">"amd"</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="identifier">item</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_in_queue</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">item</span> <span class="relational-operator">!=</span> <span class="string-literal">"EOF"</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Got from queue: '%s'", item["filename"</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">faces_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"detected_faces"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+                <span class="comment"># Safety measure. If a large stream of frames appear that do not have faces,</span>
+                <span class="comment"># these will stack up into RAM. Keep a count of consecutive frames with no faces.</span>
+                <span class="comment"># If self._batchsize number of frames appear, force the current batch through</span>
+                <span class="comment"># to clear RAM.</span>
+                <span class="identifier">consecutive_no_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">consecutive_no_faces</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">faces_count</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="keyword">else</span> <span class="int-literal">0</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_faces_count</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">faces_count</span>
+                <span class="keyword">if</span> <span class="identifier">faces_count</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_verify_output</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+                    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Found more than one face in an image! '%s'"</span><span class="punctuation">,</span>
+                                   <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"filename"</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">load_aligned</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">)</span>
+
+                <span class="identifier">faces_seen</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">faces_count</span>
+                <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">item</span> <span class="relational-operator">!=</span> <span class="string-literal">"EOF"</span> <span class="logical-operator">and</span> <span class="grouping">(</span><span class="identifier">faces_seen</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span> <span class="logical-operator">and</span>
+                                  <span class="identifier">consecutive_no_faces</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Continuing. Current batchsize: %s, consecutive_no_faces: %s"</span><span class="punctuation">,</span>
+                             <span class="identifier">faces_seen</span><span class="punctuation">,</span> <span class="identifier">consecutive_no_faces</span><span class="grouping">)</span>
+                <span class="keyword">continue</span>
+
+            <span class="keyword">if</span> <span class="identifier">batch</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Batching to predictor. Frames: %s, Faces: %s"</span><span class="punctuation">,</span>
+                             <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">faces_seen</span><span class="grouping">)</span>
+                <span class="identifier">feed_batch</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">feed_face</span> <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">batch</span>
+                              <span class="keyword">for</span> <span class="identifier">feed_face</span> <span class="relational-operator">in</span> <span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"feed_faces"</span><span class="grouping">]</span><span class="grouping">]</span>
+                <span class="keyword">if</span> <span class="identifier">faces_seen</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                    <span class="identifier">feed_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_compile_feed_faces</span><span class="grouping">(</span><span class="identifier">feed_batch</span><span class="grouping">)</span>
+                    <span class="identifier">batch_size</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+                    <span class="keyword">if</span> <span class="identifier">is_amd</span> <span class="logical-operator">and</span> <span class="identifier">feed_faces</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_batchsize</span><span class="punctuation">:</span>
+                        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Fallback to BS=1"</span><span class="grouping">)</span>
+                        <span class="identifier">batch_size</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+                    <span class="identifier">predicted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_predict</span><span class="grouping">(</span><span class="identifier">feed_faces</span><span class="punctuation">,</span> <span class="identifier">batch_size</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="identifier">predicted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_queue_out_frames</span><span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">predicted</span><span class="grouping">)</span>
+
+            <span class="identifier">consecutive_no_faces</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+            <span class="identifier">faces_seen</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+            <span class="identifier">batch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">item</span> <span class="relational-operator">==</span> <span class="string-literal">"EOF"</span><span class="punctuation">:</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"EOF Received"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Putting EOF"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_out_queue</span><span class="punctuation">.</span><span class="identifier">put</span><span class="grouping">(</span><span class="string-literal">"EOF"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Load queue complete"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">load_aligned</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">item</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the model's feed faces and the reference output faces.
+
+        For each detected face in the incoming item, load the feed face and reference face
+        images, correctly sized for input and output respectively.
+
+        Parameters
+        ----------
+        item: dict
+            The incoming image, list of :class:`~lib.align.DetectedFace` objects and list of
+            :class:`~lib.align.AlignedFace` objects for the feed face(s) and list of
+            :class:`~lib.align.AlignedFace` objects for the reference face(s)
+
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Loading aligned faces: '%s'", item["filename"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">feed_faces</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">reference_faces</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">detected_face</span> <span class="relational-operator">in</span> <span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"detected_faces"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">feed_face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                                    <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"image"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                    <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="punctuation">,</span>
+                                    <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sizes</span><span class="grouping">[</span><span class="string-literal">"input"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                    <span class="identifier">coverage_ratio</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coverage_ratio</span><span class="punctuation">,</span>
+                                    <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float32"</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sizes</span><span class="grouping">[</span><span class="string-literal">"input"] == self._sizes["output"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">reference_faces</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">feed_face</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">reference_faces</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                                                   <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"image"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                   <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centering</span><span class="punctuation">,</span>
+                                                   <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sizes</span><span class="grouping">[</span><span class="string-literal">"output"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                   <span class="identifier">coverage_ratio</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_coverage_ratio</span><span class="punctuation">,</span>
+                                                   <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float32"</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">feed_faces</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">feed_face</span><span class="grouping">)</span>
+        <span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"feed_faces"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">feed_faces</span>
+        <span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"reference_faces"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">reference_faces</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Loaded aligned faces: '%s'", item["filename"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_compile_feed_faces</span><span class="grouping">(</span><span class="identifier">feed_faces</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Compile a batch of faces for feeding into the Predictor.
+
+        Parameters
+        ----------
+        feed_faces: list
+            List of :class:`~lib.align.AlignedFace` objects sized for feeding into the model
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            A batch of faces ready for feeding into the Faceswap model.
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Compiling feed face. Batchsize: %s"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">feed_faces</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">stack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">feed_face</span><span class="punctuation">.</span><span class="identifier">face</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">3</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">feed_face</span> <span class="relational-operator">in</span> <span class="identifier">feed_faces</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="float-literal">255.0</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Compiled Feed faces. Shape: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">feed_faces</span><span class="punctuation">,</span> <span class="identifier">batch_size</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Run the Faceswap models' prediction function.
+
+        Parameters
+        ----------
+        feed_faces: :class:`numpy.ndarray`
+            The batch to be fed into the model
+        batch_size: int, optional
+            Used for plaidml only. Indicates to the model what batch size is being processed.
+            Default: ``None``
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The swapped faces for the given batch
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Predicting: Batchsize: %s"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">feed_faces</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">color_order</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="string-literal">"rgb"</span><span class="punctuation">:</span>
+            <span class="identifier">feed_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">feed_faces</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="identifier">feed</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">feed_faces</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Input shape(s): %s"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="identifier">item</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">feed</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">predicted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">feed</span><span class="punctuation">,</span> <span class="identifier">batch_size</span><span class="arithmetic-assignment">=</span><span class="identifier">batch_size</span><span class="grouping">)</span>
+        <span class="identifier">predicted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predicted</span> <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">predicted</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="grouping">[</span><span class="identifier">predicted</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model</span><span class="punctuation">.</span><span class="identifier">color_order</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="string-literal">"rgb"</span><span class="punctuation">:</span>
+            <span class="identifier">predicted</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predicted</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Output shape(s): %s"</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="identifier">predict</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">for</span> <span class="identifier">predict</span> <span class="relational-operator">in</span> <span class="identifier">predicted</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="comment"># Only take last output(s)</span>
+        <span class="keyword">if</span> <span class="identifier">predicted</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>  <span class="comment"># Merge mask to alpha channel</span>
+            <span class="identifier">predicted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="identifier">predicted</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"float32"</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">predicted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predicted</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"float32"</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Final shape: %s"</span><span class="punctuation">,</span> <span class="identifier">predicted</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">predicted</span>
+
+    <span class="keyword">def</span> <span class="identifier">_queue_out_frames</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">,</span> <span class="identifier">swapped_faces</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Compile the batch back to original frames and put to the Out Queue.
+
+        For batching, faces are split away from their frames. This compiles all detected faces
+        back to their parent frame before putting each frame to the out queue in batches.
+
+        Parameters
+        ----------
+        batch: dict
+            The batch that was used as the input for the model predict function
+        swapped_faces: :class:`numpy.ndarray`
+            The predictions returned from the model's predict function
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Queueing out batch. Batchsize: %s"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">pointer</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">batch</span><span class="punctuation">:</span>
+            <span class="identifier">num_faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"detected_faces"</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">num_faces</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"swapped_faces"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"swapped_faces"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">swapped_faces</span><span class="grouping">[</span><span class="identifier">pointer</span><span class="punctuation">:</span><span class="identifier">pointer</span> <span class="arithmetic-operator">+</span> <span class="identifier">num_faces</span><span class="grouping">]</span>
+
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Putting to queue. ('%s', detected_faces: %s, reference_faces: %s, "</span>
+                         <span class="string-literal">"swapped_faces: %s)", item["filename"], len(item["detected_faces"</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                         <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">item</span><span class="grouping">[</span><span class="string-literal">"reference_faces"]), item["swapped_faces"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">pointer</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">num_faces</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_out_queue</span><span class="punctuation">.</span><span class="identifier">put</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Queued out batch. Batchsize: %s"</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">OptionalActions</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Process specific optional actions for Convert.
+
+    Currently only handles skip faces. This class should probably be (re)moved.
+
+    Parameters
+    ----------
+    arguments: :class:`argparse.Namespace`
+        The arguments that were passed to the convert process as generated from Faceswap's command
+        line arguments
+    input_images: list
+        List of input image files
+    alignments: :class:`lib.align.Alignments`
+        The alignments file for this conversion
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">arguments</span><span class="punctuation">,</span> <span class="identifier">input_images</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span> <span class="arithmetic-assignment">=</span> <span class="identifier">arguments</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_input_images</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_images</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignments</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_remove_skipped_faces</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="comment"># SKIP FACES #</span>
+    <span class="keyword">def</span> <span class="identifier">_remove_skipped_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" If the user has specified an input aligned directory, remove any non-matching faces
+        from the alignments file. """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Filtering Faces"</span><span class="grouping">)</span>
+        <span class="identifier">accept_dict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_face_metadata</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">accept_dict</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"No aligned face data. Not skipping any faces"</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">pre_face_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">faces_count</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">filter_faces</span><span class="grouping">(</span><span class="identifier">accept_dict</span><span class="punctuation">,</span> <span class="identifier">filter_out</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Faces filtered out: %s"</span><span class="punctuation">,</span> <span class="identifier">pre_face_count</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">faces_count</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_face_metadata</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check for the existence of an aligned directory for identifying which faces in the
+        target frames should be swapped. If it exists, scan the folder for face's metadata
+
+        Returns
+        -------
+        dict
+            Dictionary of source frame names with a list of associated face indices to be skipped
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">input_aligned_dir</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">.</span><span class="identifier">input_aligned_dir</span>
+
+        <span class="keyword">if</span> <span class="identifier">input_aligned_dir</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Aligned directory not specified. All faces listed in the "</span>
+                           <span class="string-literal">"alignments file will be converted"</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">retval</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">isdir</span><span class="grouping">(</span><span class="identifier">input_aligned_dir</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Aligned directory not found. All faces listed in the "</span>
+                           <span class="string-literal">"alignments file will be converted"</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">retval</span>
+
+        <span class="identifier">log_once</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="identifier">filelist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_image_paths</span><span class="grouping">(</span><span class="identifier">input_aligned_dir</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">fullpath</span><span class="punctuation">,</span> <span class="identifier">metadata</span> <span class="relational-operator">in</span> <span class="identifier">tqdm</span><span class="grouping">(</span><span class="identifier">read_image_meta_batch</span><span class="grouping">(</span><span class="identifier">filelist</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">total</span><span class="arithmetic-assignment">=</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">filelist</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">desc</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Reading Face Data"</span><span class="punctuation">,</span>
+                                       <span class="identifier">leave</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="string-literal">"itxt" not in metadata or "source" not in metadata["itxt"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="comment"># UPDATE LEGACY FACES FROM ALIGNMENTS FILE</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">log_once</span><span class="punctuation">:</span>
+                    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Legacy faces discovered in '%s'. These faces will be updated"</span><span class="punctuation">,</span>
+                                   <span class="identifier">input_aligned_dir</span><span class="grouping">)</span>
+                    <span class="identifier">log_once</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+                <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">update_legacy_png_header</span><span class="grouping">(</span><span class="identifier">fullpath</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">data</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span>
+                        <span class="string-literal">"Some of the faces being passed in from '{}' could not be matched to the "</span>
+                        <span class="string-literal">"alignments file '{}'\nPlease double check your sources and try "</span>
+                        <span class="string-literal">"again."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">input_aligned_dir</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">file</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="string-literal">"source"</span><span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metadata</span><span class="grouping">[</span><span class="string-literal">"itxt"]["source"</span><span class="grouping">]</span>
+            <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">setdefault</span><span class="grouping">(</span><span class="identifier">meta</span><span class="grouping">[</span><span class="string-literal">"source_filename"], list()).append(meta["face_index"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">retval</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"Aligned directory is empty, no faces will be converted!"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_input_images</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">3</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Aligned directory contains far fewer images than the input "</span>
+                           <span class="string-literal">"directory, are you sure this is the right folder?"</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    </pre>
+  </body>
+</html>

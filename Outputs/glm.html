@@ -1,0 +1,687 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+Generalized Linear Models with Exponential Dispersion Family
+"""</span>
+
+<span class="comment"># Author: Christian Lorentzen &lt;lorentzen.ch@googlemail.com&gt;</span>
+<span class="comment"># some parts and tricks stolen from other sklearn files.</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">optimize</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">optimize</span> <span class="keyword">import</span> <span class="identifier">_check_optimize_result</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span><span class="punctuation">,</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">_loss</span><span class="punctuation">.</span><span class="identifier">glm_distribution</span> <span class="keyword">import</span> <span class="grouping">(</span>
+        <span class="identifier">ExponentialDispersionModel</span><span class="punctuation">,</span>
+        <span class="identifier">TweedieDistribution</span><span class="punctuation">,</span>
+        <span class="identifier">EDM_DISTRIBUTIONS</span>
+<span class="grouping">)</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">link</span> <span class="keyword">import</span> <span class="grouping">(</span>
+        <span class="identifier">BaseLink</span><span class="punctuation">,</span>
+        <span class="identifier">IdentityLink</span><span class="punctuation">,</span>
+        <span class="identifier">LogLink</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_safe_lin_pred</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">coef</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute the linear predictor taking care if intercept is present."""</span>
+    <span class="keyword">if</span> <span class="identifier">coef</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">==</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">X</span> <span class="punctuation">@</span> <span class="identifier">coef</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">coef</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">X</span> <span class="punctuation">@</span> <span class="identifier">coef</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_y_pred_deviance_derivative</span><span class="grouping">(</span><span class="identifier">coef</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="punctuation">,</span> <span class="identifier">family</span><span class="punctuation">,</span> <span class="identifier">link</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute y_pred and the derivative of the deviance w.r.t coef."""</span>
+    <span class="identifier">lin_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_safe_lin_pred</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">coef</span><span class="grouping">)</span>
+    <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">link</span><span class="punctuation">.</span><span class="identifier">inverse</span><span class="grouping">(</span><span class="identifier">lin_pred</span><span class="grouping">)</span>
+    <span class="identifier">d1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">link</span><span class="punctuation">.</span><span class="identifier">inverse_derivative</span><span class="grouping">(</span><span class="identifier">lin_pred</span><span class="grouping">)</span>
+    <span class="identifier">temp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">d1</span> <span class="arithmetic-operator">*</span> <span class="identifier">family</span><span class="punctuation">.</span><span class="identifier">deviance_derivative</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">coef</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">==</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">devp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">temp</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">temp</span> <span class="punctuation">@</span> <span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">devp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">temp</span> <span class="punctuation">@</span> <span class="identifier">X</span>  <span class="comment"># same as X.T @ temp</span>
+    <span class="keyword">return</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">devp</span>
+
+
+<span class="keyword">class</span> <span class="identifier">GeneralizedLinearRegressor</span><span class="grouping">(</span><span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Regression via a penalized Generalized Linear Model (GLM).
+
+    GLMs based on a reproductive Exponential Dispersion Model (EDM) aim at
+    fitting and predicting the mean of the target y as y_pred=h(X*w).
+    Therefore, the fit minimizes the following objective function with L2
+    priors as regularizer::
+
+            1/(2*sum(s)) * deviance(y, h(X*w); s)
+            + 1/2 * alpha * |w|_2
+
+    with inverse link function h and s=sample_weight.
+    The parameter ``alpha`` corresponds to the lambda parameter in glmnet.
+
+    Read more in the :ref:`User Guide &lt;Generalized_linear_regression&gt;`.
+
+    .. versionadded:: 0.23
+
+    Parameters
+    ----------
+    alpha : float, default=1
+        Constant that multiplies the penalty term and thus determines the
+        regularization strength. ``alpha = 0`` is equivalent to unpenalized
+        GLMs. In this case, the design matrix `X` must have full column rank
+        (no collinearities).
+
+    fit_intercept : bool, default=True
+        Specifies if a constant (a.k.a. bias or intercept) should be
+        added to the linear predictor (X @ coef + intercept).
+
+    family : {'normal', 'poisson', 'gamma', 'inverse-gaussian'} \
+            or an ExponentialDispersionModel instance, default='normal'
+        The distributional assumption of the GLM, i.e. which distribution from
+        the EDM, specifies the loss function to be minimized.
+
+    link : {'auto', 'identity', 'log'} or an instance of class BaseLink, \
+            default='auto'
+        The link function of the GLM, i.e. mapping from linear predictor
+        `X @ coeff + intercept` to prediction `y_pred`. Option 'auto' sets
+        the link depending on the chosen family as follows:
+
+        - 'identity' for Normal distribution
+        - 'log' for Poisson,  Gamma and Inverse Gaussian distributions
+
+    solver : 'lbfgs', default='lbfgs'
+        Algorithm to use in the optimization problem:
+
+        'lbfgs'
+            Calls scipy's L-BFGS-B optimizer.
+
+    max_iter : int, default=100
+        The maximal number of iterations for the solver.
+
+    tol : float, default=1e-4
+        Stopping criterion. For the lbfgs solver,
+        the iteration will stop when ``max{|g_j|, j = 1, ..., d} &lt;= tol``
+        where ``g_j`` is the j-th component of the gradient (derivative) of
+        the objective function.
+
+    warm_start : bool, default=False
+        If set to ``True``, reuse the solution of the previous call to ``fit``
+        as initialization for ``coef_`` and ``intercept_``.
+
+    verbose : int, default=0
+        For the lbfgs solver set verbose to any positive number for verbosity.
+
+    Attributes
+    ----------
+    coef_ : array of shape (n_features,)
+        Estimated coefficients for the linear predictor (`X @ coef_ +
+        intercept_`) in the GLM.
+
+    intercept_ : float
+        Intercept (a.k.a. bias) added to linear predictor.
+
+    n_iter_ : int
+        Actual number of iterations used in the solver.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="punctuation">,</span>
+                 <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">family</span><span class="arithmetic-assignment">=</span><span class="string-literal">'normal', link='auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">solver</span><span class="arithmetic-assignment">=</span><span class="string-literal">'lbfgs'</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-4</span><span class="punctuation">,</span> <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_intercept</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span> <span class="arithmetic-assignment">=</span> <span class="identifier">family</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">link</span> <span class="arithmetic-assignment">=</span> <span class="identifier">link</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit a Generalized Linear Model.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,)
+            Target values.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        self : returns an instance of self.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span><span class="punctuation">,</span> <span class="identifier">ExponentialDispersionModel</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span> <span class="relational-operator">in</span> <span class="identifier">EDM_DISTRIBUTIONS</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">EDM_DISTRIBUTIONS</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span><span class="grouping">]</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"The family must be an instance of class"</span>
+                <span class="string-literal">" ExponentialDispersionModel or an element of"</span>
+                <span class="string-literal">" ['normal', 'poisson', 'gamma', 'inverse-gaussian']"</span>
+                <span class="string-literal">"; got (family={0})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Guarantee that self._link_instance is set to an instance of</span>
+        <span class="comment"># class BaseLink</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">link</span><span class="punctuation">,</span> <span class="identifier">BaseLink</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_link_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">link</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">link</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span><span class="punctuation">,</span> <span class="identifier">TweedieDistribution</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span><span class="punctuation">.</span><span class="identifier">power</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_link_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">IdentityLink</span><span class="grouping">(</span><span class="grouping">)</span>
+                    <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span><span class="punctuation">.</span><span class="identifier">power</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_link_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LogLink</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"No default link known for the "</span>
+                                     <span class="string-literal">"specified distribution family. Please "</span>
+                                     <span class="string-literal">"set link manually, i.e. not to 'auto'; "</span>
+                                     <span class="string-literal">"got (link='auto', family={})"</span>
+                                     <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">link</span> <span class="relational-operator">==</span> <span class="string-literal">'identity'</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_link_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">IdentityLink</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">link</span> <span class="relational-operator">==</span> <span class="string-literal">'log'</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_link_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LogLink</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">"The link must be an instance of class Link or "</span>
+                    <span class="string-literal">"an element of ['auto', 'identity', 'log']; "</span>
+                    <span class="string-literal">"got (link={0})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">link</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Number</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Penalty term must be a non-negative number;"</span>
+                             <span class="string-literal">" got (alpha={0})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">,</span> <span class="identifier">bool</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"The argument fit_intercept must be bool;"</span>
+                             <span class="string-literal">" got {0}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">'lbfgs'</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"GeneralizedLinearRegressor supports only solvers"</span>
+                             <span class="string-literal">"'lbfgs'; got {0}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span>
+                <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Maximum number of iteration must be a positive "</span>
+                             <span class="string-literal">"integer;"</span>
+                             <span class="string-literal">" got (max_iter={0!r})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Number</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Tolerance for stopping criteria must be "</span>
+                             <span class="string-literal">"positive; got (tol={0!r})"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span><span class="punctuation">,</span> <span class="identifier">bool</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"The argument warm_start must be bool;"</span>
+                             <span class="string-literal">" got {0}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">family</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span>
+        <span class="identifier">link</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_link_instance</span>
+
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csc', 'csr'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                   <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                   <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">multi_output</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="identifier">weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">family</span><span class="punctuation">.</span><span class="identifier">in_y_range</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Some value(s) of y are out of the valid "</span>
+                             <span class="string-literal">"range for family {0}"</span>
+                             <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">family</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="comment"># TODO: if alpha=0 check that X is not rank deficient</span>
+
+        <span class="comment"># rescaling of sample_weight</span>
+        <span class="comment">#</span>
+        <span class="comment"># IMPORTANT NOTE: Since we want to minimize</span>
+        <span class="comment"># 1/(2*sum(sample_weight)) * deviance + L2,</span>
+        <span class="comment"># deviance = sum(sample_weight * unit_deviance),</span>
+        <span class="comment"># we rescale weights such that sum(weights) = 1 and this becomes</span>
+        <span class="comment"># 1/2*deviance + L2 with deviance=sum(weights * unit_deviance)</span>
+        <span class="identifier">weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">weights</span> <span class="arithmetic-operator">/</span> <span class="identifier">weights</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span> <span class="logical-operator">and</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">'coef_'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+                <span class="identifier">coef</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">coef</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+                <span class="identifier">coef</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="arithmetic-operator">+</span><span class="int-literal">1</span><span class="grouping">)</span>
+                <span class="identifier">coef</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">link</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">weights</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">coef</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span>
+
+        <span class="comment"># algorithms for optimization</span>
+
+        <span class="keyword">if</span> <span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">'lbfgs'</span><span class="punctuation">:</span>
+            <span class="keyword">def</span> <span class="identifier">func</span><span class="grouping">(</span><span class="identifier">coef</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">family</span><span class="punctuation">,</span> <span class="identifier">link</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">devp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_y_pred_deviance_derivative</span><span class="grouping">(</span>
+                    <span class="identifier">coef</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="punctuation">,</span> <span class="identifier">family</span><span class="punctuation">,</span> <span class="identifier">link</span>
+                <span class="grouping">)</span>
+                <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">family</span><span class="punctuation">.</span><span class="identifier">deviance</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="grouping">)</span>
+                <span class="comment"># offset if coef[0] is intercept</span>
+                <span class="identifier">offset</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span> <span class="keyword">else</span> <span class="int-literal">0</span>
+                <span class="identifier">coef_scaled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span> <span class="arithmetic-operator">*</span> <span class="identifier">coef</span><span class="grouping">[</span><span class="identifier">offset</span><span class="punctuation">:</span><span class="grouping">]</span>
+                <span class="identifier">obj</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">dev</span> <span class="arithmetic-operator">+</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">coef</span><span class="grouping">[</span><span class="identifier">offset</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="punctuation">@</span> <span class="identifier">coef_scaled</span><span class="grouping">)</span>
+                <span class="identifier">objp</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">devp</span>
+                <span class="identifier">objp</span><span class="grouping">[</span><span class="identifier">offset</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">coef_scaled</span>
+                <span class="keyword">return</span> <span class="identifier">obj</span><span class="punctuation">,</span> <span class="identifier">objp</span>
+
+            <span class="identifier">args</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">family</span><span class="punctuation">,</span> <span class="identifier">link</span><span class="grouping">)</span>
+
+            <span class="identifier">opt_res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">optimize</span><span class="punctuation">.</span><span class="identifier">minimize</span><span class="grouping">(</span>
+                <span class="identifier">func</span><span class="punctuation">,</span> <span class="identifier">coef</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">"L-BFGS-B"</span><span class="punctuation">,</span> <span class="identifier">jac</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                <span class="identifier">options</span><span class="arithmetic-assignment">=</span><span class="grouping">{</span>
+                    <span class="string-literal">"maxiter"</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                    <span class="string-literal">"iprint"</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span>
+                    <span class="string-literal">"gtol"</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">,</span>
+                    <span class="string-literal">"ftol"</span><span class="punctuation">:</span> <span class="float-literal">1e3</span><span class="arithmetic-operator">*</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">float</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span><span class="punctuation">,</span>
+                <span class="grouping">}</span><span class="punctuation">,</span>
+                <span class="identifier">args</span><span class="arithmetic-assignment">=</span><span class="identifier">args</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_optimize_result</span><span class="grouping">(</span><span class="string-literal">"lbfgs"</span><span class="punctuation">,</span> <span class="identifier">opt_res</span><span class="grouping">)</span>
+            <span class="identifier">coef</span> <span class="arithmetic-assignment">=</span> <span class="identifier">opt_res</span><span class="punctuation">.</span><span class="identifier">x</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># set intercept to zero as the other linear models do</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">_linear_predictor</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute the linear_predictor = `X @ coef_ + intercept_`.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Samples.
+
+        Returns
+        -------
+        y_pred : array of shape (n_samples,)
+            Returns predicted values of linear predictor.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csr', 'csc', 'coo'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                <span class="identifier">allow_nd</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">X</span> <span class="punctuation">@</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict using GLM with feature matrix X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Samples.
+
+        Returns
+        -------
+        y_pred : array of shape (n_samples,)
+            Returns predicted values.
+        """</span>
+        <span class="comment"># check_array is done in _linear_predictor</span>
+        <span class="identifier">eta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_linear_predictor</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_link_instance</span><span class="punctuation">.</span><span class="identifier">inverse</span><span class="grouping">(</span><span class="identifier">eta</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">y_pred</span>
+
+    <span class="keyword">def</span> <span class="identifier">score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute D^2, the percentage of deviance explained.
+
+        D^2 is a generalization of the coefficient of determination R^2.
+        R^2 uses squared error and D^2 deviance. Note that those two are equal
+        for ``family='normal'``.
+
+        D^2 is defined as
+        :math:`D^2 = 1-\\frac{D(y_{true},y_{pred})}{D_{null}}`,
+        :math:`D_{null}` is the null deviance, i.e. the deviance of a model
+        with intercept alone, which corresponds to :math:`y_{pred} = \\bar{y}`.
+        The mean :math:`\\bar{y}` is averaged by sample_weight.
+        Best possible score is 1.0 and it can be negative (because the model
+        can be arbitrarily worse).
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Test samples.
+
+        y : array-like of shape (n_samples,)
+            True values of target.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        score : float
+            D^2 of self.predict(X) w.r.t. y.
+        """</span>
+        <span class="comment"># Note, default score defined in RegressorMixin is R^2 score.</span>
+        <span class="comment"># TODO: make D^2 a score function in module metrics (and thereby get</span>
+        <span class="comment">#       input validation and so on)</span>
+        <span class="identifier">weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">dev</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span><span class="punctuation">.</span><span class="identifier">deviance</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">weights</span><span class="grouping">)</span>
+        <span class="identifier">y_mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">average</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">weights</span><span class="grouping">)</span>
+        <span class="identifier">dev_null</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span><span class="punctuation">.</span><span class="identifier">deviance</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_mean</span><span class="punctuation">,</span> <span class="identifier">weights</span><span class="arithmetic-assignment">=</span><span class="identifier">weights</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">dev</span> <span class="arithmetic-operator">/</span> <span class="identifier">dev_null</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># create the _family_instance if fit wasn't called yet.</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">'_family_instance'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">_family_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_family_instance</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span><span class="punctuation">,</span> <span class="identifier">ExponentialDispersionModel</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">_family_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span> <span class="relational-operator">in</span> <span class="identifier">EDM_DISTRIBUTIONS</span><span class="punctuation">:</span>
+            <span class="identifier">_family_instance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">EDM_DISTRIBUTIONS</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">family</span><span class="grouping">]</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">"requires_positive_y"</span><span class="punctuation">:</span> <span class="logical-operator">not</span> <span class="identifier">_family_instance</span><span class="punctuation">.</span><span class="identifier">in_y_range</span><span class="grouping">(</span><span class="float-literal">-1.0</span><span class="grouping">)</span><span class="grouping">}</span>
+
+
+<span class="keyword">class</span> <span class="identifier">PoissonRegressor</span><span class="grouping">(</span><span class="identifier">GeneralizedLinearRegressor</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Generalized Linear Model with a Poisson distribution.
+
+    This regressor uses the 'log' link function.
+
+    Read more in the :ref:`User Guide &lt;Generalized_linear_regression&gt;`.
+
+    .. versionadded:: 0.23
+
+    Parameters
+    ----------
+    alpha : float, default=1
+        Constant that multiplies the penalty term and thus determines the
+        regularization strength. ``alpha = 0`` is equivalent to unpenalized
+        GLMs. In this case, the design matrix `X` must have full column rank
+        (no collinearities).
+
+    fit_intercept : bool, default=True
+        Specifies if a constant (a.k.a. bias or intercept) should be
+        added to the linear predictor (X @ coef + intercept).
+
+    max_iter : int, default=100
+        The maximal number of iterations for the solver.
+
+    tol : float, default=1e-4
+        Stopping criterion. For the lbfgs solver,
+        the iteration will stop when ``max{|g_j|, j = 1, ..., d} &lt;= tol``
+        where ``g_j`` is the j-th component of the gradient (derivative) of
+        the objective function.
+
+    warm_start : bool, default=False
+        If set to ``True``, reuse the solution of the previous call to ``fit``
+        as initialization for ``coef_`` and ``intercept_`` .
+
+    verbose : int, default=0
+        For the lbfgs solver set verbose to any positive number for verbosity.
+
+    Attributes
+    ----------
+    coef_ : array of shape (n_features,)
+        Estimated coefficients for the linear predictor (`X @ coef_ +
+        intercept_`) in the GLM.
+
+    intercept_ : float
+        Intercept (a.k.a. bias) added to linear predictor.
+
+    n_iter_ : int
+        Actual number of iterations used in the solver.
+
+    Examples
+    ----------
+    &gt;&gt;&gt; from sklearn import linear_model
+    &gt;&gt;&gt; clf = linear_model.PoissonRegressor()
+    &gt;&gt;&gt; X = [[1, 2], [2, 3], [3, 4], [4, 3]]
+    &gt;&gt;&gt; y = [12, 17, 22, 21]
+    &gt;&gt;&gt; clf.fit(X, y)
+    PoissonRegressor()
+    &gt;&gt;&gt; clf.score(X, y)
+    0.990...
+    &gt;&gt;&gt; clf.coef_
+    array([0.121..., 0.158...])
+    &gt;&gt;&gt; clf.intercept_
+    2.088...
+    &gt;&gt;&gt; clf.predict([[1, 1], [3, 4]])
+    array([10.676..., 21.875...])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                 <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-4</span><span class="punctuation">,</span> <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="identifier">fit_intercept</span><span class="punctuation">,</span>
+                         <span class="identifier">family</span><span class="arithmetic-assignment">=</span><span class="string-literal">"poisson"</span><span class="punctuation">,</span> <span class="identifier">link</span><span class="arithmetic-assignment">=</span><span class="string-literal">'log'</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                         <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="identifier">warm_start</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">family</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Make this attribute read-only to avoid mis-uses e.g. in GridSearch.</span>
+        <span class="keyword">return</span> <span class="string-literal">"poisson"</span>
+
+    <span class="punctuation">@</span><span class="identifier">family</span><span class="punctuation">.</span><span class="identifier">setter</span>
+    <span class="keyword">def</span> <span class="identifier">family</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">value</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">value</span> <span class="relational-operator">!=</span> <span class="string-literal">"poisson"</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"PoissonRegressor.family must be 'poisson'!"</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">GammaRegressor</span><span class="grouping">(</span><span class="identifier">GeneralizedLinearRegressor</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Generalized Linear Model with a Gamma distribution.
+
+    This regressor uses the 'log' link function.
+
+    Read more in the :ref:`User Guide &lt;Generalized_linear_regression&gt;`.
+
+    .. versionadded:: 0.23
+
+    Parameters
+    ----------
+    alpha : float, default=1
+        Constant that multiplies the penalty term and thus determines the
+        regularization strength. ``alpha = 0`` is equivalent to unpenalized
+        GLMs. In this case, the design matrix `X` must have full column rank
+        (no collinearities).
+
+    fit_intercept : bool, default=True
+        Specifies if a constant (a.k.a. bias or intercept) should be
+        added to the linear predictor (X @ coef + intercept).
+
+    max_iter : int, default=100
+        The maximal number of iterations for the solver.
+
+    tol : float, default=1e-4
+        Stopping criterion. For the lbfgs solver,
+        the iteration will stop when ``max{|g_j|, j = 1, ..., d} &lt;= tol``
+        where ``g_j`` is the j-th component of the gradient (derivative) of
+        the objective function.
+
+    warm_start : bool, default=False
+        If set to ``True``, reuse the solution of the previous call to ``fit``
+        as initialization for ``coef_`` and ``intercept_`` .
+
+    verbose : int, default=0
+        For the lbfgs solver set verbose to any positive number for verbosity.
+
+    Attributes
+    ----------
+    coef_ : array of shape (n_features,)
+        Estimated coefficients for the linear predictor (`X * coef_ +
+        intercept_`) in the GLM.
+
+    intercept_ : float
+        Intercept (a.k.a. bias) added to linear predictor.
+
+    n_iter_ : int
+        Actual number of iterations used in the solver.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn import linear_model
+    &gt;&gt;&gt; clf = linear_model.GammaRegressor()
+    &gt;&gt;&gt; X = [[1, 2], [2, 3], [3, 4], [4, 3]]
+    &gt;&gt;&gt; y = [19, 26, 33, 30]
+    &gt;&gt;&gt; clf.fit(X, y)
+    GammaRegressor()
+    &gt;&gt;&gt; clf.score(X, y)
+    0.773...
+    &gt;&gt;&gt; clf.coef_
+    array([0.072..., 0.066...])
+    &gt;&gt;&gt; clf.intercept_
+    2.896...
+    &gt;&gt;&gt; clf.predict([[1, 0], [2, 8]])
+    array([19.483..., 35.795...])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                 <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-4</span><span class="punctuation">,</span> <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="identifier">fit_intercept</span><span class="punctuation">,</span>
+                         <span class="identifier">family</span><span class="arithmetic-assignment">=</span><span class="string-literal">"gamma"</span><span class="punctuation">,</span> <span class="identifier">link</span><span class="arithmetic-assignment">=</span><span class="string-literal">'log'</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                         <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="identifier">warm_start</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">family</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Make this attribute read-only to avoid mis-uses e.g. in GridSearch.</span>
+        <span class="keyword">return</span> <span class="string-literal">"gamma"</span>
+
+    <span class="punctuation">@</span><span class="identifier">family</span><span class="punctuation">.</span><span class="identifier">setter</span>
+    <span class="keyword">def</span> <span class="identifier">family</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">value</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">value</span> <span class="relational-operator">!=</span> <span class="string-literal">"gamma"</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"GammaRegressor.family must be 'gamma'!"</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">TweedieRegressor</span><span class="grouping">(</span><span class="identifier">GeneralizedLinearRegressor</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Generalized Linear Model with a Tweedie distribution.
+
+    This estimator can be used to model different GLMs depending on the
+    ``power`` parameter, which determines the underlying distribution.
+
+    Read more in the :ref:`User Guide &lt;Generalized_linear_regression&gt;`.
+
+    .. versionadded:: 0.23
+
+    Parameters
+    ----------
+    power : float, default=0
+            The power determines the underlying target distribution according
+            to the following table:
+
+            +-------+------------------------+
+            | Power | Distribution           |
+            +=======+========================+
+            | 0     | Normal                 |
+            +-------+------------------------+
+            | 1     | Poisson                |
+            +-------+------------------------+
+            | (1,2) | Compound Poisson Gamma |
+            +-------+------------------------+
+            | 2     | Gamma                  |
+            +-------+------------------------+
+            | 3     | Inverse Gaussian       |
+            +-------+------------------------+
+
+            For ``0 &lt; power &lt; 1``, no distribution exists.
+
+    alpha : float, default=1
+        Constant that multiplies the penalty term and thus determines the
+        regularization strength. ``alpha = 0`` is equivalent to unpenalized
+        GLMs. In this case, the design matrix `X` must have full column rank
+        (no collinearities).
+
+    fit_intercept : bool, default=True
+        Specifies if a constant (a.k.a. bias or intercept) should be
+        added to the linear predictor (X @ coef + intercept).
+
+    link : {'auto', 'identity', 'log'}, default='auto'
+        The link function of the GLM, i.e. mapping from linear predictor
+        `X @ coeff + intercept` to prediction `y_pred`. Option 'auto' sets
+        the link depending on the chosen family as follows:
+
+        - 'identity' for Normal distribution
+        - 'log' for Poisson,  Gamma and Inverse Gaussian distributions
+
+    max_iter : int, default=100
+        The maximal number of iterations for the solver.
+
+    tol : float, default=1e-4
+        Stopping criterion. For the lbfgs solver,
+        the iteration will stop when ``max{|g_j|, j = 1, ..., d} &lt;= tol``
+        where ``g_j`` is the j-th component of the gradient (derivative) of
+        the objective function.
+
+    warm_start : bool, default=False
+        If set to ``True``, reuse the solution of the previous call to ``fit``
+        as initialization for ``coef_`` and ``intercept_`` .
+
+    verbose : int, default=0
+        For the lbfgs solver set verbose to any positive number for verbosity.
+
+    Attributes
+    ----------
+    coef_ : array of shape (n_features,)
+        Estimated coefficients for the linear predictor (`X @ coef_ +
+        intercept_`) in the GLM.
+
+    intercept_ : float
+        Intercept (a.k.a. bias) added to linear predictor.
+
+    n_iter_ : int
+        Actual number of iterations used in the solver.
+
+    Examples
+    ----------
+    &gt;&gt;&gt; from sklearn import linear_model
+    &gt;&gt;&gt; clf = linear_model.TweedieRegressor()
+    &gt;&gt;&gt; X = [[1, 2], [2, 3], [3, 4], [4, 3]]
+    &gt;&gt;&gt; y = [2, 3.5, 5, 5.5]
+    &gt;&gt;&gt; clf.fit(X, y)
+    TweedieRegressor()
+    &gt;&gt;&gt; clf.score(X, y)
+    0.839...
+    &gt;&gt;&gt; clf.coef_
+    array([0.599..., 0.299...])
+    &gt;&gt;&gt; clf.intercept_
+    1.600...
+    &gt;&gt;&gt; clf.predict([[1, 1], [3, 4]])
+    array([2.500..., 4.599...])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.0</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">link</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-4</span><span class="punctuation">,</span>
+                 <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="identifier">fit_intercept</span><span class="punctuation">,</span>
+                         <span class="identifier">family</span><span class="arithmetic-assignment">=</span><span class="identifier">TweedieDistribution</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="identifier">power</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">link</span><span class="arithmetic-assignment">=</span><span class="identifier">link</span><span class="punctuation">,</span>
+                         <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">tol</span><span class="punctuation">,</span>
+                         <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="identifier">warm_start</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">family</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># We use a property with a setter to make sure that the family is</span>
+        <span class="comment"># always a Tweedie distribution, and that self.power and</span>
+        <span class="comment"># self.family.power are identical by construction.</span>
+        <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">TweedieDistribution</span><span class="grouping">(</span><span class="identifier">power</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">power</span><span class="grouping">)</span>
+        <span class="comment"># TODO: make the returned object immutable</span>
+        <span class="keyword">return</span> <span class="identifier">dist</span>
+
+    <span class="punctuation">@</span><span class="identifier">family</span><span class="punctuation">.</span><span class="identifier">setter</span>
+    <span class="keyword">def</span> <span class="identifier">family</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">value</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">value</span><span class="punctuation">,</span> <span class="identifier">TweedieDistribution</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">power</span> <span class="arithmetic-assignment">=</span> <span class="identifier">value</span><span class="punctuation">.</span><span class="identifier">power</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">"TweedieRegressor.family must be of type "</span>
+                            <span class="string-literal">"TweedieDistribution!"</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

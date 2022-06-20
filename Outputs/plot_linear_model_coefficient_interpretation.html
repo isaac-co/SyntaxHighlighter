@@ -1,0 +1,681 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+==================================================================
+Common pitfalls in interpretation of coefficients of linear models
+==================================================================
+
+In linear models, the target value is modeled as
+a linear combination of the features (see the :ref:`linear_model` User Guide
+section for a description of a set of linear models available in
+scikit-learn).
+Coefficients in multiple linear models represent the relationship between the
+given feature, :math:`X_i` and the target, :math:`y`, assuming that all the
+other features remain constant (`conditional dependence
+&lt;https://en.wikipedia.org/wiki/Conditional_dependence&gt;`_).
+This is different from plotting :math:`X_i` versus :math:`y` and fitting a
+linear relationship: in that case all possible values of the other features are
+taken into account in the estimation (marginal dependence).
+
+This example will provide some hints in interpreting coefficient in linear
+models, pointing at problems that arise when either the linear model is not
+appropriate to describe the dataset, or when features are correlated.
+
+We will use data from the `"Current Population Survey"
+&lt;https://www.openml.org/d/534&gt;`_ from 1985 to predict
+wage as a function of various features such as experience, age, or education.
+
+.. contents::
+   :local:
+   :depth: 1
+"""</span>
+
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">__doc__</span><span class="grouping">)</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span> <span class="keyword">as</span> <span class="identifier">sp</span>
+<span class="keyword">import</span> <span class="identifier">pandas</span> <span class="keyword">as</span> <span class="identifier">pd</span>
+<span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>
+<span class="keyword">import</span> <span class="identifier">seaborn</span> <span class="keyword">as</span> <span class="identifier">sns</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The dataset: wages</span>
+<span class="comment"># ------------------</span>
+<span class="comment">#</span>
+<span class="comment"># We fetch the data from `OpenML &lt;http://openml.org/&gt;`_.</span>
+<span class="comment"># Note that setting the parameter `as_frame` to True will retrieve the data</span>
+<span class="comment"># as a pandas dataframe.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">datasets</span> <span class="keyword">import</span> <span class="identifier">fetch_openml</span>
+
+<span class="identifier">survey</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fetch_openml</span><span class="grouping">(</span><span class="identifier">data_id</span><span class="arithmetic-assignment">=</span><span class="int-literal">534</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Then, we identify features `X` and targets `y`: the column WAGE is our</span>
+<span class="comment"># target variable (i.e., the variable which we want to predict).</span>
+<span class="comment">#</span>
+<span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">survey</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">survey</span><span class="punctuation">.</span><span class="identifier">feature_names</span><span class="grouping">]</span>
+<span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">describe</span><span class="grouping">(</span><span class="identifier">include</span><span class="arithmetic-assignment">=</span><span class="string-literal">"all"</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Note that the dataset contains categorical and numerical variables.</span>
+<span class="comment"># We will need to take this into account when preprocessing the dataset</span>
+<span class="comment"># thereafter.</span>
+
+<span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">head</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Our target for prediction: the wage.</span>
+<span class="comment"># Wages are described as floating-point number in dollars per hour.</span>
+<span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">survey</span><span class="punctuation">.</span><span class="identifier">target</span><span class="punctuation">.</span><span class="identifier">values</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">survey</span><span class="punctuation">.</span><span class="identifier">target</span><span class="punctuation">.</span><span class="identifier">head</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># We split the sample into a train and a test dataset.</span>
+<span class="comment"># Only the train dataset will be used in the following exploratory analysis.</span>
+<span class="comment"># This is a way to emulate a real situation where predictions are performed on</span>
+<span class="comment"># an unknown target, and we don't want our analysis and decisions to be biased</span>
+<span class="comment"># by our knowledge of the test data.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">model_selection</span> <span class="keyword">import</span> <span class="identifier">train_test_split</span>
+
+<span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">X_test</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">y_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">train_test_split</span><span class="grouping">(</span>
+    <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">42</span>
+<span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># First, let's get some insights by looking at the variable distributions and</span>
+<span class="comment"># at the pairwise relationships between them. Only numerical</span>
+<span class="comment"># variables will be used. In the following plot, each dot represents a sample.</span>
+<span class="comment">#</span>
+<span class="comment">#   .. _marginal_dependencies:</span>
+
+<span class="identifier">train_dataset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_train</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">train_dataset</span><span class="punctuation">.</span><span class="identifier">insert</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="string-literal">"WAGE"</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sns</span><span class="punctuation">.</span><span class="identifier">pairplot</span><span class="grouping">(</span><span class="identifier">train_dataset</span><span class="punctuation">,</span> <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'reg', diag_kind='kde'</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Looking closely at the WAGE distribution reveals that it has a</span>
+<span class="comment"># long tail. For this reason, we should take its logarithm</span>
+<span class="comment"># to turn it approximately into a normal distribution (linear models such</span>
+<span class="comment"># as ridge or lasso work best for a normal distribution of error).</span>
+<span class="comment">#</span>
+<span class="comment"># The WAGE is increasing when EDUCATION is increasing.</span>
+<span class="comment"># Note that the dependence between WAGE and EDUCATION</span>
+<span class="comment"># represented here is a marginal dependence, i.e., it describes the behavior</span>
+<span class="comment"># of a specific variable without keeping the others fixed.</span>
+<span class="comment">#</span>
+<span class="comment"># Also, the EXPERIENCE and AGE are strongly linearly correlated.</span>
+<span class="comment">#</span>
+<span class="comment"># .. _the-pipeline:</span>
+<span class="comment">#</span>
+<span class="comment"># The machine-learning pipeline</span>
+<span class="comment"># -----------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># To design our machine-learning pipeline, we first manually</span>
+<span class="comment"># check the type of data that we are dealing with:</span>
+
+<span class="identifier">survey</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># As seen previously, the dataset contains columns with different data types</span>
+<span class="comment"># and we need to apply a specific preprocessing for each data types.</span>
+<span class="comment"># In particular categorical variables cannot be included in linear model if not</span>
+<span class="comment"># coded as integers first. In addition, to avoid categorical features to be</span>
+<span class="comment"># treated as ordered values, we need to one-hot-encode them.</span>
+<span class="comment"># Our pre-processor will</span>
+<span class="comment">#</span>
+<span class="comment"># - one-hot encode (i.e., generate a column by category) the categorical</span>
+<span class="comment">#   columns;</span>
+<span class="comment"># - as a first approach (we will see after how the normalisation of numerical</span>
+<span class="comment">#   values will affect our discussion), keep numerical values as they are.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">compose</span> <span class="keyword">import</span> <span class="identifier">make_column_transformer</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">OneHotEncoder</span>
+
+<span class="identifier">categorical_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'RACE', 'OCCUPATION', 'SECTOR'</span><span class="punctuation">,</span>
+                       <span class="string-literal">'MARR', 'UNION', 'SEX', 'SOUTH'</span><span class="grouping">]</span>
+<span class="identifier">numerical_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'EDUCATION', 'EXPERIENCE', 'AGE'</span><span class="grouping">]</span>
+
+<span class="identifier">preprocessor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_column_transformer</span><span class="grouping">(</span>
+    <span class="grouping">(</span><span class="identifier">OneHotEncoder</span><span class="grouping">(</span><span class="identifier">drop</span><span class="arithmetic-assignment">=</span><span class="string-literal">'if_binary'</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">categorical_columns</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">remainder</span><span class="arithmetic-assignment">=</span><span class="string-literal">'passthrough'</span>
+<span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># To describe the dataset as a linear model we use a ridge regressor</span>
+<span class="comment"># with a very small regularization and to model the logarithm of the WAGE.</span>
+
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">pipeline</span> <span class="keyword">import</span> <span class="identifier">make_pipeline</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">Ridge</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">compose</span> <span class="keyword">import</span> <span class="identifier">TransformedTargetRegressor</span>
+
+<span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_pipeline</span><span class="grouping">(</span>
+    <span class="identifier">preprocessor</span><span class="punctuation">,</span>
+    <span class="identifier">TransformedTargetRegressor</span><span class="grouping">(</span>
+        <span class="identifier">regressor</span><span class="arithmetic-assignment">=</span><span class="identifier">Ridge</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-10</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="identifier">func</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log10</span><span class="punctuation">,</span>
+        <span class="identifier">inverse_func</span><span class="arithmetic-assignment">=</span><span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">special</span><span class="punctuation">.</span><span class="identifier">exp10</span>
+    <span class="grouping">)</span>
+<span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Processing the dataset</span>
+<span class="comment"># ----------------------</span>
+<span class="comment">#</span>
+<span class="comment"># First, we fit the model.</span>
+
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Then we check the performance of the computed model plotting its predictions</span>
+<span class="comment"># on the test set and computing,</span>
+<span class="comment"># for example, the median absolute error of the model.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">metrics</span> <span class="keyword">import</span> <span class="identifier">median_absolute_error</span>
+
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span>
+
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span><span class="string-literal">'MAE on training set: {mae:.2f} $/hour'</span>
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">f</span><span class="string-literal">'\nMAE on testing set: {mae:.2f} $/hour'</span>
+<span class="identifier">fig</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="int-literal">5</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">transform</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transAxes</span><span class="punctuation">,</span> <span class="identifier">ls</span><span class="arithmetic-assignment">=</span><span class="string-literal">"--", c="red"</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">text</span><span class="grouping">(</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="int-literal">20</span><span class="punctuation">,</span> <span class="identifier">string_score</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Ridge model, small regularization'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Model predictions'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Truths'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The model learnt is far from being a good model making accurate predictions:</span>
+<span class="comment"># this is obvious when looking at the plot above, where good predictions</span>
+<span class="comment"># should lie on the red line.</span>
+<span class="comment">#</span>
+<span class="comment"># In the following section, we will interpret the coefficients of the model.</span>
+<span class="comment"># While we do so, we should keep in mind that any conclusion we draw is</span>
+<span class="comment"># about the model that we build, rather than about the true (real-world)</span>
+<span class="comment"># generative process of the data.</span>
+<span class="comment">#</span>
+<span class="comment"># Interpreting coefficients: scale matters</span>
+<span class="comment"># ---------------------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># First of all, we can take a look to the values of the coefficients of the</span>
+<span class="comment"># regressor we have fitted.</span>
+
+<span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'columntransformer'</span><span class="grouping">]</span>
+                      <span class="punctuation">.</span><span class="identifier">named_transformers_</span><span class="grouping">[</span><span class="string-literal">'onehotencoder'</span><span class="grouping">]</span>
+                      <span class="punctuation">.</span><span class="identifier">get_feature_names</span><span class="grouping">(</span><span class="identifier">input_features</span><span class="arithmetic-assignment">=</span><span class="identifier">categorical_columns</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span>
+    <span class="grouping">[</span><span class="identifier">feature_names</span><span class="punctuation">,</span> <span class="identifier">numerical_columns</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'Coefficients'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">index</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+
+<span class="identifier">coefs</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The AGE coefficient is expressed in "dollars/hour per living years" while the</span>
+<span class="comment"># EDUCATION one is expressed in "dollars/hour per years of education". This</span>
+<span class="comment"># representation of the coefficients has the benefit of making clear the</span>
+<span class="comment"># practical predictions of the model: an increase of :math:`1` year in AGE</span>
+<span class="comment"># means a decrease of :math:`0.030867` dollars/hour, while an increase of</span>
+<span class="comment"># :math:`1` year in EDUCATION means an increase of :math:`0.054699`</span>
+<span class="comment"># dollars/hour. On the other hand, categorical variables (as UNION or SEX) are</span>
+<span class="comment"># adimensional numbers taking either the value 0 or 1. Their coefficients</span>
+<span class="comment"># are expressed in dollars/hour. Then, we cannot compare the magnitude of</span>
+<span class="comment"># different coefficients since the features have different natural scales, and</span>
+<span class="comment"># hence value ranges, because of their different unit of measure. This is more</span>
+<span class="comment"># visible if we plot the coefficients.</span>
+
+<span class="identifier">coefs</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'barh'</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Ridge model, small regularization'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Indeed, from the plot above the most important factor in determining WAGE</span>
+<span class="comment"># appears to be the</span>
+<span class="comment"># variable UNION, even if our intuition might tell us that variables</span>
+<span class="comment"># like EXPERIENCE should have more impact.</span>
+<span class="comment">#</span>
+<span class="comment"># Looking at the coefficient plot to gauge feature importance can be</span>
+<span class="comment"># misleading as some of them vary on a small scale, while others, like AGE,</span>
+<span class="comment"># varies a lot more, several decades.</span>
+<span class="comment">#</span>
+<span class="comment"># This is visible if we compare the standard deviations of different</span>
+<span class="comment"># features.</span>
+
+<span class="identifier">X_train_preprocessed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'columntransformer'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+
+<span class="identifier">X_train_preprocessed</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'barh'</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Features std. dev.'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Multiplying the coefficients by the standard deviation of the related</span>
+<span class="comment"># feature would reduce all the coefficients to the same unit of measure.</span>
+<span class="comment"># As we will see :ref:`after&lt;scaling_num&gt;` this is equivalent to normalize</span>
+<span class="comment"># numerical variables to their standard deviation,</span>
+<span class="comment"># as :math:`y = \sum{coef_i \times X_i} =</span>
+<span class="comment"># \sum{(coef_i \times std_i) \times (X_i / std_i)}`.</span>
+<span class="comment">#</span>
+<span class="comment"># In that way, we emphasize that the</span>
+<span class="comment"># greater the variance of a feature, the larger the weight of the corresponding</span>
+<span class="comment"># coefficient on the output, all else being equal.</span>
+
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-operator">*</span>
+    <span class="identifier">X_train_preprocessed</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'Coefficient importance'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">index</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'barh'</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Ridge model, small regularization'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Now that the coefficients have been scaled, we can safely compare them.</span>
+<span class="comment">#</span>
+<span class="comment"># .. warning::</span>
+<span class="comment">#</span>
+<span class="comment">#   Why does the plot above suggest that an increase in age leads to a</span>
+<span class="comment">#   decrease in wage? Why the :ref:`initial pairplot</span>
+<span class="comment">#   &lt;marginal_dependencies&gt;` is telling the opposite?</span>
+<span class="comment">#</span>
+<span class="comment"># The plot above tells us about dependencies between a specific feature and</span>
+<span class="comment"># the target when all other features remain constant, i.e., **conditional</span>
+<span class="comment"># dependencies**. An increase of the AGE will induce a decrease</span>
+<span class="comment"># of the WAGE when all other features remain constant. On the contrary, an</span>
+<span class="comment"># increase of the EXPERIENCE will induce an increase of the WAGE when all</span>
+<span class="comment"># other features remain constant.</span>
+<span class="comment"># Also, AGE, EXPERIENCE and EDUCATION are the three variables that most</span>
+<span class="comment"># influence the model.</span>
+<span class="comment">#</span>
+<span class="comment"># Checking the variability of the coefficients</span>
+<span class="comment"># --------------------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># We can check the coefficient variability through cross-validation:</span>
+<span class="comment"># it is a form of data perturbation (related to</span>
+<span class="comment"># `resampling &lt;https://en.wikipedia.org/wiki/Resampling_(statistics)&gt;`_).</span>
+<span class="comment">#</span>
+<span class="comment"># If coefficients vary significantly when changing the input dataset</span>
+<span class="comment"># their robustness is not guaranteed, and they should probably be interpreted</span>
+<span class="comment"># with caution.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">model_selection</span> <span class="keyword">import</span> <span class="identifier">cross_validate</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">model_selection</span> <span class="keyword">import</span> <span class="identifier">RepeatedKFold</span>
+
+<span class="identifier">cv_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cross_validate</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">cv</span><span class="arithmetic-assignment">=</span><span class="identifier">RepeatedKFold</span><span class="grouping">(</span><span class="identifier">n_splits</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">n_repeats</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="grouping">[</span><span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-operator">*</span>
+     <span class="identifier">X_train_preprocessed</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+     <span class="keyword">for</span> <span class="identifier">est</span> <span class="relational-operator">in</span> <span class="identifier">cv_model</span><span class="grouping">[</span><span class="string-literal">'estimator'</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">sns</span><span class="punctuation">.</span><span class="identifier">stripplot</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">coefs</span><span class="punctuation">,</span> <span class="identifier">orient</span><span class="arithmetic-assignment">=</span><span class="string-literal">'h', color='k'</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">sns</span><span class="punctuation">.</span><span class="identifier">boxplot</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">coefs</span><span class="punctuation">,</span> <span class="identifier">orient</span><span class="arithmetic-assignment">=</span><span class="string-literal">'h', color='cyan'</span><span class="punctuation">,</span> <span class="identifier">saturation</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Coefficient importance'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Coefficient importance and its variability'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The problem of correlated variables</span>
+<span class="comment"># -----------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># The AGE and EXPERIENCE coefficients are affected by strong variability which</span>
+<span class="comment"># might be due to the collinearity between the 2 features: as AGE and</span>
+<span class="comment"># EXPERIENCE vary together in the data, their effect is difficult to tease</span>
+<span class="comment"># apart.</span>
+<span class="comment">#</span>
+<span class="comment"># To verify this interpretation we plot the variability of the AGE and</span>
+<span class="comment"># EXPERIENCE coefficient.</span>
+<span class="comment">#</span>
+<span class="comment"># .. _covariation:</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Age coefficient'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Experience coefficient'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">grid</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="float-literal">-0.4</span><span class="punctuation">,</span> <span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="float-literal">-0.4</span><span class="punctuation">,</span> <span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">coefs</span><span class="grouping">[</span><span class="string-literal">"AGE"], coefs["EXPERIENCE"</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Co-variations of coefficients for AGE and EXPERIENCE '</span>
+              <span class="string-literal">'across folds'</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Two regions are populated: when the EXPERIENCE coefficient is</span>
+<span class="comment"># positive the AGE one is negative and viceversa.</span>
+<span class="comment">#</span>
+<span class="comment"># To go further we remove one of the 2 features and check what is the impact</span>
+<span class="comment"># on the model stability.</span>
+
+<span class="identifier">column_to_drop</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'AGE'</span><span class="grouping">]</span>
+
+<span class="identifier">cv_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cross_validate</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">drop</span><span class="grouping">(</span><span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">column_to_drop</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span>
+    <span class="identifier">cv</span><span class="arithmetic-assignment">=</span><span class="identifier">RepeatedKFold</span><span class="grouping">(</span><span class="identifier">n_splits</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">n_repeats</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="grouping">[</span><span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-operator">*</span>
+     <span class="identifier">X_train_preprocessed</span><span class="punctuation">.</span><span class="identifier">drop</span><span class="grouping">(</span><span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">column_to_drop</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+     <span class="keyword">for</span> <span class="identifier">est</span> <span class="relational-operator">in</span> <span class="identifier">cv_model</span><span class="grouping">[</span><span class="string-literal">'estimator'</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+<span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">sns</span><span class="punctuation">.</span><span class="identifier">stripplot</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">coefs</span><span class="punctuation">,</span> <span class="identifier">orient</span><span class="arithmetic-assignment">=</span><span class="string-literal">'h', color='k'</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">sns</span><span class="punctuation">.</span><span class="identifier">boxplot</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">coefs</span><span class="punctuation">,</span> <span class="identifier">orient</span><span class="arithmetic-assignment">=</span><span class="string-literal">'h', color='cyan'</span><span class="punctuation">,</span> <span class="identifier">saturation</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Coefficient importance and its variability'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Coefficient importance'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The estimation of the EXPERIENCE coefficient is now less variable and</span>
+<span class="comment"># remain important for all models trained during cross-validation.</span>
+<span class="comment">#</span>
+<span class="comment"># .. _scaling_num:</span>
+<span class="comment">#</span>
+<span class="comment"># Preprocessing numerical variables</span>
+<span class="comment"># ---------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># As said above (see ":ref:`the-pipeline`"), we could also choose to scale</span>
+<span class="comment"># numerical values before training the model.</span>
+<span class="comment"># This can be useful to apply a similar amount regularization to all of them</span>
+<span class="comment"># in the Ridge.</span>
+<span class="comment"># The preprocessor is redefined in order to subtract the mean and scale</span>
+<span class="comment"># variables to unit variance.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">StandardScaler</span>
+
+<span class="identifier">preprocessor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_column_transformer</span><span class="grouping">(</span>
+    <span class="grouping">(</span><span class="identifier">OneHotEncoder</span><span class="grouping">(</span><span class="identifier">drop</span><span class="arithmetic-assignment">=</span><span class="string-literal">'if_binary'</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">categorical_columns</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="grouping">(</span><span class="identifier">StandardScaler</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">numerical_columns</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="identifier">remainder</span><span class="arithmetic-assignment">=</span><span class="string-literal">'passthrough'</span>
+<span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The model will stay unchanged.</span>
+
+<span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_pipeline</span><span class="grouping">(</span>
+    <span class="identifier">preprocessor</span><span class="punctuation">,</span>
+    <span class="identifier">TransformedTargetRegressor</span><span class="grouping">(</span>
+        <span class="identifier">regressor</span><span class="arithmetic-assignment">=</span><span class="identifier">Ridge</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-10</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="identifier">func</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log10</span><span class="punctuation">,</span>
+        <span class="identifier">inverse_func</span><span class="arithmetic-assignment">=</span><span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">special</span><span class="punctuation">.</span><span class="identifier">exp10</span>
+    <span class="grouping">)</span>
+<span class="grouping">)</span>
+
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Again, we check the performance of the computed</span>
+<span class="comment"># model using, for example, the median absolute error of the model and the R</span>
+<span class="comment"># squared coefficient.</span>
+
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span>
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span><span class="string-literal">'MAE on training set: {mae:.2f} $/hour'</span>
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">f</span><span class="string-literal">'\nMAE on testing set: {mae:.2f} $/hour'</span>
+<span class="identifier">fig</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="int-literal">6</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">transform</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transAxes</span><span class="punctuation">,</span> <span class="identifier">ls</span><span class="arithmetic-assignment">=</span><span class="string-literal">"--", c="red"</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">text</span><span class="grouping">(</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="int-literal">20</span><span class="punctuation">,</span> <span class="identifier">string_score</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Ridge model, small regularization, normalized variables'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Model predictions'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Truths'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># For the coefficient analysis, scaling is not needed this time.</span>
+
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'Coefficients'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">index</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'barh'</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Ridge model, small regularization, normalized variables'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># We now inspect the coefficients across several cross-validation folds.</span>
+
+<span class="identifier">cv_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cross_validate</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">cv</span><span class="arithmetic-assignment">=</span><span class="identifier">RepeatedKFold</span><span class="grouping">(</span><span class="identifier">n_splits</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">n_repeats</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="grouping">[</span><span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span>
+     <span class="keyword">for</span> <span class="identifier">est</span> <span class="relational-operator">in</span> <span class="identifier">cv_model</span><span class="grouping">[</span><span class="string-literal">'estimator'</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">sns</span><span class="punctuation">.</span><span class="identifier">stripplot</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">coefs</span><span class="punctuation">,</span> <span class="identifier">orient</span><span class="arithmetic-assignment">=</span><span class="string-literal">'h', color='k'</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">sns</span><span class="punctuation">.</span><span class="identifier">boxplot</span><span class="grouping">(</span><span class="identifier">data</span><span class="arithmetic-assignment">=</span><span class="identifier">coefs</span><span class="punctuation">,</span> <span class="identifier">orient</span><span class="arithmetic-assignment">=</span><span class="string-literal">'h', color='cyan'</span><span class="punctuation">,</span> <span class="identifier">saturation</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Coefficient variability'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The result is quite similar to the non-normalized case.</span>
+<span class="comment">#</span>
+<span class="comment"># Linear models with regularization</span>
+<span class="comment"># ---------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># In machine-learning practice, Ridge Regression is more often used with</span>
+<span class="comment"># non-negligible regularization.</span>
+<span class="comment">#</span>
+<span class="comment"># Above, we limited this regularization to a very little amount.</span>
+<span class="comment"># Regularization improves the conditioning of the problem and reduces the</span>
+<span class="comment"># variance of the estimates. RidgeCV applies cross validation in order to</span>
+<span class="comment"># determine which value of the regularization parameter (`alpha`) is best</span>
+<span class="comment"># suited for prediction.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">RidgeCV</span>
+
+<span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_pipeline</span><span class="grouping">(</span>
+    <span class="identifier">preprocessor</span><span class="punctuation">,</span>
+    <span class="identifier">TransformedTargetRegressor</span><span class="grouping">(</span>
+        <span class="identifier">regressor</span><span class="arithmetic-assignment">=</span><span class="identifier">RidgeCV</span><span class="grouping">(</span><span class="identifier">alphas</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logspace</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="int-literal">10</span><span class="punctuation">,</span> <span class="int-literal">21</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="identifier">func</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log10</span><span class="punctuation">,</span>
+        <span class="identifier">inverse_func</span><span class="arithmetic-assignment">=</span><span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">special</span><span class="punctuation">.</span><span class="identifier">exp10</span>
+    <span class="grouping">)</span>
+<span class="grouping">)</span>
+
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># First we check which value of :math:`\alpha` has been selected.</span>
+
+<span class="identifier">model</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">alpha_</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Then we check the quality of the predictions.</span>
+
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span>
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span><span class="string-literal">'MAE on training set: {mae:.2f} $/hour'</span>
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">f</span><span class="string-literal">'\nMAE on testing set: {mae:.2f} $/hour'</span>
+
+<span class="identifier">fig</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="int-literal">6</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">transform</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transAxes</span><span class="punctuation">,</span> <span class="identifier">ls</span><span class="arithmetic-assignment">=</span><span class="string-literal">"--", c="red"</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">text</span><span class="grouping">(</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="int-literal">20</span><span class="punctuation">,</span> <span class="identifier">string_score</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Ridge model, regularization, normalized variables'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Model predictions'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Truths'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The ability to reproduce the data of the regularized model is similar to</span>
+<span class="comment"># the one of the non-regularized model.</span>
+
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'Coefficients'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">index</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'barh'</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Ridge model, regularization, normalized variables'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># The coefficients are significantly different.</span>
+<span class="comment"># AGE and EXPERIENCE coefficients are both positive but they now have less</span>
+<span class="comment"># influence on the prediction.</span>
+<span class="comment">#</span>
+<span class="comment"># The regularization reduces the influence of correlated</span>
+<span class="comment"># variables on the model because the weight is shared between the two</span>
+<span class="comment"># predictive variables, so neither alone would have strong weights.</span>
+<span class="comment">#</span>
+<span class="comment"># On the other hand, the weights obtained with regularization are more</span>
+<span class="comment"># stable  (see the :ref:`ridge_regression` User Guide section). This</span>
+<span class="comment"># increased stability is visible from the plot, obtained from data</span>
+<span class="comment"># perturbations, in a cross validation. This plot can  be compared with</span>
+<span class="comment"># the :ref:`previous one&lt;covariation&gt;`.</span>
+
+<span class="identifier">cv_model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cross_validate</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">cv</span><span class="arithmetic-assignment">=</span><span class="identifier">RepeatedKFold</span><span class="grouping">(</span><span class="identifier">n_splits</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">n_repeats</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="grouping">)</span><span class="punctuation">,</span>
+    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="grouping">[</span><span class="identifier">est</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-operator">*</span>
+     <span class="identifier">X_train_preprocessed</span><span class="punctuation">.</span><span class="identifier">std</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+     <span class="keyword">for</span> <span class="identifier">est</span> <span class="relational-operator">in</span> <span class="identifier">cv_model</span><span class="grouping">[</span><span class="string-literal">'estimator'</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Age coefficient'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Experience coefficient'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">grid</span><span class="grouping">(</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="float-literal">-0.4</span><span class="punctuation">,</span> <span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="float-literal">-0.4</span><span class="punctuation">,</span> <span class="float-literal">0.5</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">coefs</span><span class="grouping">[</span><span class="string-literal">"AGE"], coefs["EXPERIENCE"</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Co-variations of coefficients for AGE and EXPERIENCE '</span>
+              <span class="string-literal">'across folds'</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Linear models with sparse coefficients</span>
+<span class="comment"># --------------------------------------</span>
+<span class="comment">#</span>
+<span class="comment"># Another possibility to take into account correlated variables in the dataset,</span>
+<span class="comment"># is to estimate sparse coefficients. In some way we already did it manually</span>
+<span class="comment"># when we dropped the AGE column in a previous Ridge estimation.</span>
+<span class="comment">#</span>
+<span class="comment"># Lasso models (see the :ref:`lasso` User Guide section) estimates sparse</span>
+<span class="comment"># coefficients. LassoCV applies cross validation in order to</span>
+<span class="comment"># determine which value of the regularization parameter (`alpha`) is best</span>
+<span class="comment"># suited for the model estimation.</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">LassoCV</span>
+
+<span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_pipeline</span><span class="grouping">(</span>
+    <span class="identifier">preprocessor</span><span class="punctuation">,</span>
+    <span class="identifier">TransformedTargetRegressor</span><span class="grouping">(</span>
+        <span class="identifier">regressor</span><span class="arithmetic-assignment">=</span><span class="identifier">LassoCV</span><span class="grouping">(</span><span class="identifier">alphas</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logspace</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="int-literal">10</span><span class="punctuation">,</span> <span class="int-literal">21</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100000</span><span class="grouping">)</span><span class="punctuation">,</span>
+        <span class="identifier">func</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log10</span><span class="punctuation">,</span>
+        <span class="identifier">inverse_func</span><span class="arithmetic-assignment">=</span><span class="identifier">sp</span><span class="punctuation">.</span><span class="identifier">special</span><span class="punctuation">.</span><span class="identifier">exp10</span>
+    <span class="grouping">)</span>
+<span class="grouping">)</span>
+
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="punctuation">,</span> <span class="identifier">y_train</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># First we verify which value of :math:`\alpha` has been selected.</span>
+
+<span class="identifier">model</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">alpha_</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># Then we check the quality of the predictions.</span>
+
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span>
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_train</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span><span class="string-literal">'MAE on training set: {mae:.2f} $/hour'</span>
+<span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+<span class="identifier">mae</span> <span class="arithmetic-assignment">=</span> <span class="identifier">median_absolute_error</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">string_score</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">f</span><span class="string-literal">'\nMAE on testing set: {mae:.2f} $/hour'</span>
+
+<span class="identifier">fig</span><span class="punctuation">,</span> <span class="identifier">ax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots</span><span class="grouping">(</span><span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="int-literal">6</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">scatter</span><span class="grouping">(</span><span class="identifier">y_test</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="grouping">)</span>
+<span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">transform</span><span class="arithmetic-assignment">=</span><span class="identifier">ax</span><span class="punctuation">.</span><span class="identifier">transAxes</span><span class="punctuation">,</span> <span class="identifier">ls</span><span class="arithmetic-assignment">=</span><span class="string-literal">"--", c="red"</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">text</span><span class="grouping">(</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="int-literal">20</span><span class="punctuation">,</span> <span class="identifier">string_score</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Lasso model, regularization, normalized variables'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Model predictions'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Truths'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+<span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">27</span><span class="grouping">]</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># For our dataset, again the model is not very predictive.</span>
+
+<span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pd</span><span class="punctuation">.</span><span class="identifier">DataFrame</span><span class="grouping">(</span>
+    <span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">named_steps</span><span class="grouping">[</span><span class="string-literal">'transformedtargetregressor'</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">regressor_</span><span class="punctuation">.</span><span class="identifier">coef_</span><span class="punctuation">,</span>
+    <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'Coefficients'</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">index</span><span class="arithmetic-assignment">=</span><span class="identifier">feature_names</span>
+<span class="grouping">)</span>
+<span class="identifier">coefs</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'barh'</span><span class="punctuation">,</span> <span class="identifier">figsize</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">9</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">'Lasso model, regularization, normalized variables'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">axvline</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'.5'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">subplots_adjust</span><span class="grouping">(</span><span class="identifier">left</span><span class="arithmetic-assignment">=</span><span class="float-literal">.3</span><span class="grouping">)</span>
+
+<span class="comment"># %%</span>
+<span class="comment"># A Lasso model identifies the correlation between</span>
+<span class="comment"># AGE and EXPERIENCE and suppresses one of them for the sake of the prediction.</span>
+<span class="comment">#</span>
+<span class="comment"># It is important to keep in mind that the coefficients that have been</span>
+<span class="comment"># dropped may still be related to the outcome by themselves: the model</span>
+<span class="comment"># chose to suppress them because they bring little or no additional</span>
+<span class="comment"># information on top of the other features. Additionnaly, this selection</span>
+<span class="comment"># is unstable for correlated features, and should be interpreted with</span>
+<span class="comment"># caution.</span>
+<span class="comment">#</span>
+<span class="comment"># Lessons learned</span>
+<span class="comment"># ---------------</span>
+<span class="comment">#</span>
+<span class="comment"># * Coefficients must be scaled to the same unit of measure to retrieve</span>
+<span class="comment">#   feature importance. Scaling them with the standard-deviation of the</span>
+<span class="comment">#   feature is a useful proxy.</span>
+<span class="comment"># * Coefficients in multivariate linear models represent the dependency</span>
+<span class="comment">#   between a given feature and the target, **conditional** on the other</span>
+<span class="comment">#   features.</span>
+<span class="comment"># * Correlated features induce instabilities in the coefficients of linear</span>
+<span class="comment">#   models and their effects cannot be well teased apart.</span>
+<span class="comment"># * Different linear models respond differently to feature correlation and</span>
+<span class="comment">#   coefficients could significantly vary from one another.</span>
+<span class="comment"># * Inspecting coefficients across the folds of a cross-validation loop</span>
+<span class="comment">#   gives an idea of their stability.</span>
+
+    </pre>
+  </body>
+</html>

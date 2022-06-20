@@ -1,0 +1,721 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Neural Network Blocks for faceswap.py. """</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+
+<span class="keyword">from</span> <span class="identifier">keras</span><span class="punctuation">.</span><span class="identifier">layers</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">Activation</span><span class="punctuation">,</span> <span class="identifier">Add</span><span class="punctuation">,</span> <span class="identifier">BatchNormalization</span><span class="punctuation">,</span> <span class="identifier">Concatenate</span><span class="punctuation">,</span> <span class="identifier">Conv2D</span> <span class="keyword">as</span> <span class="identifier">KConv2D</span><span class="punctuation">,</span>
+                          <span class="identifier">Conv2DTranspose</span><span class="punctuation">,</span> <span class="identifier">DepthwiseConv2D</span> <span class="keyword">as</span> <span class="identifier">KDepthwiseConv2d</span><span class="punctuation">,</span> <span class="identifier">LeakyReLU</span><span class="punctuation">,</span> <span class="identifier">PReLU</span><span class="punctuation">,</span>
+                          <span class="identifier">SeparableConv2D</span><span class="punctuation">,</span> <span class="identifier">UpSampling2D</span><span class="grouping">)</span>
+<span class="keyword">from</span> <span class="identifier">keras</span><span class="punctuation">.</span><span class="identifier">initializers</span> <span class="keyword">import</span> <span class="identifier">he_uniform</span><span class="punctuation">,</span> <span class="identifier">VarianceScaling</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">initializers</span> <span class="keyword">import</span> <span class="identifier">ICNR</span><span class="punctuation">,</span> <span class="identifier">ConvolutionAware</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">layers</span> <span class="keyword">import</span> <span class="identifier">PixelShuffler</span><span class="punctuation">,</span> <span class="identifier">ReflectionPadding2D</span><span class="punctuation">,</span> <span class="identifier">Swish</span><span class="punctuation">,</span> <span class="identifier">KResizeImages</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">normalization</span> <span class="keyword">import</span> <span class="identifier">InstanceNormalization</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+
+<span class="identifier">_CONFIG</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">_NAMES</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">set_config</span><span class="grouping">(</span><span class="identifier">configuration</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Set the global configuration parameters from the user's config file.
+
+    These options are used when creating layers for new models.
+
+    Parameters
+    ----------
+    configuration: dict
+        The configuration options that exist in the training configuration files that pertain
+        specifically to Custom Faceswap Layers. The keys should be: `icnr_init`, `conv_aware_init`
+        and 'reflect_padding'
+     """</span>
+    <span class="keyword">global</span> <span class="identifier">_CONFIG</span>  <span class="comment"># pylint:disable=global-statement</span>
+    <span class="identifier">_CONFIG</span> <span class="arithmetic-assignment">=</span> <span class="identifier">configuration</span>
+    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Set NNBlock configuration to: %s"</span><span class="punctuation">,</span> <span class="identifier">_CONFIG</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_name</span><span class="grouping">(</span><span class="identifier">name</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Return unique layer name for requested block.
+
+    As blocks can be used multiple times, auto appends an integer to the end of the requested
+    name to keep all block names unique
+
+    Parameters
+    ----------
+    name: str
+        The requested name for the layer
+
+    Returns
+    -------
+    str
+        The unique name for this layer
+    """</span>
+    <span class="keyword">global</span> <span class="identifier">_NAMES</span>  <span class="comment"># pylint:disable=global-statement</span>
+    <span class="identifier">_NAMES</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_NAMES</span><span class="punctuation">.</span><span class="identifier">setdefault</span><span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+    <span class="identifier">name</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">_NAMES</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Generating block name: %s"</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">name</span>
+
+
+<span class="comment">#  &lt;&lt; CONVOLUTIONS &gt;&gt;</span>
+<span class="keyword">def</span> <span class="identifier">_get_default_initializer</span><span class="grouping">(</span><span class="identifier">initializer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Returns a default initializer of Convolutional Aware or he_uniform for convolutional
+    layers.
+
+    Parameters
+    ----------
+    initializer: :class:`keras.initializers.Initializer` or None
+        The initializer that has been passed into the model. If this value is ``None`` then a
+        default initializer will be set to 'he_uniform'. If Convolutional Aware initialization
+        has been enabled, then any passed through initializer will be replaced with the
+        Convolutional Aware initializer.
+
+    Returns
+    -------
+    :class:`keras.initializers.Initializer`
+        The kernel initializer to use for this convolutional layer. Either the original given
+        initializer, he_uniform or convolutional aware (if selected in config options)
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">_CONFIG</span><span class="grouping">[</span><span class="string-literal">"conv_aware_init"</span><span class="grouping">]</span><span class="punctuation">:</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ConvolutionAware</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">initializer</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">he_uniform</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initializer</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Using model supplied initializer: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Set default kernel_initializer: (original: %s current: %s)"</span><span class="punctuation">,</span> <span class="identifier">initializer</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="identifier">KConv2D</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" A standard Keras Convolution 2D layer with parameters updated to be more appropriate for
+    Faceswap architecture.
+
+    Parameters are the same, with the same defaults, as a standard :class:`keras.layers.Conv2D`
+    except where listed below. The default initializer is updated to `he_uniform` or `convolutional
+    aware` based on user configuration settings.
+
+    Parameters
+    ----------
+    padding: str, optional
+        One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
+        slightly inconsistent across backends with `strides` != 1, as described
+        `here &lt;https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/&gt;`_.
+    check_icnr_init: `bool`, optional
+        ``True`` if the user configuration options should be checked to apply ICNR initialization
+        to the layer. This should only be passed in from :class:`UpscaleBlock` layers.
+        Default: ``False``
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same"</span><span class="punctuation">,</span> <span class="identifier">check_icnr_init</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">kwargs</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"name"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"filters"] if "filters"</span> <span class="relational-operator">in</span> <span class="identifier">kwargs</span> <span class="keyword">else</span> <span class="identifier">args</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"name"] = _get_name("conv2d_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filters</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">initializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_default_initializer</span><span class="grouping">(</span><span class="identifier">kwargs</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="string-literal">"kernel_initializer"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">check_icnr_init</span> <span class="logical-operator">and</span> <span class="identifier">_CONFIG</span><span class="grouping">[</span><span class="string-literal">"icnr_init"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">initializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ICNR</span><span class="grouping">(</span><span class="identifier">initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">initializer</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Using ICNR Initializer: %s"</span><span class="punctuation">,</span> <span class="identifier">initializer</span><span class="grouping">)</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">padding</span><span class="punctuation">,</span> <span class="identifier">kernel_initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">initializer</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">DepthwiseConv2D</span><span class="grouping">(</span><span class="identifier">KDepthwiseConv2d</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" A standard Keras Depthwise Convolution 2D layer with parameters updated to be more
+    appropriate for Faceswap architecture.
+
+    Parameters are the same, with the same defaults, as a standard
+    :class:`keras.layers.DepthwiseConv2D` except where listed below. The default initializer is
+    updated to `he_uniform` or `convolutional aware` based on user configuration settings.
+
+    Parameters
+    ----------
+    padding: str, optional
+        One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
+        slightly inconsistent across backends with `strides` != 1, as described
+        `here &lt;https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/&gt;`_.
+    check_icnr_init: `bool`, optional
+        ``True`` if the user configuration options should be checked to apply ICNR initialization
+        to the layer. This should only be passed in from :class:`UpscaleBlock` layers.
+        Default: ``False``
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same"</span><span class="punctuation">,</span> <span class="identifier">check_icnr_init</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">kwargs</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"name"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"name"] = _get_name("dwconv2d"</span><span class="grouping">)</span>
+        <span class="identifier">initializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_default_initializer</span><span class="grouping">(</span><span class="identifier">kwargs</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="string-literal">"depthwise_initializer"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">check_icnr_init</span> <span class="logical-operator">and</span> <span class="identifier">_CONFIG</span><span class="grouping">[</span><span class="string-literal">"icnr_init"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">initializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ICNR</span><span class="grouping">(</span><span class="identifier">initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">initializer</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Using ICNR Initializer: %s"</span><span class="punctuation">,</span> <span class="identifier">initializer</span><span class="grouping">)</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">padding</span><span class="punctuation">,</span> <span class="identifier">depthwise_initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">initializer</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Conv2DOutput</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" A Convolution 2D layer that separates out the activation layer to explicitly set the data
+    type on the activation to float 32 to fully support mixed precision training.
+
+    The Convolution 2D layer uses default parameters to be more appropriate for Faceswap
+    architecture.
+
+    Parameters are the same, with the same defaults, as a standard :class:`keras.layers.Conv2D`
+    except where listed below. The default initializer is updated to he_uniform or convolutional
+    aware based on user config settings.
+
+    Parameters
+    ----------
+    filters: int
+        The dimensionality of the output space (i.e. the number of output filters in the
+        convolution)
+    kernel_size: int or tuple/list of 2 ints
+        The height and width of the 2D convolution window. Can be a single integer to specify the
+        same value for all spatial dimensions.
+    activation: str, optional
+        The activation function to apply to the output. Default: `"sigmoid"`
+    padding: str, optional
+        One of `"valid"` or `"same"` (case-insensitive). Default: `"same"`. Note that `"same"` is
+        slightly inconsistent across backends with `strides` != 1, as described
+        `here &lt;https://github.com/keras-team/keras/pull/9473#issuecomment-372166860/&gt;`_.
+    kwargs: dict
+        Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="punctuation">,</span> <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"sigmoid", padding="same"</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="string-literal">"name") if "name"</span> <span class="relational-operator">in</span> <span class="identifier">kwargs</span> <span class="keyword">else</span> <span class="identifier">_get_name</span><span class="grouping">(</span>
+            <span class="string-literal">"conv_output_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filters</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activation</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">padding</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the Faceswap Convolutional Output Layer.
+
+        Parameters
+        ----------
+        inputs: Tensor
+            The input to the layer
+
+        Returns
+        -------
+        Tensor
+            The output tensor from the Convolution 2D Layer
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span>
+                       <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                       <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                       <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_conv2d"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                       <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Activation</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float32"</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Conv2DBlock</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" A standard Convolution 2D layer which applies user specified configuration to the
+    layer.
+
+    Adds reflection padding if it has been selected by the user, and other post-processing
+    if requested by the plugin.
+
+    Adds instance normalization if requested. Adds a LeakyReLU if a residual block follows.
+
+    Parameters
+    ----------
+    filters: int
+        The dimensionality of the output space (i.e. the number of output filters in the
+        convolution)
+    kernel_size: int, optional
+        An integer or tuple/list of 2 integers, specifying the height and width of the 2D
+        convolution window. Can be a single integer to specify the same value for all spatial
+        dimensions. NB: If `use_depthwise` is ``True`` then a value must still be provided here,
+        but it will be ignored. Default: 5
+    strides: tuple or int, optional
+        An integer or tuple/list of 2 integers, specifying the strides of the convolution along the
+        height and width. Can be a single integer to specify the same value for all spatial
+        dimensions. Default: `2`
+    padding: ["valid", "same"], optional
+        The padding to use. NB: If reflect padding has been selected in the user configuration
+        options, then this argument will be ignored in favor of reflect padding. Default: `"same"`
+    normalization: str or ``None``, optional
+        Normalization to apply after the Convolution Layer. Select one of "batch" or "instance".
+        Set to ``None`` to not apply normalization. Default: ``None``
+    activation: str or ``None``, optional
+        The activation function to use. This is applied at the end of the convolution block. Select
+        one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
+        function. Default: `"leakyrelu"`
+    use_depthwise: bool, optional
+        Set to ``True`` to use a Depthwise Convolution 2D layer rather than a standard Convolution
+        2D layer. Default: ``False``
+    kwargs: dict
+        Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">filters</span><span class="punctuation">,</span>
+                 <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span>
+                 <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+                 <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same"</span><span class="punctuation">,</span>
+                 <span class="identifier">normalization</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="punctuation">,</span>
+                 <span class="identifier">use_depthwise</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="string-literal">"name") if "name"</span> <span class="relational-operator">in</span> <span class="identifier">kwargs</span> <span class="keyword">else</span> <span class="identifier">_get_name</span><span class="grouping">(</span>
+            <span class="string-literal">"conv_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filters</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"name: %s, filters: %s, kernel_size: %s, strides: %s, padding: %s, "</span>
+                     <span class="string-literal">"normalization: %s, activation: %s, use_depthwise: %s, kwargs: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="punctuation">,</span> <span class="identifier">strides</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="punctuation">,</span> <span class="identifier">normalization</span><span class="punctuation">,</span>
+                     <span class="identifier">activation</span><span class="punctuation">,</span> <span class="identifier">use_depthwise</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_reflect_padding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_CONFIG</span><span class="grouping">[</span><span class="string-literal">"reflect_padding"</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">kernel_size</span><span class="punctuation">,</span> <span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">use_depthwise</span> <span class="keyword">else</span> <span class="grouping">(</span><span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_strides</span> <span class="arithmetic-assignment">=</span> <span class="identifier">strides</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"valid"</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_reflect_padding</span> <span class="keyword">else</span> <span class="identifier">padding</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalization</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span> <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">normalization</span> <span class="keyword">else</span> <span class="identifier">normalization</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span> <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">activation</span> <span class="keyword">else</span> <span class="identifier">activation</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_depthwise</span> <span class="arithmetic-assignment">=</span> <span class="identifier">use_depthwise</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_assert_arguments</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_assert_arguments</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Validate the given arguments. """</span>
+        <span class="keyword">assert</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalization</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"batch", "instance"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span>
+            <span class="string-literal">"normalization should be 'batch', 'instance' or None"</span><span class="grouping">)</span>
+        <span class="keyword">assert</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"leakyrelu", "swish", "prelu"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span>
+            <span class="string-literal">"activation should be 'leakyrelu', 'prelu', 'swish' or None"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the Faceswap Convolutional Layer.
+
+        Parameters
+        ----------
+        inputs: Tensor
+            The input to the layer
+
+        Returns
+        -------
+        Tensor
+            The output tensor from the Convolution 2D Layer
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_reflect_padding</span><span class="punctuation">:</span>
+            <span class="identifier">inputs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ReflectionPadding2D</span><span class="grouping">(</span><span class="identifier">stride</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_strides</span><span class="punctuation">,</span>
+                                         <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                         <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_reflectionpadding2d"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="identifier">conv</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DepthwiseConv2D</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_depthwise</span> <span class="keyword">else</span> <span class="identifier">Conv2D</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">conv</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_args</span><span class="punctuation">,</span>
+                     <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_strides</span><span class="punctuation">,</span>
+                     <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                     <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_{}conv2d".format(self._name, "dw" if self._use_depthwise else ""</span><span class="grouping">)</span><span class="punctuation">,</span>
+                     <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="comment"># normalization</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalization</span> <span class="relational-operator">==</span> <span class="string-literal">"instance"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">InstanceNormalization</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_instancenorm"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalization</span> <span class="relational-operator">==</span> <span class="string-literal">"batch"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">BatchNormalization</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_batchnorm"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="comment"># activation</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="relational-operator">==</span> <span class="string-literal">"leakyrelu"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LeakyReLU</span><span class="grouping">(</span><span class="float-literal">0.1</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_leakyrelu"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="relational-operator">==</span> <span class="string-literal">"swish"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Swish</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_swish"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="relational-operator">==</span> <span class="string-literal">"prelu"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PReLU</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_prelu"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SeparableConv2DBlock</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Seperable Convolution Block.
+
+    Parameters
+    ----------
+    filters: int
+        The dimensionality of the output space (i.e. the number of output filters in the
+        convolution)
+    kernel_size: int, optional
+        An integer or tuple/list of 2 integers, specifying the height and width of the 2D
+        convolution window. Can be a single integer to specify the same value for all spatial
+        dimensions. Default: 5
+    strides: tuple or int, optional
+        An integer or tuple/list of 2 integers, specifying the strides of the convolution along
+        the height and width. Can be a single integer to specify the same value for all spatial
+        dimensions. Default: `2`
+    kwargs: dict
+        Any additional Keras standard layer keyword arguments to pass to the Separable
+        Convolutional 2D layer
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_name</span><span class="grouping">(</span><span class="string-literal">"separableconv2d_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filters</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"name: %s, filters: %s, kernel_size: %s, strides: %s, kwargs: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="punctuation">,</span> <span class="identifier">strides</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_strides</span> <span class="arithmetic-assignment">=</span> <span class="identifier">strides</span>
+
+        <span class="identifier">initializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_default_initializer</span><span class="grouping">(</span><span class="identifier">kwargs</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="string-literal">"kernel_initializer"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"kernel_initializer"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initializer</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the Faceswap Separable Convolutional 2D Block.
+
+        Parameters
+        ----------
+        inputs: Tensor
+            The input to the layer
+
+        Returns
+        -------
+        Tensor
+            The output tensor from the Upscale Layer
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">SeparableConv2D</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span>
+                                <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                                <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_strides</span><span class="punctuation">,</span>
+                                <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same"</span><span class="punctuation">,</span>
+                                <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_seperableconv2d"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Activation</span><span class="grouping">(</span><span class="string-literal">"relu", name="{}_relu"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+
+<span class="comment">#  &lt;&lt; UPSCALING &gt;&gt;</span>
+
+<span class="keyword">class</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" An upscale layer for sub-pixel up-scaling.
+
+    Adds reflection padding if it has been selected by the user, and other post-processing
+    if requested by the plugin.
+
+    Parameters
+    ----------
+    filters: int
+        The dimensionality of the output space (i.e. the number of output filters in the
+        convolution)
+    kernel_size: int, optional
+        An integer or tuple/list of 2 integers, specifying the height and width of the 2D
+        convolution window. Can be a single integer to specify the same value for all spatial
+        dimensions. Default: 3
+    padding: ["valid", "same"], optional
+        The padding to use. NB: If reflect padding has been selected in the user configuration
+        options, then this argument will be ignored in favor of reflect padding. Default: `"same"`
+    scale_factor: int, optional
+        The amount to upscale the image. Default: `2`
+    normalization: str or ``None``, optional
+        Normalization to apply after the Convolution Layer. Select one of "batch" or "instance".
+        Set to ``None`` to not apply normalization. Default: ``None``
+    activation: str or ``None``, optional
+        The activation function to use. This is applied at the end of the convolution block. Select
+        one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
+        function. Default: `"leakyrelu"`
+    kwargs: dict
+        Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">filters</span><span class="punctuation">,</span>
+                 <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span>
+                 <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same"</span><span class="punctuation">,</span>
+                 <span class="identifier">scale_factor</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+                 <span class="identifier">normalization</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"leakyrelu"</span><span class="punctuation">,</span>
+                 <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_name</span><span class="grouping">(</span><span class="string-literal">"upscale_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filters</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"name: %s. filters: %s, kernel_size: %s, padding: %s, scale_factor: %s, "</span>
+                     <span class="string-literal">"normalization: %s, activation: %s, kwargs: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="punctuation">,</span> <span class="identifier">scale_factor</span><span class="punctuation">,</span> <span class="identifier">normalization</span><span class="punctuation">,</span>
+                     <span class="identifier">activation</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">padding</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale_factor</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalization</span> <span class="arithmetic-assignment">=</span> <span class="identifier">normalization</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activation</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the Faceswap Convolutional Layer.
+
+        Parameters
+        ----------
+        inputs: Tensor
+            The input to the layer
+
+        Returns
+        -------
+        Tensor
+            The output tensor from the Upscale Layer
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DBlock</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span><span class="punctuation">,</span>
+                            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                            <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span>
+                            <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                            <span class="identifier">normalization</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_normalization</span><span class="punctuation">,</span>
+                            <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span><span class="punctuation">,</span>
+                            <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_conv2d"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                            <span class="identifier">check_icnr_init</span><span class="arithmetic-assignment">=</span><span class="identifier">_CONFIG</span><span class="grouping">[</span><span class="string-literal">"icnr_init"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                            <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PixelShuffler</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_pixelshuffler"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Upscale2xBlock</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Custom hybrid upscale layer for sub-pixel up-scaling.
+
+    Most of up-scaling is approximating lighting gradients which can be accurately achieved
+    using linear fitting. This layer attempts to improve memory consumption by splitting
+    with bilinear and convolutional layers so that the sub-pixel update will get details
+    whilst the bilinear filter will get lighting.
+
+    Adds reflection padding if it has been selected by the user, and other post-processing
+    if requested by the plugin.
+
+    Parameters
+    ----------
+    filters: int
+        The dimensionality of the output space (i.e. the number of output filters in the
+        convolution)
+    kernel_size: int, optional
+        An integer or tuple/list of 2 integers, specifying the height and width of the 2D
+        convolution window. Can be a single integer to specify the same value for all spatial
+        dimensions. Default: 3
+    padding: ["valid", "same"], optional
+        The padding to use. Default: `"same"`
+    activation: str or ``None``, optional
+        The activation function to use. This is applied at the end of the convolution block. Select
+        one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
+        function. Default: `"leakyrelu"`
+    interpolation: ["nearest", "bilinear"], optional
+        Interpolation to use for up-sampling. Default: `"bilinear"`
+    scale_factor: int, optional
+        The amount to upscale the image. Default: `2`
+    sr_ratio: float, optional
+        The proportion of super resolution (pixel shuffler) filters to use. Non-fast mode only.
+        Default: `0.5`
+    fast: bool, optional
+        Use a faster up-scaling method that may appear more rugged. Default: ``False``
+    kwargs: dict
+        Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same", activation="leakyrelu"</span><span class="punctuation">,</span>
+                 <span class="identifier">interpolation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"bilinear"</span><span class="punctuation">,</span> <span class="identifier">sr_ratio</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="punctuation">,</span> <span class="identifier">scale_factor</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">fast</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_name</span><span class="grouping">(</span><span class="string-literal">"upscale2x_{}_{}".format(filters, "fast" if fast else "hyb"</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fast</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fast</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filters</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fast</span> <span class="keyword">else</span> <span class="identifier">filters</span> <span class="arithmetic-operator">-</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">filters</span> <span class="arithmetic-operator">*</span> <span class="identifier">sr_ratio</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">padding</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">interpolation</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activation</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale_factor</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the Faceswap Upscale 2x Layer.
+
+        Parameters
+        ----------
+        inputs: Tensor
+            The input to the layer
+
+        Returns
+        -------
+        Tensor
+            The output tensor from the Upscale Layer
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inputs</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fast</span><span class="punctuation">:</span>
+            <span class="identifier">var_x_sr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span>
+                                    <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                                    <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                                    <span class="identifier">scale_factor</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span><span class="punctuation">,</span>
+                                    <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span><span class="punctuation">,</span>
+                                    <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fast</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fast</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">var_x2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="punctuation">,</span>
+                            <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                            <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_conv2d"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                            <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+            <span class="identifier">var_x2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpSampling2D</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                  <span class="identifier">interpolation</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolation</span><span class="punctuation">,</span>
+                                  <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_upsampling2D"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x2</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fast</span><span class="punctuation">:</span>
+                <span class="identifier">var_x1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">UpscaleBlock</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span>
+                                      <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                                      <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                                      <span class="identifier">scale_factor</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale_factor</span><span class="punctuation">,</span>
+                                      <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span><span class="punctuation">,</span>
+                                      <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+                <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Add</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">var_x2</span><span class="punctuation">,</span> <span class="identifier">var_x1</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Concatenate</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_concatenate"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">var_x_sr</span><span class="punctuation">,</span> <span class="identifier">var_x2</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">var_x_sr</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+
+<span class="keyword">class</span> <span class="identifier">UpscaleResizeImagesBlock</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Upscale block that uses the Keras Backend function resize_images to perform the up scaling
+    Similar in methodology to the :class:`Upscale2xBlock`
+
+    Adds reflection padding if it has been selected by the user, and other post-processing
+    if requested by the plugin.
+
+    Parameters
+    ----------
+    filters: int
+        The dimensionality of the output space (i.e. the number of output filters in the
+        convolution)
+    kernel_size: int, optional
+        An integer or tuple/list of 2 integers, specifying the height and width of the 2D
+        convolution window. Can be a single integer to specify the same value for all spatial
+        dimensions. Default: 3
+    padding: ["valid", "same"], optional
+        The padding to use. Default: `"same"`
+    activation: str or ``None``, optional
+        The activation function to use. This is applied at the end of the convolution block. Select
+        one of `"leakyrelu"`, `"prelu"` or `"swish"`. Set to ``None`` to not apply an activation
+        function. Default: `"leakyrelu"`
+    scale_factor: int, optional
+        The amount to upscale the image. Default: `2`
+    interpolation: ["nearest", "bilinear"], optional
+        Interpolation to use for up-sampling. Default: `"bilinear"`
+    kwargs: dict
+        Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same", activation="leakyrelu"</span><span class="punctuation">,</span>
+                 <span class="identifier">scale_factor</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">interpolation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"bilinear"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_name</span><span class="grouping">(</span><span class="string-literal">"upscale_ri_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filters</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">interpolation</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale_factor</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">padding</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activation</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the Faceswap Resize Images Layer.
+
+        Parameters
+        ----------
+        inputs: Tensor
+            The input to the layer
+
+        Returns
+        -------
+        Tensor
+            The output tensor from the Upscale Layer
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inputs</span>
+
+        <span class="identifier">var_x_sr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">KResizeImages</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span><span class="punctuation">,</span>
+                                 <span class="identifier">interpolation</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolation</span><span class="punctuation">,</span>
+                                 <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_resize"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x_sr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                          <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                          <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                          <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_conv"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x_sr</span><span class="grouping">)</span>
+        <span class="identifier">var_x_us</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DTranspose</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="punctuation">,</span>
+                                   <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+                                   <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                                   <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_convtrans"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Add</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">var_x_sr</span><span class="punctuation">,</span> <span class="identifier">var_x_us</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="relational-operator">==</span> <span class="string-literal">"leakyrelu"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LeakyReLU</span><span class="grouping">(</span><span class="float-literal">0.2</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_leakyrelu"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="relational-operator">==</span> <span class="string-literal">"swish"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Swish</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_swish"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_activation</span> <span class="relational-operator">==</span> <span class="string-literal">"prelu"</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">PReLU</span><span class="grouping">(</span><span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_prelu"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+
+<span class="comment"># &lt;&lt; OTHER BLOCKS &gt;&gt;</span>
+<span class="keyword">class</span> <span class="identifier">ResidualBlock</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Residual block from dfaker.
+
+    Parameters
+    ----------
+    filters: int
+        The dimensionality of the output space (i.e. the number of output filters in the
+        convolution)
+    kernel_size: int, optional
+        An integer or tuple/list of 2 integers, specifying the height and width of the 2D
+        convolution window. Can be a single integer to specify the same value for all spatial
+        dimensions. Default: 3
+    padding: ["valid", "same"], optional
+        The padding to use. Default: `"same"`
+    kwargs: dict
+        Any additional Keras standard layer keyword arguments to pass to the Convolutional 2D layer
+
+    Returns
+    -------
+    tensor
+        The output tensor from the Upscale layer
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same"</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_name</span><span class="grouping">(</span><span class="string-literal">"residual_{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filters</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"name: %s, filters: %s, kernel_size: %s, padding: %s, kwargs: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_reflect_padding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_CONFIG</span><span class="grouping">[</span><span class="string-literal">"reflect_padding"</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"valid"</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_reflect_padding</span> <span class="keyword">else</span> <span class="identifier">padding</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the Faceswap Residual Block.
+
+        Parameters
+        ----------
+        inputs: Tensor
+            The input to the layer
+
+        Returns
+        -------
+        Tensor
+            The output tensor from the Upscale Layer
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inputs</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_reflect_padding</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ReflectionPadding2D</span><span class="grouping">(</span><span class="identifier">stride</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                                        <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                                        <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_reflectionpadding2d_0"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span>
+                       <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                       <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                       <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_conv2d_0"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                       <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LeakyReLU</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.2</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_leakyrelu_1"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_reflect_padding</span><span class="punctuation">:</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ReflectionPadding2D</span><span class="grouping">(</span><span class="identifier">stride</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                                        <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                                        <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_reflectionpadding2d_1"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="identifier">kwargs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">key</span><span class="punctuation">:</span> <span class="identifier">val</span> <span class="keyword">for</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">val</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">key</span> <span class="relational-operator">!=</span> <span class="string-literal">"kernel_initializer"</span><span class="grouping">}</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">_CONFIG</span><span class="grouping">[</span><span class="string-literal">"conv_aware_init"</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"kernel_initializer"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">VarianceScaling</span><span class="grouping">(</span><span class="identifier">scale</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.2</span><span class="punctuation">,</span>
+                                                           <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">"fan_in"</span><span class="punctuation">,</span>
+                                                           <span class="identifier">distribution</span><span class="arithmetic-assignment">=</span><span class="string-literal">"uniform"</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span>
+                       <span class="identifier">kernel_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                       <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_padding</span><span class="punctuation">,</span>
+                       <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_conv2d_1"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="punctuation">,</span>
+                       <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Add</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">var_x</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LeakyReLU</span><span class="grouping">(</span><span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.2</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}_leakyrelu_3"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,408 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># -*- coding: utf-8 -*-</span>
+<span class="comment">"""
+A Theil-Sen Estimator for Multiple Linear Regression Model
+"""</span>
+
+<span class="comment"># Author: Florian Wilhelm &lt;florian.wilhelm@gmail.com&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">from</span> <span class="identifier">itertools</span> <span class="keyword">import</span> <span class="identifier">combinations</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">binom</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">lapack</span> <span class="keyword">import</span> <span class="identifier">get_lapack_funcs</span>
+<span class="keyword">from</span> <span class="identifier">joblib</span> <span class="keyword">import</span> <span class="identifier">Parallel</span><span class="punctuation">,</span> <span class="identifier">effective_n_jobs</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">LinearModel</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">RegressorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+
+<span class="identifier">_EPSILON</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">double</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_modified_weiszfeld_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">x_old</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Modified Weiszfeld step.
+
+    This function defines one iteration step in order to approximate the
+    spatial median (L1 median). It is a form of an iteratively re-weighted
+    least squares method.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Training vector, where n_samples is the number of samples and
+        n_features is the number of features.
+
+    x_old : ndarray of shape = (n_features,)
+        Current start vector.
+
+    Returns
+    -------
+    x_new : ndarray of shape (n_features,)
+        New iteration step.
+
+    References
+    ----------
+    - On Computation of Spatial Median for Robust Data Mining, 2005
+      T. Kärkkäinen and S. Äyrämö
+      http://users.jyu.fi/~samiayr/pdf/ayramo_eurogen05.pdf
+    """</span>
+    <span class="identifier">diff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">x_old</span>
+    <span class="identifier">diff_norm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">diff</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">diff_norm</span> <span class="relational-operator">&gt;=</span> <span class="identifier">_EPSILON</span>
+    <span class="comment"># x_old equals one of our samples</span>
+    <span class="identifier">is_x_old_in_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="identifier">diff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">diff</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+    <span class="identifier">diff_norm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">diff_norm</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+    <span class="identifier">quotient_norm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">diff</span> <span class="arithmetic-operator">/</span> <span class="identifier">diff_norm</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">quotient_norm</span> <span class="relational-operator">&gt;</span> <span class="identifier">_EPSILON</span><span class="punctuation">:</span>  <span class="comment"># to avoid division by zero</span>
+        <span class="identifier">new_direction</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">mask</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">diff_norm</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+                         <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="identifier">diff_norm</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">new_direction</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+        <span class="identifier">quotient_norm</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+
+    <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">-</span> <span class="identifier">is_x_old_in_X</span> <span class="arithmetic-operator">/</span> <span class="identifier">quotient_norm</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">new_direction</span>
+            <span class="arithmetic-operator">+</span> <span class="identifier">min</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">is_x_old_in_X</span> <span class="arithmetic-operator">/</span> <span class="identifier">quotient_norm</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">x_old</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_spatial_median</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">300</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">3</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Spatial median (L1 median).
+
+    The spatial median is member of a class of so-called M-estimators which
+    are defined by an optimization problem. Given a number of p points in an
+    n-dimensional space, the point x minimizing the sum of all distances to the
+    p other points is called spatial median.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Training vector, where n_samples is the number of samples and
+        n_features is the number of features.
+
+    max_iter : int, default=300
+        Maximum number of iterations.
+
+    tol : float, default=1.e-3
+        Stop the algorithm if spatial_median has converged.
+
+    Returns
+    -------
+    spatial_median : ndarray of shape = (n_features,)
+        Spatial median.
+
+    n_iter : int
+        Number of iterations needed.
+
+    References
+    ----------
+    - On Computation of Spatial Median for Robust Data Mining, 2005
+      T. Kärkkäinen and S. Äyrämö
+      http://users.jyu.fi/~samiayr/pdf/ayramo_eurogen05.pdf
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">keepdims</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="identifier">tol</span> <span class="arithmetic-assignment">**=</span> <span class="int-literal">2</span>  <span class="comment"># We are computing the tol on the squared norm</span>
+    <span class="identifier">spatial_median_old</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+    <span class="keyword">for</span> <span class="identifier">n_iter</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">spatial_median</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_modified_weiszfeld_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">spatial_median_old</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">spatial_median_old</span> <span class="arithmetic-operator">-</span> <span class="identifier">spatial_median</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">tol</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">spatial_median_old</span> <span class="arithmetic-assignment">=</span> <span class="identifier">spatial_median</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Maximum number of iterations {max_iter} reached in "</span>
+                      <span class="string-literal">"spatial median for TheilSen regressor."</span>
+                      <span class="string-literal">""</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">n_iter</span><span class="punctuation">,</span> <span class="identifier">spatial_median</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_breakdown_point</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_subsamples</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Approximation of the breakdown point.
+
+    Parameters
+    ----------
+    n_samples : int
+        Number of samples.
+
+    n_subsamples : int
+        Number of subsamples to consider.
+
+    Returns
+    -------
+    breakdown_point : float
+        Approximation of breakdown point.
+    """</span>
+    <span class="keyword">return</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="float-literal">0.5</span> <span class="arithmetic-operator">**</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_subsamples</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_subsamples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span>
+                <span class="identifier">n_subsamples</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_samples</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_lstsq</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Least Squares Estimator for TheilSenRegressor class.
+
+    This function calculates the least squares method on a subset of rows of X
+    and y defined by the indices array. Optionally, an intercept column is
+    added if intercept is set to true.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Design matrix, where n_samples is the number of samples and
+        n_features is the number of features.
+
+    y : ndarray of shape (n_samples,)
+        Target vector, where n_samples is the number of samples.
+
+    indices : ndarray of shape (n_subpopulation, n_subsamples)
+        Indices of all subsamples with respect to the chosen subpopulation.
+
+    fit_intercept : bool
+        Fit intercept or not.
+
+    Returns
+    -------
+    weights : ndarray of shape (n_subpopulation, n_features + intercept)
+        Solution matrix of n_subpopulation solved least square problems.
+    """</span>
+    <span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">fit_intercept</span><span class="grouping">)</span>
+    <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">fit_intercept</span>
+    <span class="identifier">n_subsamples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">indices</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="identifier">weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">indices</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">X_subpopulation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_subsamples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="comment"># gelss need to pad y_subpopulation to be of the max dim of X_subpopulation</span>
+    <span class="identifier">y_subpopulation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">n_subsamples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">lstsq</span><span class="punctuation">,</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_lapack_funcs</span><span class="grouping">(</span><span class="grouping">(</span><span class="string-literal">'gelss'</span><span class="punctuation">,</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">X_subpopulation</span><span class="punctuation">,</span> <span class="identifier">y_subpopulation</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">for</span> <span class="identifier">index</span><span class="punctuation">,</span> <span class="identifier">subset</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">indices</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X_subpopulation</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">subset</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">y_subpopulation</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_subsamples</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span><span class="grouping">[</span><span class="identifier">subset</span><span class="grouping">]</span>
+        <span class="identifier">weights</span><span class="grouping">[</span><span class="identifier">index</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lstsq</span><span class="grouping">(</span><span class="identifier">X_subpopulation</span><span class="punctuation">,</span>
+                               <span class="identifier">y_subpopulation</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_features</span><span class="grouping">]</span>
+
+    <span class="keyword">return</span> <span class="identifier">weights</span>
+
+
+<span class="keyword">class</span> <span class="identifier">TheilSenRegressor</span><span class="grouping">(</span><span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">LinearModel</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Theil-Sen Estimator: robust multivariate regression model.
+
+    The algorithm calculates least square solutions on subsets with size
+    n_subsamples of the samples in X. Any value of n_subsamples between the
+    number of features and samples leads to an estimator with a compromise
+    between robustness and efficiency. Since the number of least square
+    solutions is "n_samples choose n_subsamples", it can be extremely large
+    and can therefore be limited with max_subpopulation. If this limit is
+    reached, the subsets are chosen randomly. In a final step, the spatial
+    median (or L1 median) is calculated of all least square solutions.
+
+    Read more in the :ref:`User Guide &lt;theil_sen_regression&gt;`.
+
+    Parameters
+    ----------
+    fit_intercept : bool, default=True
+        Whether to calculate the intercept for this model. If set
+        to false, no intercept will be used in calculations.
+
+    copy_X : bool, default=True
+        If True, X will be copied; else, it may be overwritten.
+
+    max_subpopulation : int, default=1e4
+        Instead of computing with a set of cardinality 'n choose k', where n is
+        the number of samples and k is the number of subsamples (at least
+        number of features), consider only a stochastic subpopulation of a
+        given maximal size if 'n choose k' is larger than max_subpopulation.
+        For other than small problem sizes this parameter will determine
+        memory usage and runtime if n_subsamples is not changed.
+
+    n_subsamples : int, default=None
+        Number of samples to calculate the parameters. This is at least the
+        number of features (plus 1 if fit_intercept=True) and the number of
+        samples as a maximum. A lower number leads to a higher breakdown
+        point and a low efficiency while a high number leads to a low
+        breakdown point and a high efficiency. If None, take the
+        minimum number of subsamples leading to maximal robustness.
+        If n_subsamples is set to n_samples, Theil-Sen is identical to least
+        squares.
+
+    max_iter : int, default=300
+        Maximum number of iterations for the calculation of spatial median.
+
+    tol : float, default=1.e-3
+        Tolerance when calculating spatial median.
+
+    random_state : int, RandomState instance or None, default=None
+        A random number generator instance to define the state of the random
+        permutations generator. Pass an int for reproducible output across
+        multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`
+
+    n_jobs : int, default=None
+        Number of CPUs to use during the cross validation.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    verbose : bool, default=False
+        Verbose mode when fitting the model.
+
+    Attributes
+    ----------
+    coef_ : ndarray of shape (n_features,)
+        Coefficients of the regression model (median of distribution).
+
+    intercept_ : float
+        Estimated intercept of regression model.
+
+    breakdown_ : float
+        Approximated breakdown point.
+
+    n_iter_ : int
+        Number of iterations needed for the spatial median.
+
+    n_subpopulation_ : int
+        Number of combinations taken into account from 'n choose k', where n is
+        the number of samples and k is the number of subsamples.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.linear_model import TheilSenRegressor
+    &gt;&gt;&gt; from sklearn.datasets import make_regression
+    &gt;&gt;&gt; X, y = make_regression(
+    ...     n_samples=200, n_features=2, noise=4.0, random_state=0)
+    &gt;&gt;&gt; reg = TheilSenRegressor(random_state=0).fit(X, y)
+    &gt;&gt;&gt; reg.score(X, y)
+    0.9884...
+    &gt;&gt;&gt; reg.predict(X[:1,])
+    array([-31.5871...])
+
+    References
+    ----------
+    - Theil-Sen Estimators in a Multiple Linear Regression Model, 2009
+      Xin Dang, Hanxiang Peng, Xueqin Wang and Heping Zhang
+      http://home.olemiss.edu/~xdang/papers/MTSE.pdf
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">copy_X</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">max_subpopulation</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e4</span><span class="punctuation">,</span> <span class="identifier">n_subsamples</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">300</span><span class="punctuation">,</span>
+                 <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="identifier">e</span><span class="arithmetic-operator">-</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_intercept</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy_X</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_subpopulation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">max_subpopulation</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_subsamples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_subsamples</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_subparams</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">n_subsamples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_subsamples</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+            <span class="identifier">n_dim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_dim</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_subsamples</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">n_subsamples</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid parameter since n_subsamples &gt; "</span>
+                                 <span class="string-literal">"n_samples ({0} &gt; {1})."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">n_subsamples</span><span class="punctuation">,</span>
+                                                                 <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">&gt;=</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">n_dim</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_subsamples</span><span class="punctuation">:</span>
+                    <span class="identifier">plus_1</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"+1" if self.fit_intercept else ""</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid parameter since n_features{0} "</span>
+                                     <span class="string-literal">"&gt; n_subsamples ({1} &gt; {2})."</span>
+                                     <span class="string-literal">""</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">plus_1</span><span class="punctuation">,</span> <span class="identifier">n_dim</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># if n_samples &lt; n_features</span>
+                <span class="keyword">if</span> <span class="identifier">n_subsamples</span> <span class="relational-operator">!=</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid parameter since n_subsamples != "</span>
+                                     <span class="string-literal">"n_samples ({0} != {1}) while n_samples "</span>
+                                     <span class="string-literal">"&lt; n_features."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">n_subsamples</span><span class="punctuation">,</span>
+                                                            <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_subsamples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_dim</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_subpopulation</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Subpopulation must be strictly positive "</span>
+                             <span class="string-literal">"({0} &lt;= 0)."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_subpopulation</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">all_combinations</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">rint</span><span class="grouping">(</span><span class="identifier">binom</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_subsamples</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">n_subpopulation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_subpopulation</span><span class="punctuation">,</span> <span class="identifier">all_combinations</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">n_subsamples</span><span class="punctuation">,</span> <span class="identifier">n_subpopulation</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit linear model.
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Training data.
+        y : ndarray of shape (n_samples,)
+            Target values.
+
+        Returns
+        -------
+        self : returns an instance of self.
+        """</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_subsamples</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_subpopulation_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_subparams</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span>
+                                                                    <span class="identifier">n_features</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">b</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">k</span><span class="invalid">d</span><span class="invalid">o</span><span class="invalid">w</span><span class="invalid">n</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_breakdown_point</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_subsamples</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Breakdown point: {0}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">b</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">k</span><span class="invalid">d</span><span class="invalid">o</span><span class="invalid">w</span><span class="invalid">n</span><span class="invalid">_</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Number of samples: {0}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">tol_outliers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">b</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">k</span><span class="invalid">d</span><span class="invalid">o</span><span class="invalid">w</span><span class="invalid">n</span><span class="invalid">_</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Tolerable outliers: {0}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">tol_outliers</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Number of subpopulations: {0}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_subpopulation_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Determine indices of subpopulation</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">rint</span><span class="grouping">(</span><span class="identifier">binom</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_subsamples</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_subpopulation</span><span class="punctuation">:</span>
+            <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">combinations</span><span class="grouping">(</span><span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">n_subsamples</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">choice</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">n_subsamples</span><span class="punctuation">,</span>
+                                           <span class="identifier">replace</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+                       <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_subpopulation_</span><span class="grouping">)</span><span class="grouping">]</span>
+
+        <span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">effective_n_jobs</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="identifier">index_list</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array_split</span><span class="grouping">(</span><span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="identifier">weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Parallel</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                           <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">)</span><span class="grouping">(</span>
+            <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">y</span><span class="invalid">e</span><span class="invalid">d</span><span class="grouping">(</span><span class="identifier">_lstsq</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">index_list</span><span class="grouping">[</span><span class="identifier">job</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">job</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">weights</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="identifier">weights</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span><span class="punctuation">,</span> <span class="identifier">coefs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_spatial_median</span><span class="grouping">(</span><span class="identifier">weights</span><span class="punctuation">,</span>
+                                              <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                                              <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coefs</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coefs</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coefs</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    </pre>
+  </body>
+</html>

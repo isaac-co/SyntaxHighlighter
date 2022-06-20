@@ -1,0 +1,465 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Kernel Principal Components Analysis."""</span>
+
+<span class="comment"># Author: Mathieu Blondel &lt;mathieu@mblondel.org&gt;</span>
+<span class="comment">#         Sylvain Marie &lt;sylvain.marie@schneider-electric.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">eigsh</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_arpack</span> <span class="keyword">import</span> <span class="identifier">_init_arpack_v0</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">svd_flip</span><span class="punctuation">,</span> <span class="identifier">_randomized_eigsh</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span><span class="punctuation">,</span> <span class="identifier">_check_psd_eigenvalues</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">deprecation</span> <span class="keyword">import</span> <span class="identifier">deprecated</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">NotFittedError</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">KernelCenterer</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">pairwise_kernels</span>
+
+
+<span class="keyword">class</span> <span class="identifier">KernelPCA</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Kernel Principal component analysis (KPCA).
+
+    Non-linear dimensionality reduction through the use of kernels (see
+    :ref:`metrics`).
+
+    It uses the `scipy.linalg.eigh` LAPACK implementation of the full SVD or
+    the `scipy.sparse.linalg.eigsh` ARPACK implementation of the truncated SVD,
+    depending on the shape of the input data and the number of components to
+    extract. It can also use a randomized truncated SVD by the method of
+    Halko et al. 2009, see `eigen_solver`.
+
+    Read more in the :ref:`User Guide &lt;kernel_PCA&gt;`.
+
+    Parameters
+    ----------
+    n_components : int, default=None
+        Number of components. If None, all non-zero components are kept.
+
+    kernel : {'linear', 'poly', \
+            'rbf', 'sigmoid', 'cosine', 'precomputed'}, default='linear'
+        Kernel used for PCA.
+
+    gamma : float, default=None
+        Kernel coefficient for rbf, poly and sigmoid kernels. Ignored by other
+        kernels. If ``gamma`` is ``None``, then it is set to ``1/n_features``.
+
+    degree : int, default=3
+        Degree for poly kernels. Ignored by other kernels.
+
+    coef0 : float, default=1
+        Independent term in poly and sigmoid kernels.
+        Ignored by other kernels.
+
+    kernel_params : dict, default=None
+        Parameters (keyword arguments) and
+        values for kernel passed as callable object.
+        Ignored by other kernels.
+
+    alpha : float, default=1.0
+        Hyperparameter of the ridge regression that learns the
+        inverse transform (when fit_inverse_transform=True).
+
+    fit_inverse_transform : bool, default=False
+        Learn the inverse transform for non-precomputed kernels.
+        (i.e. learn to find the pre-image of a point)
+
+    eigen_solver : {'auto', 'dense', 'arpack', 'randomized'}, \
+        default='auto'
+        Select eigensolver to use. If `n_components` is much
+        less than the number of training samples, randomized (or arpack to a
+        smaller extend) may be more efficient than the dense eigensolver.
+        Randomized SVD is performed according to the method of Halko et al.
+
+        auto :
+            the solver is selected by a default policy based on n_samples
+            (the number of training samples) and `n_components`:
+            if the number of components to extract is less than 10 (strict) and
+            the number of samples is more than 200 (strict), the 'arpack'
+            method is enabled. Otherwise the exact full eigenvalue
+            decomposition is computed and optionally truncated afterwards
+            ('dense' method).
+        dense :
+            run exact full eigenvalue decomposition calling the standard
+            LAPACK solver via `scipy.linalg.eigh`, and select the components
+            by postprocessing
+        arpack :
+            run SVD truncated to n_components calling ARPACK solver using
+            `scipy.sparse.linalg.eigsh`. It requires strictly
+            0 &lt; n_components &lt; n_samples
+        randomized :
+            run randomized SVD by the method of Halko et al. The current
+            implementation selects eigenvalues based on their module; therefore
+            using this method can lead to unexpected results if the kernel is
+            not positive semi-definite.
+
+        .. versionchanged:: 1.0
+           `'randomized'` was added.
+
+    tol : float, default=0
+        Convergence tolerance for arpack.
+        If 0, optimal value will be chosen by arpack.
+
+    max_iter : int, default=None
+        Maximum number of iterations for arpack.
+        If None, optimal value will be chosen by arpack.
+
+    iterated_power : int &gt;= 0, or 'auto', default='auto'
+        Number of iterations for the power method computed by
+        svd_solver == 'randomized'. When 'auto', it is set to 7 when
+        `n_components &lt; 0.1 * min(X.shape)`, other it is set to 4.
+
+        .. versionadded:: 1.0
+
+    remove_zero_eig : bool, default=False
+        If True, then all components with zero eigenvalues are removed, so
+        that the number of components in the output may be &lt; n_components
+        (and sometimes even zero due to numerical instability).
+        When n_components is None, this parameter is ignored and components
+        with zero eigenvalues are removed regardless.
+
+    random_state : int, RandomState instance or None, default=None
+        Used when ``eigen_solver`` == 'arpack' or 'randomized'. Pass an int
+        for reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+        .. versionadded:: 0.18
+
+    copy_X : bool, default=True
+        If True, input X is copied and stored by the model in the `X_fit_`
+        attribute. If no further changes will be done to X, setting
+        `copy_X=False` saves memory by storing a reference.
+
+        .. versionadded:: 0.18
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+        .. versionadded:: 0.18
+
+    Attributes
+    ----------
+    lambdas_ : ndarray of shape (n_components,)
+        Eigenvalues of the centered kernel matrix in decreasing order.
+        If `n_components` and `remove_zero_eig` are not set,
+        then all values are stored.
+
+    alphas_ : ndarray of shape (n_samples, n_components)
+        Eigenvectors of the centered kernel matrix. If `n_components` and
+        `remove_zero_eig` are not set, then all components are stored.
+
+    dual_coef_ : ndarray of shape (n_samples, n_features)
+        Inverse transform matrix. Only available when
+        ``fit_inverse_transform`` is True.
+
+    X_transformed_fit_ : ndarray of shape (n_samples, n_components)
+        Projection of the fitted data on the kernel principal components.
+        Only available when ``fit_inverse_transform`` is True.
+
+    X_fit_ : ndarray of shape (n_samples, n_features)
+        The data used to fit the model. If `copy_X=False`, then `X_fit_` is
+        a reference. This attribute is used for the calls to transform.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.datasets import load_digits
+    &gt;&gt;&gt; from sklearn.decomposition import KernelPCA
+    &gt;&gt;&gt; X, _ = load_digits(return_X_y=True)
+    &gt;&gt;&gt; transformer = KernelPCA(n_components=7, kernel='linear')
+    &gt;&gt;&gt; X_transformed = transformer.fit_transform(X)
+    &gt;&gt;&gt; X_transformed.shape
+    (1797, 7)
+
+    References
+    ----------
+    Kernel PCA was introduced in:
+        Bernhard Schoelkopf, Alexander J. Smola,
+        and Klaus-Robert Mueller. 1999. Kernel principal
+        component analysis. In Advances in kernel methods,
+        MIT Press, Cambridge, MA, USA 327-352.
+
+    For eigen_solver == 'arpack', refer to `scipy.sparse.linalg.eigsh`.
+
+    For eigen_solver == 'randomized', see:
+        Finding structure with randomness: Stochastic algorithms
+        for constructing approximate matrix decompositions Halko, et al., 2009
+        (arXiv:909)
+        A randomized algorithm for the decomposition of matrices
+        Per-Gunnar Martinsson, Vladimir Rokhlin and Mark Tygert
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="string-literal">"linear"</span><span class="punctuation">,</span>
+                 <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">degree</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">coef0</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">kernel_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="identifier">fit_inverse_transform</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">eigen_solver</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">iterated_power</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">remove_zero_eig</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">copy_X</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">fit_inverse_transform</span> <span class="logical-operator">and</span> <span class="identifier">kernel</span> <span class="relational-operator">==</span> <span class="string-literal">'precomputed'</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Cannot fit_inverse_transform with a precomputed kernel."</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_params</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gamma</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">degree</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_inverse_transform</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_inverse_transform</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eigen_solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigen_solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">iterated_power</span> <span class="arithmetic-assignment">=</span> <span class="identifier">iterated_power</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">remove_zero_eig</span> <span class="arithmetic-assignment">=</span> <span class="identifier">remove_zero_eig</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy_X</span>
+
+    <span class="comment"># TODO: Remove in 1.1</span>
+    <span class="comment"># mypy error: Decorated property not supported</span>
+    <span class="punctuation">@</span><span class="identifier">deprecated</span><span class="grouping">(</span><span class="string-literal">"Attribute _pairwise was deprecated in "</span>  <span class="comment"># type: ignore</span>
+                <span class="string-literal">"version 0.24 and will be removed in 1.1 (renaming of 0.26)."</span><span class="grouping">)</span>
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_pairwise</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">==</span> <span class="string-literal">"precomputed"</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">Y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_params</span> <span class="logical-operator">or</span> <span class="grouping">{</span><span class="grouping">}</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">"gamma"</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="punctuation">,</span>
+                      <span class="string-literal">"degree"</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span><span class="punctuation">,</span>
+                      <span class="string-literal">"coef0"</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span><span class="grouping">}</span>
+        <span class="keyword">return</span> <span class="identifier">pairwise_kernels</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">Y</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="punctuation">,</span>
+                                <span class="identifier">filter_params</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                                <span class="arithmetic-operator">**</span><span class="identifier">params</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">K</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Fit's using kernel K"""</span>
+        <span class="comment"># center kernel</span>
+        <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centerer</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">K</span><span class="grouping">)</span>
+
+        <span class="comment"># adjust n_components according to user inputs</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>  <span class="comment"># use all dimensions</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="identifier">f</span><span class="string-literal">"`n_components` should be &gt;= 1, got: {self.n_component}"</span>
+                <span class="grouping">)</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">)</span>
+
+        <span class="comment"># compute eigenvectors</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eigen_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="int-literal">200</span> <span class="logical-operator">and</span> <span class="identifier">n_components</span> <span class="relational-operator">&lt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+                <span class="identifier">eigen_solver</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'arpack'</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">eigen_solver</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'dense'</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">eigen_solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eigen_solver</span>
+
+        <span class="keyword">if</span> <span class="identifier">eigen_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'dense'</span><span class="punctuation">:</span>
+            <span class="comment"># Note: eigvals specifies the indices of smallest/largest to return</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">eigh</span><span class="grouping">(</span>
+                <span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">eigvals</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">eigen_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'arpack'</span><span class="punctuation">:</span>
+            <span class="identifier">v0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_init_arpack_v0</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigsh</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span>
+                                                <span class="identifier">which</span><span class="arithmetic-assignment">=</span><span class="string-literal">"LA"</span><span class="punctuation">,</span>
+                                                <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">,</span>
+                                                <span class="identifier">maxiter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                                                <span class="identifier">v0</span><span class="arithmetic-assignment">=</span><span class="identifier">v0</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">eigen_solver</span> <span class="relational-operator">==</span> <span class="string-literal">'randomized'</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_randomized_eigsh</span><span class="grouping">(</span>
+                <span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">iterated_power</span><span class="punctuation">,</span>
+                <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="punctuation">,</span> <span class="identifier">selection</span><span class="arithmetic-assignment">=</span><span class="string-literal">'module'</span>
+            <span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unsupported value for `eigen_solver`: %r"</span>
+                             <span class="arithmetic-operator">%</span> <span class="identifier">eigen_solver</span><span class="grouping">)</span>
+
+        <span class="comment"># make sure that the eigenvalues are ok and fix numerical issues</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_psd_eigenvalues</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">,</span>
+                                               <span class="identifier">enable_warnings</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="comment"># flip eigenvectors' sign to enforce deterministic output</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svd_flip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span><span class="punctuation">,</span>
+                                   <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+
+        <span class="comment"># sort eigenvectors in descending order</span>
+        <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">indices</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="grouping">]</span>
+
+        <span class="comment"># remove eigenvectors with a zero eigenvalue (null space) if required</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">remove_zero_eig</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="grouping">]</span>
+
+        <span class="comment"># Maintenance note on Eigenvectors normalization</span>
+        <span class="comment"># ----------------------------------------------</span>
+        <span class="comment"># there is a link between</span>
+        <span class="comment"># the eigenvectors of K=Phi(X)'Phi(X) and the ones of Phi(X)Phi(X)'</span>
+        <span class="comment"># if v is an eigenvector of K</span>
+        <span class="comment">#     then Phi(X)v  is an eigenvector of Phi(X)Phi(X)'</span>
+        <span class="comment"># if u is an eigenvector of Phi(X)Phi(X)'</span>
+        <span class="comment">#     then Phi(X)'u is an eigenvector of Phi(X)'Phi(X)</span>
+        <span class="comment">#</span>
+        <span class="comment"># At this stage our self.alphas_ (the v) have norm 1, we need to scale</span>
+        <span class="comment"># them so that eigenvectors in kernel feature space (the u) have norm=1</span>
+        <span class="comment"># instead</span>
+        <span class="comment">#</span>
+        <span class="comment"># We COULD scale them here:</span>
+        <span class="comment">#       self.alphas_ = self.alphas_ / np.sqrt(self.lambdas_)</span>
+        <span class="comment">#</span>
+        <span class="comment"># But choose to perform that LATER when needed, in `fit()` and in</span>
+        <span class="comment"># `transform()`.</span>
+
+        <span class="keyword">return</span> <span class="identifier">K</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit_inverse_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X_transformed</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">"tocsr"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span><span class="string-literal">"Inverse transform not implemented for "</span>
+                                      <span class="string-literal">"sparse matrices!"</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_transformed</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">X_transformed</span><span class="grouping">)</span>
+        <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dual_coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">solve</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">sym_pos</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">overwrite_a</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_transformed_fit_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_transformed</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model from data in X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centerer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">KernelCenterer</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_transform</span><span class="grouping">(</span><span class="identifier">K</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_inverse_transform</span><span class="punctuation">:</span>
+            <span class="comment"># no need to use the kernel to transform X, use shortcut expression</span>
+            <span class="identifier">X_transformed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_inverse_transform</span><span class="grouping">(</span><span class="identifier">X_transformed</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_fit_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">params</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model from data in X and transform X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">params</span><span class="grouping">)</span>
+
+        <span class="comment"># no need to use the kernel to transform X, use shortcut expression</span>
+        <span class="identifier">X_transformed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_inverse_transform</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit_inverse_transform</span><span class="grouping">(</span><span class="identifier">X_transformed</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">X_transformed</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Transform X.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="comment"># Compute centered gram matrix between X and training data X_fit_</span>
+        <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_centerer</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_fit_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># scale eigenvectors (properly account for null-space for dot product)</span>
+        <span class="identifier">non_zeros</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+        <span class="identifier">scaled_alphas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span><span class="grouping">)</span>
+        <span class="identifier">scaled_alphas</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">non_zeros</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alphas_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">non_zeros</span><span class="grouping">]</span>
+                                       <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">non_zeros</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Project with a scalar product between K and the scaled eigenvectors</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">scaled_alphas</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">inverse_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Transform X back to original space.
+
+        ``inverse_transform`` approximates the inverse transformation using
+        a learned pre-image. The pre-image is learned by kernel ridge
+        regression of the original data on their low-dimensional representation
+        vectors.
+
+        .. note:
+            :meth:`~sklearn.decomposition.fit` internally uses a centered
+            kernel. As the centered kernel no longer contains the information
+            of the mean of kernel features, such information is not taken into
+            account in reconstruction.
+
+        .. note::
+            When users want to compute inverse transformation for 'linear'
+            kernel, it is recommended that they use
+            :class:`~sklearn.decomposition.PCA` instead. Unlike
+            :class:`~sklearn.decomposition.PCA`,
+            :class:`~sklearn.decomposition.KernelPCA`'s ``inverse_transform``
+            does not reconstruct the mean of data when 'linear' kernel is used
+            due to the use of centered kernel.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_components)
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_features)
+
+        References
+        ----------
+        "Learning to Find Pre-Images", G BakIr et al, 2004.
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_inverse_transform</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">NotFittedError</span><span class="grouping">(</span><span class="string-literal">"The fit_inverse_transform parameter was not"</span>
+                                 <span class="string-literal">" set to True when instantiating and hence "</span>
+                                 <span class="string-literal">"the inverse transform is not available."</span><span class="grouping">)</span>
+
+        <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_transformed_fit_</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dual_coef_</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'preserves_dtype'</span><span class="punctuation">:</span> <span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float32</span><span class="grouping">]</span><span class="punctuation">,</span>
+                <span class="string-literal">'pairwise': self.kernel == 'precomputed'</span><span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

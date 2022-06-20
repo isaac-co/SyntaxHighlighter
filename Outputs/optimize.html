@@ -1,0 +1,267 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+Our own implementation of the Newton algorithm
+
+Unlike the scipy.optimize version, this version of the Newton conjugate
+gradient solver uses only one function call to retrieve the
+func value, the gradient value and a callable for the Hessian matvec
+product. If the function call is very expensive (e.g. for logistic
+regression with large design matrix), this approach gives very
+significant speedups.
+"""</span>
+<span class="comment"># This is a modified file from scipy.optimize</span>
+<span class="comment"># Original authors: Travis Oliphant, Eric Jones</span>
+<span class="comment"># Modifications by Gael Varoquaux, Mathieu Blondel and Tom Dupre la Tour</span>
+<span class="comment"># License: BSD</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">optimize</span><span class="punctuation">.</span><span class="identifier">linesearch</span> <span class="keyword">import</span> <span class="identifier">line_search_wolfe2</span><span class="punctuation">,</span> <span class="identifier">line_search_wolfe1</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_LineSearchError</span><span class="grouping">(</span><span class="identifier">RuntimeError</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">pass</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_line_search_wolfe12</span><span class="grouping">(</span><span class="identifier">f</span><span class="punctuation">,</span> <span class="identifier">fprime</span><span class="punctuation">,</span> <span class="identifier">xk</span><span class="punctuation">,</span> <span class="identifier">pk</span><span class="punctuation">,</span> <span class="identifier">gfk</span><span class="punctuation">,</span> <span class="identifier">old_fval</span><span class="punctuation">,</span> <span class="identifier">old_old_fval</span><span class="punctuation">,</span>
+                         <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Same as line_search_wolfe1, but fall back to line_search_wolfe2 if
+    suitable step length is not found, and raise an exception if a
+    suitable step length is not found.
+
+    Raises
+    ------
+    _LineSearchError
+        If no suitable step size is found.
+
+    """</span>
+    <span class="identifier">ret</span> <span class="arithmetic-assignment">=</span> <span class="identifier">line_search_wolfe1</span><span class="grouping">(</span><span class="identifier">f</span><span class="punctuation">,</span> <span class="identifier">fprime</span><span class="punctuation">,</span> <span class="identifier">xk</span><span class="punctuation">,</span> <span class="identifier">pk</span><span class="punctuation">,</span> <span class="identifier">gfk</span><span class="punctuation">,</span>
+                             <span class="identifier">old_fval</span><span class="punctuation">,</span> <span class="identifier">old_old_fval</span><span class="punctuation">,</span>
+                             <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">ret</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="comment"># line search failed: try different one.</span>
+        <span class="identifier">ret</span> <span class="arithmetic-assignment">=</span> <span class="identifier">line_search_wolfe2</span><span class="grouping">(</span><span class="identifier">f</span><span class="punctuation">,</span> <span class="identifier">fprime</span><span class="punctuation">,</span> <span class="identifier">xk</span><span class="punctuation">,</span> <span class="identifier">pk</span><span class="punctuation">,</span> <span class="identifier">gfk</span><span class="punctuation">,</span>
+                                 <span class="identifier">old_fval</span><span class="punctuation">,</span> <span class="identifier">old_old_fval</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">ret</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">_LineSearchError</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">ret</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_cg</span><span class="grouping">(</span><span class="identifier">fhess_p</span><span class="punctuation">,</span> <span class="identifier">fgrad</span><span class="punctuation">,</span> <span class="identifier">maxiter</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Solve iteratively the linear system 'fhess_p . xsupi = fgrad'
+    with a conjugate gradient descent.
+
+    Parameters
+    ----------
+    fhess_p : callable
+        Function that takes the gradient as a parameter and returns the
+        matrix product of the Hessian and gradient.
+
+    fgrad : ndarray of shape (n_features,) or (n_features + 1,)
+        Gradient vector.
+
+    maxiter : int
+        Number of CG iterations.
+
+    tol : float
+        Stopping criterion.
+
+    Returns
+    -------
+    xsupi : ndarray of shape (n_features,) or (n_features + 1,)
+        Estimated solution.
+    """</span>
+    <span class="identifier">xsupi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">fgrad</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">fgrad</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">ri</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fgrad</span>
+    <span class="identifier">psupi</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">ri</span>
+    <span class="identifier">i</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="identifier">dri0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">ri</span><span class="punctuation">,</span> <span class="identifier">ri</span><span class="grouping">)</span>
+
+    <span class="keyword">while</span> <span class="identifier">i</span> <span class="relational-operator">&lt;=</span> <span class="identifier">maxiter</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">ri</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="identifier">tol</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+
+        <span class="identifier">Ap</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fhess_p</span><span class="grouping">(</span><span class="identifier">psupi</span><span class="grouping">)</span>
+        <span class="comment"># check curvature</span>
+        <span class="identifier">curv</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">psupi</span><span class="punctuation">,</span> <span class="identifier">Ap</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="int-literal">0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">curv</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">3</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+        <span class="keyword">elif</span> <span class="identifier">curv</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">i</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="comment"># fall back to steepest descent direction</span>
+                <span class="identifier">xsupi</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">dri0</span> <span class="arithmetic-operator">/</span> <span class="identifier">curv</span> <span class="arithmetic-operator">*</span> <span class="identifier">psupi</span>
+                <span class="keyword">break</span>
+        <span class="identifier">alphai</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dri0</span> <span class="arithmetic-operator">/</span> <span class="identifier">curv</span>
+        <span class="identifier">xsupi</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">alphai</span> <span class="arithmetic-operator">*</span> <span class="identifier">psupi</span>
+        <span class="identifier">ri</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ri</span> <span class="arithmetic-operator">+</span> <span class="identifier">alphai</span> <span class="arithmetic-operator">*</span> <span class="identifier">Ap</span>
+        <span class="identifier">dri1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">ri</span><span class="punctuation">,</span> <span class="identifier">ri</span><span class="grouping">)</span>
+        <span class="identifier">betai</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dri1</span> <span class="arithmetic-operator">/</span> <span class="identifier">dri0</span>
+        <span class="identifier">psupi</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">ri</span> <span class="arithmetic-operator">+</span> <span class="identifier">betai</span> <span class="arithmetic-operator">*</span> <span class="identifier">psupi</span>
+        <span class="identifier">i</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="identifier">dri0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dri1</span>          <span class="comment"># update np.dot(ri,ri) for next time.</span>
+
+    <span class="keyword">return</span> <span class="identifier">xsupi</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_newton_cg</span><span class="grouping">(</span><span class="identifier">grad_hess</span><span class="punctuation">,</span> <span class="identifier">func</span><span class="punctuation">,</span> <span class="identifier">grad</span><span class="punctuation">,</span> <span class="identifier">x0</span><span class="punctuation">,</span> <span class="identifier">args</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-4</span><span class="punctuation">,</span>
+               <span class="identifier">maxiter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">maxinner</span><span class="arithmetic-assignment">=</span><span class="int-literal">200</span><span class="punctuation">,</span> <span class="identifier">line_search</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">warn</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Minimization of scalar function of one or more variables using the
+    Newton-CG algorithm.
+
+    Parameters
+    ----------
+    grad_hess : callable
+        Should return the gradient and a callable returning the matvec product
+        of the Hessian.
+
+    func : callable
+        Should return the value of the function.
+
+    grad : callable
+        Should return the function value and the gradient. This is used
+        by the linesearch functions.
+
+    x0 : array of float
+        Initial guess.
+
+    args : tuple, default=()
+        Arguments passed to func_grad_hess, func and grad.
+
+    tol : float, default=1e-4
+        Stopping criterion. The iteration will stop when
+        ``max{|g_i | i = 1, ..., n} &lt;= tol``
+        where ``g_i`` is the i-th component of the gradient.
+
+    maxiter : int, default=100
+        Number of Newton iterations.
+
+    maxinner : int, default=200
+        Number of CG iterations.
+
+    line_search : bool, default=True
+        Whether to use a line search or not.
+
+    warn : bool, default=True
+        Whether to warn when didn't converge.
+
+    Returns
+    -------
+    xk : ndarray of float
+        Estimated minimum.
+    """</span>
+    <span class="identifier">x0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">x0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">xk</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x0</span>
+    <span class="identifier">k</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="keyword">if</span> <span class="identifier">line_search</span><span class="punctuation">:</span>
+        <span class="identifier">old_fval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">func</span><span class="grouping">(</span><span class="identifier">x0</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="grouping">)</span>
+        <span class="identifier">old_old_fval</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="comment"># Outer loop: our Newton iteration</span>
+    <span class="keyword">while</span> <span class="identifier">k</span> <span class="relational-operator">&lt;</span> <span class="identifier">maxiter</span><span class="punctuation">:</span>
+        <span class="comment"># Compute a search direction pk by applying the CG method to</span>
+        <span class="comment">#  del2 f(xk) p = - fgrad f(xk) starting from 0.</span>
+        <span class="identifier">fgrad</span><span class="punctuation">,</span> <span class="identifier">fhess_p</span> <span class="arithmetic-assignment">=</span> <span class="identifier">grad_hess</span><span class="grouping">(</span><span class="identifier">xk</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="grouping">)</span>
+
+        <span class="identifier">absgrad</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">fgrad</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">absgrad</span><span class="grouping">)</span> <span class="relational-operator">&lt;=</span> <span class="identifier">tol</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+
+        <span class="identifier">maggrad</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">absgrad</span><span class="grouping">)</span>
+        <span class="identifier">eta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="grouping">[</span><span class="float-literal">0.5</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">maggrad</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">termcond</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eta</span> <span class="arithmetic-operator">*</span> <span class="identifier">maggrad</span>
+
+        <span class="comment"># Inner loop: solve the Newton update by conjugate gradient, to</span>
+        <span class="comment"># avoid inverting the Hessian</span>
+        <span class="identifier">xsupi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_cg</span><span class="grouping">(</span><span class="identifier">fhess_p</span><span class="punctuation">,</span> <span class="identifier">fgrad</span><span class="punctuation">,</span> <span class="identifier">maxiter</span><span class="arithmetic-assignment">=</span><span class="identifier">maxinner</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">termcond</span><span class="grouping">)</span>
+
+        <span class="identifier">alphak</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">1.0</span>
+
+        <span class="keyword">if</span> <span class="identifier">line_search</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">alphak</span><span class="punctuation">,</span> <span class="identifier">fc</span><span class="punctuation">,</span> <span class="identifier">gc</span><span class="punctuation">,</span> <span class="identifier">old_fval</span><span class="punctuation">,</span> <span class="identifier">old_old_fval</span><span class="punctuation">,</span> <span class="identifier">gfkp1</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                    <span class="identifier">_line_search_wolfe12</span><span class="grouping">(</span><span class="identifier">func</span><span class="punctuation">,</span> <span class="identifier">grad</span><span class="punctuation">,</span> <span class="identifier">xk</span><span class="punctuation">,</span> <span class="identifier">xsupi</span><span class="punctuation">,</span> <span class="identifier">fgrad</span><span class="punctuation">,</span>
+                                         <span class="identifier">old_fval</span><span class="punctuation">,</span> <span class="identifier">old_old_fval</span><span class="punctuation">,</span> <span class="identifier">args</span><span class="arithmetic-assignment">=</span><span class="identifier">args</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="identifier">_LineSearchError</span><span class="punctuation">:</span>
+                <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'Line Search failed'</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+
+        <span class="identifier">xk</span> <span class="arithmetic-assignment">=</span> <span class="identifier">xk</span> <span class="arithmetic-operator">+</span> <span class="identifier">alphak</span> <span class="arithmetic-operator">*</span> <span class="identifier">xsupi</span>        <span class="comment"># upcast if necessary</span>
+        <span class="identifier">k</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+    <span class="keyword">if</span> <span class="identifier">warn</span> <span class="logical-operator">and</span> <span class="identifier">k</span> <span class="relational-operator">&gt;=</span> <span class="identifier">maxiter</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"newton-cg failed to converge. Increase the "</span>
+                      <span class="string-literal">"number of iterations."</span><span class="punctuation">,</span> <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">xk</span><span class="punctuation">,</span> <span class="identifier">k</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_check_optimize_result</span><span class="grouping">(</span><span class="identifier">solver</span><span class="punctuation">,</span> <span class="identifier">result</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                           <span class="identifier">extra_warning_msg</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Check the OptimizeResult for successful convergence
+
+    Parameters
+    ----------
+    solver : str
+       Solver name. Currently only `lbfgs` is supported.
+
+    result : OptimizeResult
+       Result of the scipy.optimize.minimize function.
+
+    max_iter : int, default=None
+       Expected maximum number of iterations.
+
+    extra_warning_msg : str, default=None
+        Extra warning message.
+
+    Returns
+    -------
+    n_iter : int
+       Number of iterations.
+    """</span>
+    <span class="comment"># handle both scipy and scikit-learn solver names</span>
+    <span class="keyword">if</span> <span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">"lbfgs"</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">status</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="comment"># The message is already decoded in scipy&gt;=1.6.0</span>
+                <span class="identifier">result_message</span> <span class="arithmetic-assignment">=</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">message</span><span class="punctuation">.</span><span class="identifier">decode</span><span class="grouping">(</span><span class="string-literal">"latin1"</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="identifier">AttributeError</span><span class="punctuation">:</span>
+                <span class="identifier">result_message</span> <span class="arithmetic-assignment">=</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">message</span>
+            <span class="identifier">warning_msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+                <span class="string-literal">"{} failed to converge (status={}):\n{}.\n\n"</span>
+                <span class="string-literal">"Increase the number of iterations (max_iter) "</span>
+                <span class="string-literal">"or scale the data as shown in:\n"</span>
+                <span class="string-literal">"    https://scikit-learn.org/stable/modules/"</span>
+                <span class="string-literal">"preprocessing.html"</span>
+            <span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">solver</span><span class="punctuation">,</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">status</span><span class="punctuation">,</span> <span class="identifier">result_message</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">extra_warning_msg</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">warning_msg</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"\n"</span> <span class="arithmetic-operator">+</span> <span class="identifier">extra_warning_msg</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="identifier">warning_msg</span><span class="punctuation">,</span> <span class="identifier">ConvergenceWarning</span><span class="punctuation">,</span> <span class="identifier">stacklevel</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">max_iter</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="comment"># In scipy &lt;= 1.0.0, nit may exceed maxiter for lbfgs.</span>
+            <span class="comment"># See https://github.com/scipy/scipy/issues/7854</span>
+            <span class="identifier">n_iter_i</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">nit</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_iter_i</span> <span class="arithmetic-assignment">=</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">nit</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span>
+
+    <span class="keyword">return</span> <span class="identifier">n_iter_i</span>
+
+    </pre>
+  </body>
+</html>

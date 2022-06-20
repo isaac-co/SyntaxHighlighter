@@ -1,0 +1,290 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: David Dale &lt;dale.david@mail.ru&gt;</span>
+<span class="comment">#          Christian Lorentzen &lt;lorentzen.ch@gmail.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">optimize</span> <span class="keyword">import</span> <span class="identifier">linprog</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">LinearModel</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">_check_sample_weight</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="identifier">sp_version</span><span class="punctuation">,</span> <span class="identifier">parse_version</span>
+
+
+<span class="keyword">class</span> <span class="identifier">QuantileRegressor</span><span class="grouping">(</span><span class="identifier">LinearModel</span><span class="punctuation">,</span> <span class="identifier">RegressorMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Linear regression model that predicts conditional quantiles.
+
+    The linear :class:`QuantileRegressor` optimizes the pinball loss for a
+    desired `quantile` and is robust to outliers.
+
+    This model uses an L1 regularization like
+    :class:`~sklearn.linear_model.Lasso`.
+
+    Read more in the :ref:`User Guide &lt;quantile_regression&gt;`.
+
+    .. versionadded:: 1.0
+
+    Parameters
+    ----------
+    quantile : float, default=0.5
+        The quantile that the model tries to predict. It must be strictly
+        between 0 and 1. If 0.5 (default), the model predicts the 50%
+        quantile, i.e. the median.
+
+    alpha : float, default=1.0
+        Regularization constant that multiplies the L1 penalty term.
+
+    fit_intercept : bool, default=True
+        Whether or not to fit the intercept.
+
+    solver : {'highs-ds', 'highs-ipm', 'highs', 'interior-point', \
+            'revised simplex'}, default='interior-point'
+        Method used by :func:`scipy.optimize.linprog` to solve the linear
+        programming formulation. Note that the highs methods are recommended
+        for usage with `scipy&gt;=1.6.0` because they are the fastest ones.
+
+    solver_options : dict, default=None
+        Additional parameters passed to :func:`scipy.optimize.linprog` as
+        options. If `None` and if `solver='interior-point'`, then
+        `{"lstsq": True}` is passed to :func:`scipy.optimize.linprog` for the
+        sake of stability.
+
+    Attributes
+    ----------
+    coef_ : array of shape (n_features,)
+        Estimated coefficients for the features.
+
+    intercept_ : float
+        The intercept of the model, aka bias term.
+
+    n_iter_ : int
+        The actual number of iterations performed by the solver.
+
+    See Also
+    --------
+    Lasso : The Lasso is a linear model that estimates sparse coefficients
+        with l1 regularization.
+    HuberRegressor : Linear regression model that is robust to outliers.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.linear_model import QuantileRegressor
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; n_samples, n_features = 10, 2
+    &gt;&gt;&gt; rng = np.random.RandomState(0)
+    &gt;&gt;&gt; y = rng.randn(n_samples)
+    &gt;&gt;&gt; X = rng.randn(n_samples, n_features)
+    &gt;&gt;&gt; reg = QuantileRegressor(quantile=0.8).fit(X, y)
+    &gt;&gt;&gt; np.mean(y &lt;= reg.predict(X))
+    0.8
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span>
+        <span class="identifier">self</span><span class="punctuation">,</span>
+        <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+        <span class="identifier">quantile</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="punctuation">,</span>
+        <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="punctuation">,</span>
+        <span class="identifier">fit_intercept</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+        <span class="identifier">solver</span><span class="arithmetic-assignment">=</span><span class="string-literal">"interior-point"</span><span class="punctuation">,</span>
+        <span class="identifier">solver_options</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+    <span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">quantile</span> <span class="arithmetic-assignment">=</span> <span class="identifier">quantile</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fit_intercept</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver_options</span> <span class="arithmetic-assignment">=</span> <span class="identifier">solver_options</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model according to the given training data.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : array-like of shape (n_samples,)
+            Target values.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        self : object
+            Returns self.
+        """</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">multi_output</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span>
+        <span class="grouping">)</span>
+        <span class="identifier">sample_weight</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_sample_weight</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">n_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+            <span class="identifier">n_params</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+            <span class="comment"># Note that centering y and X with _preprocess_data does not work</span>
+            <span class="comment"># for quantile regression.</span>
+
+        <span class="comment"># The objective is defined as 1/n * sum(pinball loss) + alpha * L1.</span>
+        <span class="comment"># So we rescale the penalty term, which is equivalent.</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="relational-operator">&gt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">sample_weight</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Penalty alpha must be a non-negative number, "</span>
+                <span class="identifier">f</span><span class="string-literal">"got {self.alpha}"</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">quantile</span> <span class="relational-operator">&gt;=</span> <span class="float-literal">1.0</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">quantile</span> <span class="relational-operator">&lt;=</span> <span class="float-literal">0.0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Quantile should be strictly between 0.0 and 1.0, got "</span>
+                <span class="identifier">f</span><span class="string-literal">"{self.quantile}"</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">,</span> <span class="identifier">bool</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"The argument fit_intercept must be bool, "</span>
+                <span class="identifier">f</span><span class="string-literal">"got {self.fit_intercept}"</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span>
+            <span class="string-literal">"highs-ds"</span><span class="punctuation">,</span>
+            <span class="string-literal">"highs-ipm"</span><span class="punctuation">,</span>
+            <span class="string-literal">"highs"</span><span class="punctuation">,</span>
+            <span class="string-literal">"interior-point"</span><span class="punctuation">,</span>
+            <span class="string-literal">"revised simplex"</span><span class="punctuation">,</span>
+        <span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Invalid value for argument solver, got {self.solver}"</span>
+            <span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">"revised simplex"</span> <span class="logical-operator">and</span> <span class="identifier">sp_version</span> <span class="relational-operator">&lt;</span> <span class="identifier">parse_version</span><span class="grouping">(</span>
+            <span class="string-literal">"1.3.0"</span>
+        <span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Solver 'revised simplex' is only available "</span>
+                <span class="identifier">f</span><span class="string-literal">"with scipy&gt;=1.3.0, got {sp_version}"</span>
+            <span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">in</span> <span class="grouping">(</span>
+            <span class="string-literal">"highs-ds"</span><span class="punctuation">,</span>
+            <span class="string-literal">"highs-ipm"</span><span class="punctuation">,</span>
+            <span class="string-literal">"highs"</span><span class="punctuation">,</span>
+        <span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">sp_version</span> <span class="relational-operator">&lt;</span> <span class="identifier">parse_version</span><span class="grouping">(</span><span class="string-literal">"1.6.0"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Solver {self.solver} is only available "</span>
+                <span class="identifier">f</span><span class="string-literal">"with scipy&gt;=1.6.0, got {sp_version}"</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver_options</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver_options</span><span class="punctuation">,</span> <span class="identifier">dict</span>
+        <span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Invalid value for argument solver_options, "</span>
+                <span class="identifier">f</span><span class="string-literal">"must be None or a dictionary, got "</span>
+                <span class="identifier">f</span><span class="string-literal">"{self.solver_options}"</span>
+            <span class="grouping">)</span>
+
+        <span class="comment"># make default solver more stable</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver_options</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span> <span class="relational-operator">==</span> <span class="string-literal">"interior-point"</span><span class="punctuation">:</span>
+            <span class="identifier">solver_options</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">"lstsq"</span><span class="punctuation">:</span> <span class="bool-literal">True</span><span class="grouping">}</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">solver_options</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver_options</span>
+
+        <span class="comment"># Use linear programming formulation of quantile regression</span>
+        <span class="comment">#     min_x c x</span>
+        <span class="comment">#           A_eq x = b_eq</span>
+        <span class="comment">#                0 &lt;= x</span>
+        <span class="comment"># x = (s0, s, t0, t, u, v) = slack variables</span>
+        <span class="comment"># intercept = s0 + t0</span>
+        <span class="comment"># coef = s + t</span>
+        <span class="comment"># c = (alpha * 1_p, alpha * 1_p, quantile * 1_n, (1-quantile) * 1_n)</span>
+        <span class="comment"># residual = y - X@coef - intercept = u - v</span>
+        <span class="comment"># A_eq = (1_n, X, -1_n, -X, diag(1_n), -diag(1_n))</span>
+        <span class="comment"># b_eq = y</span>
+        <span class="comment"># p = n_features + fit_intercept</span>
+        <span class="comment"># n = n_samples</span>
+        <span class="comment"># 1_n = vector of length n with entries equal one</span>
+        <span class="comment"># see https://stats.stackexchange.com/questions/384909/</span>
+        <span class="comment">#</span>
+        <span class="comment"># Filtering out zero samples weights from the beginning makes life</span>
+        <span class="comment"># easier for the linprog solver.</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sample_weight</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span>
+        <span class="identifier">n_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span><span class="grouping">)</span>  <span class="comment"># use n_mask instead of n_samples</span>
+        <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span>
+            <span class="grouping">[</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">full</span><span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_params</span><span class="punctuation">,</span> <span class="identifier">fill_value</span><span class="arithmetic-assignment">=</span><span class="identifier">alpha</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">quantile</span><span class="punctuation">,</span>
+                <span class="identifier">sample_weight</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">quantile</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="grouping">]</span>
+        <span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+            <span class="comment"># do not penalize the intercept</span>
+            <span class="identifier">c</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+            <span class="identifier">c</span><span class="grouping">[</span><span class="identifier">n_params</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+            <span class="identifier">A_eq</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span>
+                <span class="grouping">[</span>
+                    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_mask</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                    <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_mask</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                    <span class="arithmetic-operator">-</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">n_mask</span><span class="grouping">)</span><span class="punctuation">,</span>
+                    <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">n_mask</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="grouping">]</span><span class="punctuation">,</span>
+                <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+            <span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">A_eq</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span>
+                <span class="grouping">[</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">n_mask</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">n_mask</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span>
+            <span class="grouping">)</span>
+
+        <span class="identifier">b_eq</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+
+        <span class="identifier">result</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linprog</span><span class="grouping">(</span>
+            <span class="identifier">c</span><span class="arithmetic-assignment">=</span><span class="identifier">c</span><span class="punctuation">,</span>
+            <span class="identifier">A_eq</span><span class="arithmetic-assignment">=</span><span class="identifier">A_eq</span><span class="punctuation">,</span>
+            <span class="identifier">b_eq</span><span class="arithmetic-assignment">=</span><span class="identifier">b_eq</span><span class="punctuation">,</span>
+            <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">solver</span><span class="punctuation">,</span>
+            <span class="identifier">options</span><span class="arithmetic-assignment">=</span><span class="identifier">solver_options</span><span class="punctuation">,</span>
+        <span class="grouping">)</span>
+        <span class="identifier">solution</span> <span class="arithmetic-assignment">=</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">x</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">success</span><span class="punctuation">:</span>
+            <span class="identifier">failure</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span>
+                <span class="int-literal">1</span><span class="punctuation">:</span> <span class="string-literal">"Iteration limit reached."</span><span class="punctuation">,</span>
+                <span class="int-literal">2</span><span class="punctuation">:</span> <span class="string-literal">"Problem appears to be infeasible."</span><span class="punctuation">,</span>
+                <span class="int-literal">3</span><span class="punctuation">:</span> <span class="string-literal">"Problem appears to be unbounded."</span><span class="punctuation">,</span>
+                <span class="int-literal">4</span><span class="punctuation">:</span> <span class="string-literal">"Numerical difficulties encountered."</span><span class="punctuation">,</span>
+            <span class="grouping">}</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"Linear programming for QuantileRegressor did not succeed.\n"</span>
+                <span class="identifier">f</span><span class="string-literal">"Status is {result.status}: "</span>
+                <span class="arithmetic-operator">+</span> <span class="identifier">failure</span><span class="punctuation">.</span><span class="identifier">setdefault</span><span class="grouping">(</span><span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">status</span><span class="punctuation">,</span> <span class="string-literal">"unknown reason") + "\n"</span>
+                <span class="arithmetic-operator">+</span> <span class="string-literal">"Result message of linprog:\n"</span> <span class="arithmetic-operator">+</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">message</span><span class="punctuation">,</span>
+                <span class="identifier">ConvergenceWarning</span>
+            <span class="grouping">)</span>
+
+        <span class="comment"># positive slack - negative slack</span>
+        <span class="comment"># solution is an array with (params_pos, params_neg, u, v)</span>
+        <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">solution</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_params</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">solution</span><span class="grouping">[</span><span class="identifier">n_params</span><span class="punctuation">:</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_params</span><span class="grouping">]</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">result</span><span class="punctuation">.</span><span class="identifier">nit</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit_intercept</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">params</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">params</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">params</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">intercept_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    </pre>
+  </body>
+</html>

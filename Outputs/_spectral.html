@@ -1,0 +1,605 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># -*- coding: utf-8 -*-</span>
+<span class="comment">"""Algorithms for spectral clustering"""</span>
+
+<span class="comment"># Author: Gael Varoquaux gael.varoquaux@normalesup.org</span>
+<span class="comment">#         Brian Cheung</span>
+<span class="comment">#         Wei LI &lt;kuantkid@gmail.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">ClusterMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">deprecation</span> <span class="keyword">import</span> <span class="identifier">deprecated</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">pairwise_kernels</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span> <span class="keyword">import</span> <span class="identifier">kneighbors_graph</span><span class="punctuation">,</span> <span class="identifier">NearestNeighbors</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">manifold</span> <span class="keyword">import</span> <span class="identifier">spectral_embedding</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_kmeans</span> <span class="keyword">import</span> <span class="identifier">k_means</span>
+
+
+<span class="keyword">def</span> <span class="identifier">discretize</span><span class="grouping">(</span><span class="identifier">vectors</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">max_svd_restarts</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span> <span class="identifier">n_iter_max</span><span class="arithmetic-assignment">=</span><span class="int-literal">20</span><span class="punctuation">,</span>
+               <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Search for a partition matrix (clustering) which is closest to the
+    eigenvector embedding.
+
+    Parameters
+    ----------
+    vectors : array-like of shape (n_samples, n_clusters)
+        The embedding space of the samples.
+
+    copy : bool, default=True
+        Whether to copy vectors, or perform in-place normalization.
+
+    max_svd_restarts : int, default=30
+        Maximum number of attempts to restart SVD if convergence fails
+
+    n_iter_max : int, default=30
+        Maximum number of iterations to attempt in rotation and partition
+        matrix search if machine precision convergence is not reached
+
+    random_state : int, RandomState instance, default=None
+        Determines random number generation for rotation matrix initialization.
+        Use an int to make the randomness deterministic.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Returns
+    -------
+    labels : array of integers, shape: n_samples
+        The labels of the clusters.
+
+    References
+    ----------
+
+    - Multiclass spectral clustering, 2003
+      Stella X. Yu, Jianbo Shi
+      https://www1.icsi.berkeley.edu/~stellayu/publication/doc/2003kwayICCV.pdf
+
+    Notes
+    -----
+
+    The eigenvector embedding is used to iteratively search for the
+    closest discrete partition.  First, the eigenvector embedding is
+    normalized to the space of partition matrices. An optimal discrete
+    partition matrix closest to this normalized embedding multiplied by
+    an initial rotation is calculated.  Fixing this discrete partition
+    matrix, an optimal rotation matrix is calculated.  These two
+    calculations are performed until convergence.  The discrete partition
+    matrix is returned as the clustering solution.  Used in spectral
+    clustering, this method tends to be faster and more robust to random
+    initialization than k-means.
+
+    """</span>
+
+    <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">import</span> <span class="identifier">csc_matrix</span>
+    <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">LinAlgError</span>
+
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="identifier">vectors</span> <span class="arithmetic-assignment">=</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">l</span><span class="invalid">o</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">vectors</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">copy</span><span class="grouping">)</span>
+
+    <span class="identifier">eps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">float</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectors</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="comment"># Normalize the eigenvectors to an equal length of a vector of ones.</span>
+    <span class="comment"># Reorient the eigenvectors to point in the negative direction with respect</span>
+    <span class="comment"># to the first element.  This may have to do with constraining the</span>
+    <span class="comment"># eigenvectors to lie in a specific quadrant to make the discretization</span>
+    <span class="comment"># search easier.</span>
+    <span class="identifier">norm_ones</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">vectors</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">vectors</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">vectors</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">vectors</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span> <span class="invalid">\</span>
+            <span class="arithmetic-operator">*</span> <span class="identifier">norm_ones</span>
+        <span class="keyword">if</span> <span class="identifier">vectors</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">vectors</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span> <span class="arithmetic-operator">*</span> <span class="identifier">vectors</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sign</span><span class="grouping">(</span><span class="identifier">vectors</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="comment"># Normalize the rows of the eigenvectors.  Samples should lie on the unit</span>
+    <span class="comment"># hypersphere centered at the origin.  This transforms the samples in the</span>
+    <span class="comment"># embedding space to the space of partition matrices.</span>
+    <span class="identifier">vectors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectors</span> <span class="arithmetic-operator">/</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">vectors</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+
+    <span class="identifier">svd_restarts</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+    <span class="identifier">has_converged</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+
+    <span class="comment"># If there is an exception we try to randomize and rerun SVD again</span>
+    <span class="comment"># do this max_svd_restarts times.</span>
+    <span class="keyword">while</span> <span class="grouping">(</span><span class="identifier">svd_restarts</span> <span class="relational-operator">&lt;</span> <span class="identifier">max_svd_restarts</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">has_converged</span><span class="punctuation">:</span>
+
+        <span class="comment"># Initialize first column of rotation matrix with a row of the</span>
+        <span class="comment"># eigenvectors</span>
+        <span class="identifier">rotation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">rotation</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectors</span><span class="grouping">[</span><span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">randint</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+        <span class="comment"># To initialize the rest of the rotation matrix, find the rows</span>
+        <span class="comment"># of the eigenvectors that are as orthogonal to each other as</span>
+        <span class="comment"># possible</span>
+        <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># Accumulate c to ensure row is as orthogonal as possible to</span>
+            <span class="comment"># previous picks as well as current one</span>
+            <span class="identifier">c</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">vectors</span><span class="punctuation">,</span> <span class="identifier">rotation</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">j</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">rotation</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectors</span><span class="grouping">[</span><span class="identifier">c</span><span class="punctuation">.</span><span class="identifier">argmin</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+        <span class="identifier">last_objective_value</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+        <span class="identifier">n_iter</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+        <span class="keyword">while</span> <span class="logical-operator">not</span> <span class="identifier">has_converged</span><span class="punctuation">:</span>
+            <span class="identifier">n_iter</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+            <span class="identifier">t_discrete</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">vectors</span><span class="punctuation">,</span> <span class="identifier">rotation</span><span class="grouping">)</span>
+
+            <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">t_discrete</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">vectors_discrete</span> <span class="arithmetic-assignment">=</span> <span class="identifier">csc_matrix</span><span class="grouping">(</span>
+                <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">t_svd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vectors_discrete</span><span class="punctuation">.</span><span class="identifier">T</span> <span class="arithmetic-operator">*</span> <span class="identifier">vectors</span>
+
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">U</span><span class="punctuation">,</span> <span class="identifier">S</span><span class="punctuation">,</span> <span class="identifier">Vh</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">t_svd</span><span class="grouping">)</span>
+                <span class="identifier">svd_restarts</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+            <span class="keyword">except</span> <span class="identifier">LinAlgError</span><span class="punctuation">:</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"SVD did not converge, randomizing and trying again"</span><span class="grouping">)</span>
+                <span class="keyword">break</span>
+
+            <span class="identifier">ncut_value</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">2.0</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">S</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">ncut_value</span> <span class="arithmetic-operator">-</span> <span class="identifier">last_objective_value</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">eps</span><span class="grouping">)</span> <span class="logical-operator">or</span>
+                    <span class="grouping">(</span><span class="identifier">n_iter</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_iter_max</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">has_converged</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="comment"># otherwise calculate rotation and continue</span>
+                <span class="identifier">last_objective_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ncut_value</span>
+                <span class="identifier">rotation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">Vh</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">U</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">has_converged</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">LinAlgError</span><span class="grouping">(</span><span class="string-literal">'SVD did not converge'</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">labels</span>
+
+
+<span class="keyword">def</span> <span class="identifier">spectral_clustering</span><span class="grouping">(</span><span class="identifier">affinity</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="int-literal">8</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                        <span class="identifier">eigen_solver</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span>
+                        <span class="identifier">eigen_tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.0</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="string-literal">'kmeans'</span><span class="punctuation">,</span>
+                        <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Apply clustering to a projection of the normalized Laplacian.
+
+    In practice Spectral Clustering is very useful when the structure of
+    the individual clusters is highly non-convex or more generally when
+    a measure of the center and spread of the cluster is not a suitable
+    description of the complete cluster. For instance, when clusters are
+    nested circles on the 2D plane.
+
+    If affinity is the adjacency matrix of a graph, this method can be
+    used to find normalized graph cuts.
+
+    Read more in the :ref:`User Guide &lt;spectral_clustering&gt;`.
+
+    Parameters
+    ----------
+    affinity : {array-like, sparse matrix} of shape (n_samples, n_samples)
+        The affinity matrix describing the relationship of the samples to
+        embed. **Must be symmetric**.
+
+        Possible examples:
+          - adjacency matrix of a graph,
+          - heat kernel of the pairwise distance matrix of the samples,
+          - symmetric k-nearest neighbours connectivity matrix of the samples.
+
+    n_clusters : int, default=None
+        Number of clusters to extract.
+
+    n_components : int, default=n_clusters
+        Number of eigenvectors to use for the spectral embedding
+
+    eigen_solver : {None, 'arpack', 'lobpcg', or 'amg'}
+        The eigenvalue decomposition strategy to use. AMG requires pyamg
+        to be installed. It can be faster on very large, sparse problems,
+        but may also lead to instabilities. If None, then ``'arpack'`` is
+        used.
+
+    random_state : int, RandomState instance, default=None
+        A pseudo random number generator used for the initialization
+        of the lobpcg eigenvectors decomposition when `eigen_solver ==
+        'amg'`, and for the K-Means initialization. Use an int to make
+        the results deterministic across calls (See
+        :term:`Glossary &lt;random_state&gt;`).
+
+        .. note::
+            When using `eigen_solver == 'amg'`,
+            it is necessary to also fix the global numpy seed with
+            `np.random.seed(int)` to get deterministic results. See
+            https://github.com/pyamg/pyamg/issues/139 for further
+            information.
+
+    n_init : int, default=10
+        Number of time the k-means algorithm will be run with different
+        centroid seeds. The final results will be the best output of n_init
+        consecutive runs in terms of inertia. Only used if
+        ``assign_labels='kmeans'``.
+
+    eigen_tol : float, default=0.0
+        Stopping criterion for eigendecomposition of the Laplacian matrix
+        when using arpack eigen_solver.
+
+    assign_labels : {'kmeans', 'discretize'}, default='kmeans'
+        The strategy to use to assign labels in the embedding
+        space.  There are two ways to assign labels after the Laplacian
+        embedding.  k-means can be applied and is a popular choice. But it can
+        also be sensitive to initialization. Discretization is another
+        approach which is less sensitive to random initialization. See
+        the 'Multiclass spectral clustering' paper referenced below for
+        more details on the discretization approach.
+
+    verbose : bool, default=False
+        Verbosity mode.
+
+        .. versionadded:: 0.24
+
+    Returns
+    -------
+    labels : array of integers, shape: n_samples
+        The labels of the clusters.
+
+    References
+    ----------
+
+    - Normalized cuts and image segmentation, 2000
+      Jianbo Shi, Jitendra Malik
+      http://citeseer.ist.psu.edu/viewdoc/summary?doi=10.1.1.160.2324
+
+    - A Tutorial on Spectral Clustering, 2007
+      Ulrike von Luxburg
+      http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.165.9323
+
+    - Multiclass spectral clustering, 2003
+      Stella X. Yu, Jianbo Shi
+      https://www1.icsi.berkeley.edu/~stellayu/publication/doc/2003kwayICCV.pdf
+
+    Notes
+    -----
+    The graph should contain only one connect component, elsewhere
+    the results make little sense.
+
+    This algorithm solves the normalized cut for k=2: it is a
+    normalized spectral clustering.
+    """</span>
+    <span class="keyword">if</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'kmeans', 'discretize'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"The 'assign_labels' parameter should be "</span>
+                         <span class="string-literal">"'kmeans' or 'discretize', but '%s' was given"</span>
+                         <span class="arithmetic-operator">%</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span><span class="grouping">)</span>
+
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+    <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_clusters</span> <span class="keyword">if</span> <span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">n_components</span>
+
+    <span class="comment"># The first eigenvector is constant only for fully connected graphs</span>
+    <span class="comment"># and should be kept for spectral clustering (drop_first = False)</span>
+    <span class="comment"># See spectral_embedding documentation.</span>
+    <span class="identifier">maps</span> <span class="arithmetic-assignment">=</span> <span class="identifier">spectral_embedding</span><span class="grouping">(</span><span class="identifier">affinity</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="identifier">n_components</span><span class="punctuation">,</span>
+                              <span class="identifier">eigen_solver</span><span class="arithmetic-assignment">=</span><span class="identifier">eigen_solver</span><span class="punctuation">,</span>
+                              <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+                              <span class="identifier">eigen_tol</span><span class="arithmetic-assignment">=</span><span class="identifier">eigen_tol</span><span class="punctuation">,</span> <span class="identifier">drop_first</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">verbose</span><span class="punctuation">:</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">'Computing label assignment using {assign_labels}'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span> <span class="relational-operator">==</span> <span class="string-literal">'kmeans'</span><span class="punctuation">:</span>
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">k_means</span><span class="grouping">(</span><span class="identifier">maps</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+                               <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="identifier">n_init</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">discretize</span><span class="grouping">(</span><span class="identifier">maps</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">labels</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SpectralClustering</span><span class="grouping">(</span><span class="identifier">ClusterMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Apply clustering to a projection of the normalized Laplacian.
+
+    In practice Spectral Clustering is very useful when the structure of
+    the individual clusters is highly non-convex, or more generally when
+    a measure of the center and spread of the cluster is not a suitable
+    description of the complete cluster, such as when clusters are
+    nested circles on the 2D plane.
+
+    If the affinity matrix is the adjacency matrix of a graph, this method
+    can be used to find normalized graph cuts.
+
+    When calling ``fit``, an affinity matrix is constructed using either
+    a kernel function such the Gaussian (aka RBF) kernel with Euclidean
+    distance ``d(X, X)``::
+
+            np.exp(-gamma * d(X,X) ** 2)
+
+    or a k-nearest neighbors connectivity matrix.
+
+    Alternatively, a user-provided affinity matrix can be specified by
+    setting ``affinity='precomputed'``.
+
+    Read more in the :ref:`User Guide &lt;spectral_clustering&gt;`.
+
+    Parameters
+    ----------
+    n_clusters : int, default=8
+        The dimension of the projection subspace.
+
+    eigen_solver : {'arpack', 'lobpcg', 'amg'}, default=None
+        The eigenvalue decomposition strategy to use. AMG requires pyamg
+        to be installed. It can be faster on very large, sparse problems,
+        but may also lead to instabilities. If None, then ``'arpack'`` is
+        used.
+
+    n_components : int, default=n_clusters
+        Number of eigenvectors to use for the spectral embedding
+
+    random_state : int, RandomState instance, default=None
+        A pseudo random number generator used for the initialization
+        of the lobpcg eigenvectors decomposition when `eigen_solver ==
+        'amg'`, and for the K-Means initialization. Use an int to make
+        the results deterministic across calls (See
+        :term:`Glossary &lt;random_state&gt;`).
+
+        .. note::
+            When using `eigen_solver == 'amg'`,
+            it is necessary to also fix the global numpy seed with
+            `np.random.seed(int)` to get deterministic results. See
+            https://github.com/pyamg/pyamg/issues/139 for further
+            information.
+
+    n_init : int, default=10
+        Number of time the k-means algorithm will be run with different
+        centroid seeds. The final results will be the best output of n_init
+        consecutive runs in terms of inertia. Only used if
+        ``assign_labels='kmeans'``.
+
+    gamma : float, default=1.0
+        Kernel coefficient for rbf, poly, sigmoid, laplacian and chi2 kernels.
+        Ignored for ``affinity='nearest_neighbors'``.
+
+    affinity : str or callable, default='rbf'
+        How to construct the affinity matrix.
+         - 'nearest_neighbors': construct the affinity matrix by computing a
+           graph of nearest neighbors.
+         - 'rbf': construct the affinity matrix using a radial basis function
+           (RBF) kernel.
+         - 'precomputed': interpret ``X`` as a precomputed affinity matrix,
+           where larger values indicate greater similarity between instances.
+         - 'precomputed_nearest_neighbors': interpret ``X`` as a sparse graph
+           of precomputed distances, and construct a binary affinity matrix
+           from the ``n_neighbors`` nearest neighbors of each instance.
+         - one of the kernels supported by
+           :func:`~sklearn.metrics.pairwise_kernels`.
+
+        Only kernels that produce similarity scores (non-negative values that
+        increase with similarity) should be used. This property is not checked
+        by the clustering algorithm.
+
+    n_neighbors : int, default=10
+        Number of neighbors to use when constructing the affinity matrix using
+        the nearest neighbors method. Ignored for ``affinity='rbf'``.
+
+    eigen_tol : float, default=0.0
+        Stopping criterion for eigendecomposition of the Laplacian matrix
+        when ``eigen_solver='arpack'``.
+
+    assign_labels : {'kmeans', 'discretize'}, default='kmeans'
+        The strategy for assigning labels in the embedding space. There are two
+        ways to assign labels after the Laplacian embedding. k-means is a
+        popular choice, but it can be sensitive to initialization.
+        Discretization is another approach which is less sensitive to random
+        initialization.
+
+    degree : float, default=3
+        Degree of the polynomial kernel. Ignored by other kernels.
+
+    coef0 : float, default=1
+        Zero coefficient for polynomial and sigmoid kernels.
+        Ignored by other kernels.
+
+    kernel_params : dict of str to any, default=None
+        Parameters (keyword arguments) and values for kernel passed as
+        callable object. Ignored by other kernels.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run when `affinity='nearest_neighbors'`
+        or `affinity='precomputed_nearest_neighbors'`. The neighbors search
+        will be done in parallel.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    verbose : bool, default=False
+        Verbosity mode.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    affinity_matrix_ : array-like of shape (n_samples, n_samples)
+        Affinity matrix used for clustering. Available only after calling
+        ``fit``.
+
+    labels_ : ndarray of shape (n_samples,)
+        Labels of each point
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import SpectralClustering
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[1, 1], [2, 1], [1, 0],
+    ...               [4, 7], [3, 5], [3, 6]])
+    &gt;&gt;&gt; clustering = SpectralClustering(n_clusters=2,
+    ...         assign_labels='discretize',
+    ...         random_state=0).fit(X)
+    &gt;&gt;&gt; clustering.labels_
+    array([1, 1, 1, 0, 0, 0])
+    &gt;&gt;&gt; clustering
+    SpectralClustering(assign_labels='discretize', n_clusters=2,
+        random_state=0)
+
+    Notes
+    -----
+    A distance matrix for which 0 indicates identical elements and high values
+    indicate very dissimilar elements can be transformed into an affinity /
+    similarity matrix that is well-suited for the algorithm by
+    applying the Gaussian (aka RBF, heat) kernel::
+
+        np.exp(- dist_matrix ** 2 / (2. * delta ** 2))
+
+    where ``delta`` is a free parameter representing the width of the Gaussian
+    kernel.
+
+    An alternative is to take a symmetric version of the k-nearest neighbors
+    connectivity matrix of the points.
+
+    If the pyamg package is installed, it is used: this greatly
+    speeds up computation.
+
+    References
+    ----------
+
+    - Normalized cuts and image segmentation, 2000
+      Jianbo Shi, Jitendra Malik
+      http://citeseer.ist.psu.edu/viewdoc/summary?doi=10.1.1.160.2324
+
+    - A Tutorial on Spectral Clustering, 2007
+      Ulrike von Luxburg
+      http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.165.9323
+
+    - Multiclass spectral clustering, 2003
+      Stella X. Yu, Jianbo Shi
+      https://www1.icsi.berkeley.edu/~stellayu/publication/doc/2003kwayICCV.pdf
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="int-literal">8</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">eigen_solver</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="string-literal">'rbf'</span><span class="punctuation">,</span>
+                 <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="identifier">eigen_tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.0</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="string-literal">'kmeans'</span><span class="punctuation">,</span>
+                 <span class="identifier">degree</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">coef0</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">kernel_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_clusters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eigen_solver</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigen_solver</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gamma</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">affinity</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_neighbors</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eigen_tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigen_tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">degree</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coef0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel_params</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform spectral clustering from features, or affinity matrix.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features) or \
+                (n_samples, n_samples)
+            Training instances to cluster, similarities / affinities between
+            instances if ``affinity='precomputed'``, or distances between
+            instances if ``affinity='precomputed_nearest_neighbors``. If a
+            sparse matrix is provided in a format other than ``csr_matrix``,
+            ``csc_matrix``, or ``coo_matrix``, it will be converted into a
+            sparse ``csr_matrix``.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        self
+
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csr', 'csc', 'coo'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">ensure_min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span>
+        <span class="identifier">allow_squared</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">"precomputed"</span><span class="punctuation">,</span>
+                                          <span class="string-literal">"precomputed_nearest_neighbors"</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">allow_squared</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"The spectral clustering API has changed. ``fit``"</span>
+                          <span class="string-literal">"now constructs an affinity matrix from data. To use"</span>
+                          <span class="string-literal">" a custom affinity matrix, "</span>
+                          <span class="string-literal">"set ``affinity=precomputed``."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">'nearest_neighbors'</span><span class="punctuation">:</span>
+            <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kneighbors_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                                            <span class="identifier">include_self</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                            <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">connectivity</span> <span class="arithmetic-operator">+</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">'precomputed_nearest_neighbors'</span><span class="punctuation">:</span>
+            <span class="identifier">estimator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                                         <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                                         <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">"precomputed"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">kneighbors_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">'connectivity'</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">connectivity</span> <span class="arithmetic-operator">+</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">'precomputed'</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_params</span>
+            <span class="keyword">if</span> <span class="identifier">params</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">params</span><span class="grouping">[</span><span class="string-literal">'gamma'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span>
+                <span class="identifier">params</span><span class="grouping">[</span><span class="string-literal">'degree'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">degree</span>
+                <span class="identifier">params</span><span class="grouping">[</span><span class="string-literal">'coef0'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">coef0</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pairwise_kernels</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span><span class="punctuation">,</span>
+                                                     <span class="identifier">filter_params</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                                     <span class="arithmetic-operator">**</span><span class="identifier">params</span><span class="grouping">)</span>
+
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">spectral_clustering</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity_matrix_</span><span class="punctuation">,</span>
+                                           <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span><span class="punctuation">,</span>
+                                           <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="punctuation">,</span>
+                                           <span class="identifier">eigen_solver</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eigen_solver</span><span class="punctuation">,</span>
+                                           <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+                                           <span class="identifier">n_init</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_init</span><span class="punctuation">,</span>
+                                           <span class="identifier">eigen_tol</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">eigen_tol</span><span class="punctuation">,</span>
+                                           <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">b</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">s</span><span class="punctuation">,</span>
+                                           <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform spectral clustering from features, or affinity matrix,
+        and return cluster labels.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features) or \
+                (n_samples, n_samples)
+            Training instances to cluster, similarities / affinities between
+            instances if ``affinity='precomputed'``, or distances between
+            instances if ``affinity='precomputed_nearest_neighbors``. If a
+            sparse matrix is provided in a format other than ``csr_matrix``,
+            ``csc_matrix``, or ``coo_matrix``, it will be converted into a
+            sparse ``csr_matrix``.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+            Cluster labels.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit_predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'pairwise'</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">"precomputed"</span><span class="punctuation">,</span>
+                                              <span class="string-literal">"precomputed_nearest_neighbors"</span><span class="grouping">]</span><span class="grouping">}</span>
+
+    <span class="comment"># TODO: Remove in 1.1</span>
+    <span class="comment"># mypy error: Decorated property not supported</span>
+    <span class="punctuation">@</span><span class="identifier">deprecated</span><span class="grouping">(</span><span class="string-literal">"Attribute _pairwise was deprecated in "</span>  <span class="comment"># type: ignore</span>
+                <span class="string-literal">"version 0.24 and will be removed in 1.1 (renaming of 0.26)."</span><span class="grouping">)</span>
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_pairwise</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">"precomputed"</span><span class="punctuation">,</span>
+                                 <span class="string-literal">"precomputed_nearest_neighbors"</span><span class="grouping">]</span>
+
+    </pre>
+  </body>
+</html>

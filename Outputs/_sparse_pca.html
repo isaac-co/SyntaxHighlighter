@@ -1,0 +1,371 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Matrix factorization with Sparse PCA."""</span>
+<span class="comment"># Author: Vlad Niculae, Gael Varoquaux, Alexandre Gramfort</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">linear_model</span> <span class="keyword">import</span> <span class="identifier">ridge_regression</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_dict_learning</span> <span class="keyword">import</span> <span class="identifier">dict_learning</span><span class="punctuation">,</span> <span class="identifier">dict_learning_online</span>
+
+
+<span class="keyword">class</span> <span class="identifier">SparsePCA</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Sparse Principal Components Analysis (SparsePCA).
+
+    Finds the set of sparse components that can optimally reconstruct
+    the data.  The amount of sparseness is controllable by the coefficient
+    of the L1 penalty, given by the parameter alpha.
+
+    Read more in the :ref:`User Guide &lt;SparsePCA&gt;`.
+
+    Parameters
+    ----------
+    n_components : int, default=None
+        Number of sparse atoms to extract.
+
+    alpha : float, default=1
+        Sparsity controlling parameter. Higher values lead to sparser
+        components.
+
+    ridge_alpha : float, default=0.01
+        Amount of ridge shrinkage to apply in order to improve
+        conditioning when calling the transform method.
+
+    max_iter : int, default=1000
+        Maximum number of iterations to perform.
+
+    tol : float, default=1e-8
+        Tolerance for the stopping condition.
+
+    method : {'lars', 'cd'}, default='lars'
+        lars: uses the least angle regression method to solve the lasso problem
+        (linear_model.lars_path)
+        cd: uses the coordinate descent method to compute the
+        Lasso solution (linear_model.Lasso). Lars will be faster if
+        the estimated components are sparse.
+
+    n_jobs : int, default=None
+        Number of parallel jobs to run.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    U_init : ndarray of shape (n_samples, n_components), default=None
+        Initial values for the loadings for warm restart scenarios. Only used
+        if `U_init` and `V_init` are not None.
+
+    V_init : ndarray of shape (n_components, n_features), default=None
+        Initial values for the components for warm restart scenarios. Only used
+        if `U_init` and `V_init` are not None.
+
+    verbose : int or bool, default=False
+        Controls the verbosity; the higher, the more messages. Defaults to 0.
+
+    random_state : int, RandomState instance or None, default=None
+        Used during dictionary learning. Pass an int for reproducible results
+        across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        Sparse components extracted from the data.
+
+    error_ : ndarray
+        Vector of errors at each iteration.
+
+    n_components_ : int
+        Estimated number of components.
+
+        .. versionadded:: 0.23
+
+    n_iter_ : int
+        Number of iterations run.
+
+    mean_ : ndarray of shape (n_features,)
+        Per-feature empirical mean, estimated from the training set.
+        Equal to ``X.mean(axis=0)``.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.datasets import make_friedman1
+    &gt;&gt;&gt; from sklearn.decomposition import SparsePCA
+    &gt;&gt;&gt; X, _ = make_friedman1(n_samples=200, n_features=30, random_state=0)
+    &gt;&gt;&gt; transformer = SparsePCA(n_components=5, random_state=0)
+    &gt;&gt;&gt; transformer.fit(X)
+    SparsePCA(...)
+    &gt;&gt;&gt; X_transformed = transformer.transform(X)
+    &gt;&gt;&gt; X_transformed.shape
+    (200, 5)
+    &gt;&gt;&gt; # most values in the components_ are zero (sparsity)
+    &gt;&gt;&gt; np.mean(transformer.components_ == 0)
+    0.9666...
+
+    See Also
+    --------
+    PCA
+    MiniBatchSparsePCA
+    DictionaryLearning
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">ridge_alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.01</span><span class="punctuation">,</span>
+                 <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">1000</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-8</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'lars'</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">U_init</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">V_init</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">ridge_alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ridge_alpha</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">method</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">U_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">U_init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">V_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">V_init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span> <span class="arithmetic-assignment">=</span> <span class="identifier">verbose</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model from data in X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        y : Ignored
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+        """</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="identifier">code_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">V_init</span><span class="punctuation">.</span><span class="identifier">T</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">V_init</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="identifier">dict_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">U_init</span><span class="punctuation">.</span><span class="identifier">T</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">U_init</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="identifier">Vt</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">E</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict_learning</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span>
+                                               <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span><span class="punctuation">,</span>
+                                               <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">,</span>
+                                               <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                                               <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span><span class="punctuation">,</span>
+                                               <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+                                               <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="punctuation">,</span>
+                                               <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+                                               <span class="identifier">code_init</span><span class="arithmetic-assignment">=</span><span class="identifier">code_init</span><span class="punctuation">,</span>
+                                               <span class="identifier">dict_init</span><span class="arithmetic-assignment">=</span><span class="identifier">dict_init</span><span class="punctuation">,</span>
+                                               <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Vt</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="identifier">components_norm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">norm</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="identifier">components_norm</span><span class="grouping">[</span><span class="identifier">components_norm</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">components_norm</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">error_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">E</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Least Squares projection of the data onto the sparse components.
+
+        To avoid instability issues in case the system is under-determined,
+        regularization can be applied (Ridge regression) via the
+        `ridge_alpha` parameter.
+
+        Note that Sparse PCA components orthogonality is not enforced as in PCA
+        hence one cannot use a simple linear projection.
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            Test data to be transformed, must have the same number of
+            features as the data used to train the model.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+            Transformed data.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="identifier">U</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ridge_regression</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">ridge_alpha</span><span class="punctuation">,</span>
+                             <span class="identifier">solver</span><span class="arithmetic-assignment">=</span><span class="string-literal">'cholesky'</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">U</span>
+
+
+<span class="keyword">class</span> <span class="identifier">MiniBatchSparsePCA</span><span class="grouping">(</span><span class="identifier">SparsePCA</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Mini-batch Sparse Principal Components Analysis
+
+    Finds the set of sparse components that can optimally reconstruct
+    the data.  The amount of sparseness is controllable by the coefficient
+    of the L1 penalty, given by the parameter alpha.
+
+    Read more in the :ref:`User Guide &lt;SparsePCA&gt;`.
+
+    Parameters
+    ----------
+    n_components : int, default=None
+        number of sparse atoms to extract
+
+    alpha : int, default=1
+        Sparsity controlling parameter. Higher values lead to sparser
+        components.
+
+    ridge_alpha : float, default=0.01
+        Amount of ridge shrinkage to apply in order to improve
+        conditioning when calling the transform method.
+
+    n_iter : int, default=100
+        number of iterations to perform for each mini batch
+
+    callback : callable, default=None
+        callable that gets invoked every five iterations
+
+    batch_size : int, default=3
+        the number of features to take in each mini batch
+
+    verbose : int or bool, default=False
+        Controls the verbosity; the higher, the more messages. Defaults to 0.
+
+    shuffle : bool, default=True
+        whether to shuffle the data before splitting it in batches
+
+    n_jobs : int, default=None
+        Number of parallel jobs to run.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    method : {'lars', 'cd'}, default='lars'
+        lars: uses the least angle regression method to solve the lasso problem
+        (linear_model.lars_path)
+        cd: uses the coordinate descent method to compute the
+        Lasso solution (linear_model.Lasso). Lars will be faster if
+        the estimated components are sparse.
+
+    random_state : int, RandomState instance or None, default=None
+        Used for random shuffling when ``shuffle`` is set to ``True``,
+        during online dictionary learning. Pass an int for reproducible results
+        across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        Sparse components extracted from the data.
+
+    n_components_ : int
+        Estimated number of components.
+
+        .. versionadded:: 0.23
+
+    n_iter_ : int
+        Number of iterations run.
+
+    mean_ : ndarray of shape (n_features,)
+        Per-feature empirical mean, estimated from the training set.
+        Equal to ``X.mean(axis=0)``.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.datasets import make_friedman1
+    &gt;&gt;&gt; from sklearn.decomposition import MiniBatchSparsePCA
+    &gt;&gt;&gt; X, _ = make_friedman1(n_samples=200, n_features=30, random_state=0)
+    &gt;&gt;&gt; transformer = MiniBatchSparsePCA(n_components=5, batch_size=50,
+    ...                                  random_state=0)
+    &gt;&gt;&gt; transformer.fit(X)
+    MiniBatchSparsePCA(...)
+    &gt;&gt;&gt; X_transformed = transformer.transform(X)
+    &gt;&gt;&gt; X_transformed.shape
+    (200, 5)
+    &gt;&gt;&gt; # most values in the components_ are zero (sparsity)
+    &gt;&gt;&gt; np.mean(transformer.components_ == 0)
+    0.94
+
+    See Also
+    --------
+    PCA
+    SparsePCA
+    DictionaryLearning
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">ridge_alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.01</span><span class="punctuation">,</span>
+                 <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="identifier">callback</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">batch_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">shuffle</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'lars'</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="punctuation">,</span>
+            <span class="identifier">ridge_alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">ridge_alpha</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="identifier">method</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">callback</span> <span class="arithmetic-assignment">=</span> <span class="identifier">callback</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">batch_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">shuffle</span> <span class="arithmetic-assignment">=</span> <span class="identifier">shuffle</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the model from data in X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples
+            and n_features is the number of features.
+
+        y : Ignored
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+        """</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="identifier">Vt</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict_learning_online</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span><span class="punctuation">,</span>
+            <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">o</span><span class="invalid">d</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+            <span class="identifier">dict_init</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="punctuation">,</span>
+            <span class="identifier">callback</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">callback</span><span class="punctuation">,</span>
+            <span class="identifier">batch_size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">batch_size</span><span class="punctuation">,</span>
+            <span class="identifier">shuffle</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">shuffle</span><span class="punctuation">,</span>
+            <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">method</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+            <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Vt</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+        <span class="identifier">components_norm</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">norm</span><span class="grouping">(</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="identifier">components_norm</span><span class="grouping">[</span><span class="identifier">components_norm</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">components_norm</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    </pre>
+  </body>
+</html>

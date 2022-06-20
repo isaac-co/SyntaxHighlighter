@@ -1,0 +1,567 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Nearest Neighbors graph functions"""</span>
+
+<span class="comment"># Author: Jake Vanderplas &lt;vanderplas@astro.washington.edu&gt;</span>
+<span class="comment">#         Tom Dupre la Tour</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause (C) INRIA, University of Amsterdam</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">KNeighborsMixin</span><span class="punctuation">,</span> <span class="identifier">RadiusNeighborsMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">NeighborsBase</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_unsupervised</span> <span class="keyword">import</span> <span class="identifier">NearestNeighbors</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_check_params</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Check the validity of the input parameters"""</span>
+    <span class="identifier">params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="grouping">[</span><span class="string-literal">'metric', 'p', 'metric_params'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                 <span class="grouping">[</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">est_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">get_params</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">param_name</span><span class="punctuation">,</span> <span class="identifier">func_param</span> <span class="relational-operator">in</span> <span class="identifier">params</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">func_param</span> <span class="relational-operator">!=</span> <span class="identifier">est_params</span><span class="grouping">[</span><span class="identifier">param_name</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"Got %s for %s, while the estimator has %s for "</span>
+                <span class="string-literal">"the same parameter."</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span>
+                    <span class="identifier">func_param</span><span class="punctuation">,</span> <span class="identifier">param_name</span><span class="punctuation">,</span> <span class="identifier">est_params</span><span class="grouping">[</span><span class="identifier">param_name</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_query_include_self</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">include_self</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Return the query based on include_self param"""</span>
+    <span class="keyword">if</span> <span class="identifier">include_self</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+        <span class="identifier">include_self</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mode</span> <span class="relational-operator">==</span> <span class="string-literal">'connectivity'</span>
+
+    <span class="comment"># it does not include each sample as its own neighbors</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">include_self</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">return</span> <span class="identifier">X</span>
+
+
+<span class="keyword">def</span> <span class="identifier">kneighbors_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">'connectivity'</span><span class="punctuation">,</span>
+                     <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'minkowski'</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                     <span class="identifier">include_self</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Computes the (weighted) graph of k-Neighbors for points in X
+
+    Read more in the :ref:`User Guide &lt;unsupervised_neighbors&gt;`.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features) or BallTree
+        Sample data, in the form of a numpy array or a precomputed
+        :class:`BallTree`.
+
+    n_neighbors : int
+        Number of neighbors for each sample.
+
+    mode : {'connectivity', 'distance'}, default='connectivity'
+        Type of returned matrix: 'connectivity' will return the connectivity
+        matrix with ones and zeros, and 'distance' will return the distances
+        between neighbors according to the given metric.
+
+    metric : str, default='minkowski'
+        The distance metric used to calculate the k-Neighbors for each sample
+        point. The DistanceMetric class gives a list of available metrics.
+        The default distance is 'euclidean' ('minkowski' metric with the p
+        param equal to 2.)
+
+    p : int, default=2
+        Power parameter for the Minkowski metric. When p = 1, this is
+        equivalent to using manhattan_distance (l1), and euclidean_distance
+        (l2) for p = 2. For arbitrary p, minkowski_distance (l_p) is used.
+
+    metric_params : dict, default=None
+        additional keyword arguments for the metric function.
+
+    include_self : bool or 'auto', default=False
+        Whether or not to mark each sample as the first nearest neighbor to
+        itself. If 'auto', then True is used for mode='connectivity' and False
+        for mode='distance'.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run for neighbors search.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Returns
+    -------
+    A : sparse matrix of shape (n_samples, n_samples)
+        Graph where A[i, j] is assigned the weight of edge that
+        connects i to j. The matrix is of CSR format.
+
+    Examples
+    --------
+    &gt;&gt;&gt; X = [[0], [3], [1]]
+    &gt;&gt;&gt; from sklearn.neighbors import kneighbors_graph
+    &gt;&gt;&gt; A = kneighbors_graph(X, 2, mode='connectivity', include_self=True)
+    &gt;&gt;&gt; A.toarray()
+    array([[1., 0., 1.],
+           [0., 1., 1.],
+           [1., 0., 1.]])
+
+    See Also
+    --------
+    radius_neighbors_graph
+    """</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">KNeighborsMixin</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">p</span><span class="punctuation">,</span>
+                             <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="identifier">metric_params</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">_check_params</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="grouping">)</span>
+
+    <span class="identifier">query</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_query_include_self</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">_fit_X</span><span class="punctuation">,</span> <span class="identifier">include_self</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">kneighbors_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="arithmetic-assignment">=</span><span class="identifier">query</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="identifier">mode</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">radius_neighbors_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">'connectivity'</span><span class="punctuation">,</span>
+                           <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'minkowski'</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                           <span class="identifier">include_self</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Computes the (weighted) graph of Neighbors for points in X
+
+    Neighborhoods are restricted the points at a distance lower than
+    radius.
+
+    Read more in the :ref:`User Guide &lt;unsupervised_neighbors&gt;`.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features) or BallTree
+        Sample data, in the form of a numpy array or a precomputed
+        :class:`BallTree`.
+
+    radius : float
+        Radius of neighborhoods.
+
+    mode : {'connectivity', 'distance'}, default='connectivity'
+        Type of returned matrix: 'connectivity' will return the connectivity
+        matrix with ones and zeros, and 'distance' will return the distances
+        between neighbors according to the given metric.
+
+    metric : str, default='minkowski'
+        The distance metric used to calculate the neighbors within a
+        given radius for each sample point. The DistanceMetric class
+        gives a list of available metrics. The default distance is
+        'euclidean' ('minkowski' metric with the param equal to 2.)
+
+    p : int, default=2
+        Power parameter for the Minkowski metric. When p = 1, this is
+        equivalent to using manhattan_distance (l1), and euclidean_distance
+        (l2) for p = 2. For arbitrary p, minkowski_distance (l_p) is used.
+
+    metric_params : dict, default=None
+        additional keyword arguments for the metric function.
+
+    include_self : bool or 'auto', default=False
+        Whether or not to mark each sample as the first nearest neighbor to
+        itself. If 'auto', then True is used for mode='connectivity' and False
+        for mode='distance'.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run for neighbors search.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Returns
+    -------
+    A : sparse matrix of shape (n_samples, n_samples)
+        Graph where A[i, j] is assigned the weight of edge that connects
+        i to j. The matrix is of CSR format.
+
+    Examples
+    --------
+    &gt;&gt;&gt; X = [[0], [3], [1]]
+    &gt;&gt;&gt; from sklearn.neighbors import radius_neighbors_graph
+    &gt;&gt;&gt; A = radius_neighbors_graph(X, 1.5, mode='connectivity',
+    ...                            include_self=True)
+    &gt;&gt;&gt; A.toarray()
+    array([[1., 0., 1.],
+           [0., 1., 0.],
+           [1., 0., 1.]])
+
+    See Also
+    --------
+    kneighbors_graph
+    """</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">RadiusNeighborsMixin</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">radius</span><span class="arithmetic-assignment">=</span><span class="identifier">radius</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">p</span><span class="punctuation">,</span>
+                             <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="identifier">metric_params</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">_check_params</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="grouping">)</span>
+
+    <span class="identifier">query</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_query_include_self</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">_fit_X</span><span class="punctuation">,</span> <span class="identifier">include_self</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">radius_neighbors_graph</span><span class="grouping">(</span><span class="identifier">query</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">KNeighborsTransformer</span><span class="grouping">(</span><span class="identifier">KNeighborsMixin</span><span class="punctuation">,</span>
+                            <span class="identifier">TransformerMixin</span><span class="punctuation">,</span>
+                            <span class="identifier">NeighborsBase</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Transform X into a (weighted) graph of k nearest neighbors
+
+    The transformed data is a sparse graph as returned by kneighbors_graph.
+
+    Read more in the :ref:`User Guide &lt;neighbors_transformer&gt;`.
+
+    .. versionadded:: 0.22
+
+    Parameters
+    ----------
+    mode : {'distance', 'connectivity'}, default='distance'
+        Type of returned matrix: 'connectivity' will return the connectivity
+        matrix with ones and zeros, and 'distance' will return the distances
+        between neighbors according to the given metric.
+
+    n_neighbors : int, default=5
+        Number of neighbors for each sample in the transformed sparse graph.
+        For compatibility reasons, as each sample is considered as its own
+        neighbor, one extra neighbor will be computed when mode == 'distance'.
+        In this case, the sparse graph contains (n_neighbors + 1) neighbors.
+
+    algorithm : {'auto', 'ball_tree', 'kd_tree', 'brute'}, default='auto'
+        Algorithm used to compute the nearest neighbors:
+
+        - 'ball_tree' will use :class:`BallTree`
+        - 'kd_tree' will use :class:`KDTree`
+        - 'brute' will use a brute-force search.
+        - 'auto' will attempt to decide the most appropriate algorithm
+          based on the values passed to :meth:`fit` method.
+
+        Note: fitting on sparse input will override the setting of
+        this parameter, using brute force.
+
+    leaf_size : int, default=30
+        Leaf size passed to BallTree or KDTree.  This can affect the
+        speed of the construction and query, as well as the memory
+        required to store the tree.  The optimal value depends on the
+        nature of the problem.
+
+    metric : str or callable, default='minkowski'
+        metric to use for distance computation. Any metric from scikit-learn
+        or scipy.spatial.distance can be used.
+
+        If metric is a callable function, it is called on each
+        pair of instances (rows) and the resulting value recorded. The callable
+        should take two arrays as input and return one value indicating the
+        distance between them. This works for Scipy's metrics, but is less
+        efficient than passing the metric name as a string.
+
+        Distance matrices are not supported.
+
+        Valid values for metric are:
+
+        - from scikit-learn: ['cityblock', 'cosine', 'euclidean', 'l1', 'l2',
+          'manhattan']
+
+        - from scipy.spatial.distance: ['braycurtis', 'canberra', 'chebyshev',
+          'correlation', 'dice', 'hamming', 'jaccard', 'kulsinski',
+          'mahalanobis', 'minkowski', 'rogerstanimoto', 'russellrao',
+          'seuclidean', 'sokalmichener', 'sokalsneath', 'sqeuclidean',
+          'yule']
+
+        See the documentation for scipy.spatial.distance for details on these
+        metrics.
+
+    p : int, default=2
+        Parameter for the Minkowski metric from
+        sklearn.metrics.pairwise.pairwise_distances. When p = 1, this is
+        equivalent to using manhattan_distance (l1), and euclidean_distance
+        (l2) for p = 2. For arbitrary p, minkowski_distance (l_p) is used.
+
+    metric_params : dict, default=None
+        Additional keyword arguments for the metric function.
+
+    n_jobs : int, default=1
+        The number of parallel jobs to run for neighbors search.
+        If ``-1``, then the number of jobs is set to the number of CPU cores.
+
+    Attributes
+    ----------
+    effective_metric_ : str or callable
+        The distance metric used. It will be same as the `metric` parameter
+        or a synonym of it, e.g. 'euclidean' if the `metric` parameter set to
+        'minkowski' and `p` parameter set to 2.
+
+    effective_metric_params_ : dict
+        Additional keyword arguments for the metric function. For most metrics
+        will be same with `metric_params` parameter, but may also contain the
+        `p` parameter value if the `effective_metric_` attribute is set to
+        'minkowski'.
+
+    n_samples_fit_ : int
+        Number of samples in the fitted data.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.manifold import Isomap
+    &gt;&gt;&gt; from sklearn.neighbors import KNeighborsTransformer
+    &gt;&gt;&gt; from sklearn.pipeline import make_pipeline
+    &gt;&gt;&gt; estimator = make_pipeline(
+    ...     KNeighborsTransformer(n_neighbors=5, mode='distance'),
+    ...     Isomap(neighbors_algorithm='precomputed'))
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">'distance', n_neighbors=5, algorithm='auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">leaf_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'minkowski'</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="identifier">KNeighborsTransformer</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="identifier">algorithm</span><span class="punctuation">,</span>
+            <span class="identifier">leaf_size</span><span class="arithmetic-assignment">=</span><span class="identifier">leaf_size</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">p</span><span class="punctuation">,</span>
+            <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="identifier">metric_params</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mode</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mode</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the k-nearest neighbors transformer from the training dataset.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features) or \
+                (n_samples, n_samples) if metric='precomputed'
+            Training data.
+
+        Returns
+        -------
+        self : KNeighborsTransformer
+            The fitted k-nearest neighbors transformer.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Computes the (weighted) graph of Neighbors for points in X
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples_transform, n_features)
+            Sample data.
+
+        Returns
+        -------
+        Xt : sparse matrix of shape (n_samples_transform, n_samples_fit)
+            Xt[i, j] is assigned the weight of edge that connects i to j.
+            Only the neighbors have an explicit value.
+            The diagonal is always explicit.
+            The matrix is of CSR format.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">add_one</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mode</span> <span class="relational-operator">==</span> <span class="string-literal">'distance'</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kneighbors_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mode</span><span class="punctuation">,</span>
+                                     <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span> <span class="arithmetic-operator">+</span> <span class="identifier">add_one</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit to data, then transform it.
+
+        Fits transformer to X and y with optional parameters fit_params
+        and returns a transformed version of X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training set.
+
+        y : ignored
+
+        Returns
+        -------
+        Xt : sparse matrix of shape (n_samples, n_samples)
+            Xt[i, j] is assigned the weight of edge that connects i to j.
+            Only the neighbors have an explicit value.
+            The diagonal is always explicit.
+            The matrix is of CSR format.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="string-literal">'_xfail_checks'</span><span class="punctuation">:</span> <span class="grouping">{</span>
+                <span class="string-literal">'check_methods_sample_order_invariance'</span><span class="punctuation">:</span>
+                <span class="string-literal">'check is not applicable.'</span>
+            <span class="grouping">}</span>
+        <span class="grouping">}</span>
+
+
+<span class="keyword">class</span> <span class="identifier">RadiusNeighborsTransformer</span><span class="grouping">(</span><span class="identifier">RadiusNeighborsMixin</span><span class="punctuation">,</span>
+                                 <span class="identifier">TransformerMixin</span><span class="punctuation">,</span>
+                                 <span class="identifier">NeighborsBase</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Transform X into a (weighted) graph of neighbors nearer than a radius
+
+    The transformed data is a sparse graph as returned by
+    radius_neighbors_graph.
+
+    Read more in the :ref:`User Guide &lt;neighbors_transformer&gt;`.
+
+    .. versionadded:: 0.22
+
+    Parameters
+    ----------
+    mode : {'distance', 'connectivity'}, default='distance'
+        Type of returned matrix: 'connectivity' will return the connectivity
+        matrix with ones and zeros, and 'distance' will return the distances
+        between neighbors according to the given metric.
+
+    radius : float, default=1.
+        Radius of neighborhood in the transformed sparse graph.
+
+    algorithm : {'auto', 'ball_tree', 'kd_tree', 'brute'}, default='auto'
+        Algorithm used to compute the nearest neighbors:
+
+        - 'ball_tree' will use :class:`BallTree`
+        - 'kd_tree' will use :class:`KDTree`
+        - 'brute' will use a brute-force search.
+        - 'auto' will attempt to decide the most appropriate algorithm
+          based on the values passed to :meth:`fit` method.
+
+        Note: fitting on sparse input will override the setting of
+        this parameter, using brute force.
+
+    leaf_size : int, default=30
+        Leaf size passed to BallTree or KDTree.  This can affect the
+        speed of the construction and query, as well as the memory
+        required to store the tree.  The optimal value depends on the
+        nature of the problem.
+
+    metric : str or callable, default='minkowski'
+        metric to use for distance computation. Any metric from scikit-learn
+        or scipy.spatial.distance can be used.
+
+        If metric is a callable function, it is called on each
+        pair of instances (rows) and the resulting value recorded. The callable
+        should take two arrays as input and return one value indicating the
+        distance between them. This works for Scipy's metrics, but is less
+        efficient than passing the metric name as a string.
+
+        Distance matrices are not supported.
+
+        Valid values for metric are:
+
+        - from scikit-learn: ['cityblock', 'cosine', 'euclidean', 'l1', 'l2',
+          'manhattan']
+
+        - from scipy.spatial.distance: ['braycurtis', 'canberra', 'chebyshev',
+          'correlation', 'dice', 'hamming', 'jaccard', 'kulsinski',
+          'mahalanobis', 'minkowski', 'rogerstanimoto', 'russellrao',
+          'seuclidean', 'sokalmichener', 'sokalsneath', 'sqeuclidean',
+          'yule']
+
+        See the documentation for scipy.spatial.distance for details on these
+        metrics.
+
+    p : int, default=2
+        Parameter for the Minkowski metric from
+        sklearn.metrics.pairwise.pairwise_distances. When p = 1, this is
+        equivalent to using manhattan_distance (l1), and euclidean_distance
+        (l2) for p = 2. For arbitrary p, minkowski_distance (l_p) is used.
+
+    metric_params : dict, default=None
+        Additional keyword arguments for the metric function.
+
+    n_jobs : int, default=1
+        The number of parallel jobs to run for neighbors search.
+        If ``-1``, then the number of jobs is set to the number of CPU cores.
+
+    Attributes
+    ----------
+    effective_metric_ : str or callable
+        The distance metric used. It will be same as the `metric` parameter
+        or a synonym of it, e.g. 'euclidean' if the `metric` parameter set to
+        'minkowski' and `p` parameter set to 2.
+
+    effective_metric_params_ : dict
+        Additional keyword arguments for the metric function. For most metrics
+        will be same with `metric_params` parameter, but may also contain the
+        `p` parameter value if the `effective_metric_` attribute is set to
+        'minkowski'.
+
+    n_samples_fit_ : int
+        Number of samples in the fitted data.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import DBSCAN
+    &gt;&gt;&gt; from sklearn.neighbors import RadiusNeighborsTransformer
+    &gt;&gt;&gt; from sklearn.pipeline import make_pipeline
+    &gt;&gt;&gt; estimator = make_pipeline(
+    ...     RadiusNeighborsTransformer(radius=42.0, mode='distance'),
+    ...     DBSCAN(min_samples=30, metric='precomputed'))
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">'distance', radius=1., algorithm='auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">leaf_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'minkowski'</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="identifier">RadiusNeighborsTransformer</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="arithmetic-assignment">=</span><span class="identifier">radius</span><span class="punctuation">,</span> <span class="identifier">algorithm</span><span class="arithmetic-assignment">=</span><span class="identifier">algorithm</span><span class="punctuation">,</span>
+            <span class="identifier">leaf_size</span><span class="arithmetic-assignment">=</span><span class="identifier">leaf_size</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">p</span><span class="arithmetic-assignment">=</span><span class="identifier">p</span><span class="punctuation">,</span>
+            <span class="identifier">metric_params</span><span class="arithmetic-assignment">=</span><span class="identifier">metric_params</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mode</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mode</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the radius neighbors transformer from the training dataset.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features) or \
+                (n_samples, n_samples) if metric='precomputed'
+            Training data.
+
+        Returns
+        -------
+        self : RadiusNeighborsTransformer
+            The fitted radius neighbors transformer.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Computes the (weighted) graph of Neighbors for points in X
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples_transform, n_features)
+            Sample data
+
+        Returns
+        -------
+        Xt : sparse matrix of shape (n_samples_transform, n_samples_fit)
+            Xt[i, j] is assigned the weight of edge that connects i to j.
+            Only the neighbors have an explicit value.
+            The diagonal is always explicit.
+            The matrix is of CSR format.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">radius_neighbors_graph</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mode</span><span class="punctuation">,</span>
+                                           <span class="identifier">sort_results</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit to data, then transform it.
+
+        Fits transformer to X and y with optional parameters fit_params
+        and returns a transformed version of X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training set.
+
+        y : ignored
+
+        Returns
+        -------
+        Xt : sparse matrix of shape (n_samples, n_samples)
+            Xt[i, j] is assigned the weight of edge that connects i to j.
+            Only the neighbors have an explicit value.
+            The diagonal is always explicit.
+            The matrix is of CSR format.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="string-literal">'_xfail_checks'</span><span class="punctuation">:</span> <span class="grouping">{</span>
+                <span class="string-literal">'check_methods_sample_order_invariance'</span><span class="punctuation">:</span>
+                <span class="string-literal">'check is not applicable.'</span>
+            <span class="grouping">}</span>
+        <span class="grouping">}</span>
+
+    </pre>
+  </body>
+</html>

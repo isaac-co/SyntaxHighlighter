@@ -1,0 +1,456 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Author: Nikolay Mayorov &lt;n59_ru@hotmail.com&gt;</span>
+<span class="comment"># License: 3-clause BSD</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">import</span> <span class="identifier">issparse</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">digamma</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">mutual_info_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span> <span class="keyword">import</span> <span class="identifier">NearestNeighbors</span><span class="punctuation">,</span> <span class="identifier">KDTree</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">scale</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="identifier">_astype_copy_false</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_array</span><span class="punctuation">,</span> <span class="identifier">check_X_y</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">multiclass</span> <span class="keyword">import</span> <span class="identifier">check_classification_targets</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_compute_mi_cc</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute mutual information between two continuous variables.
+
+    Parameters
+    ----------
+    x, y : ndarray, shape (n_samples,)
+        Samples of two continuous random variables, must have an identical
+        shape.
+
+    n_neighbors : int
+        Number of nearest neighbors to search for each point, see [1]_.
+
+    Returns
+    -------
+    mi : float
+        Estimated mutual information. If it turned out to be negative it is
+        replace by 0.
+
+    Notes
+    -----
+    True mutual information can't be negative. If its estimate by a numerical
+    method is negative, it means (providing the method is adequate) that the
+    mutual information is close to 0 and replacing it by 0 is a reasonable
+    strategy.
+
+    References
+    ----------
+    .. [1] A. Kraskov, H. Stogbauer and P. Grassberger, "Estimating mutual
+           information". Phys. Rev. E 69, 2004.
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x</span><span class="punctuation">.</span><span class="identifier">size</span>
+
+    <span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">xy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">hstack</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Here we rely on NearestNeighbors to select the fastest algorithm.</span>
+    <span class="identifier">nn</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'chebyshev'</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">n_neighbors</span><span class="grouping">)</span>
+
+    <span class="identifier">nn</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">xy</span><span class="grouping">)</span>
+    <span class="identifier">radius</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nn</span><span class="punctuation">.</span><span class="identifier">kneighbors</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="identifier">radius</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nextafter</span><span class="grouping">(</span><span class="identifier">radius</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+
+    <span class="comment"># KDTree is explicitly fit to allow for the querying of number of</span>
+    <span class="comment"># neighbors within a specified radius</span>
+    <span class="identifier">kd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">KDTree</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'chebyshev'</span><span class="grouping">)</span>
+    <span class="identifier">nx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kd</span><span class="punctuation">.</span><span class="identifier">query_radius</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="punctuation">,</span> <span class="identifier">count_only</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">nx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">nx</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="float-literal">1.0</span>
+
+    <span class="identifier">kd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">KDTree</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="string-literal">'chebyshev'</span><span class="grouping">)</span>
+    <span class="identifier">ny</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kd</span><span class="punctuation">.</span><span class="identifier">query_radius</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="punctuation">,</span> <span class="identifier">count_only</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">ny</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">ny</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="float-literal">1.0</span>
+
+    <span class="identifier">mi</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+          <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">nx</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">ny</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">mi</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_compute_mi_cd</span><span class="grouping">(</span><span class="identifier">c</span><span class="punctuation">,</span> <span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute mutual information between continuous and discrete variables.
+
+    Parameters
+    ----------
+    c : ndarray, shape (n_samples,)
+        Samples of a continuous random variable.
+
+    d : ndarray, shape (n_samples,)
+        Samples of a discrete random variable.
+
+    n_neighbors : int
+        Number of nearest neighbors to search for each point, see [1]_.
+
+    Returns
+    -------
+    mi : float
+        Estimated mutual information. If it turned out to be negative it is
+        replace by 0.
+
+    Notes
+    -----
+    True mutual information can't be negative. If its estimate by a numerical
+    method is negative, it means (providing the method is adequate) that the
+    mutual information is close to 0 and replacing it by 0 is a reasonable
+    strategy.
+
+    References
+    ----------
+    .. [1] B. C. Ross "Mutual Information between Discrete and Continuous
+       Data Sets". PLoS ONE 9(2), 2014.
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">c</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">c</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="identifier">radius</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="identifier">label_counts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="identifier">k_all</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="identifier">nn</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">label</span> <span class="relational-operator">in</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">d</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">d</span> <span class="relational-operator">==</span> <span class="identifier">label</span>
+        <span class="identifier">count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">count</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="identifier">k</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="identifier">count</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">nn</span><span class="punctuation">.</span><span class="identifier">set_params</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">k</span><span class="grouping">)</span>
+            <span class="identifier">nn</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">c</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">r</span> <span class="arithmetic-assignment">=</span> <span class="identifier">nn</span><span class="punctuation">.</span><span class="identifier">kneighbors</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">radius</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nextafter</span><span class="grouping">(</span><span class="identifier">r</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+            <span class="identifier">k_all</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">k</span>
+        <span class="identifier">label_counts</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">count</span>
+
+    <span class="comment"># Ignore points with unique labels.</span>
+    <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">label_counts</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span>
+    <span class="identifier">label_counts</span> <span class="arithmetic-assignment">=</span> <span class="identifier">label_counts</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+    <span class="identifier">k_all</span> <span class="arithmetic-assignment">=</span> <span class="identifier">k_all</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+    <span class="identifier">c</span> <span class="arithmetic-assignment">=</span> <span class="identifier">c</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+    <span class="identifier">radius</span> <span class="arithmetic-assignment">=</span> <span class="identifier">radius</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+
+    <span class="identifier">kd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">KDTree</span><span class="grouping">(</span><span class="identifier">c</span><span class="grouping">)</span>
+    <span class="identifier">m_all</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kd</span><span class="punctuation">.</span><span class="identifier">query_radius</span><span class="grouping">(</span><span class="identifier">c</span><span class="punctuation">,</span> <span class="identifier">radius</span><span class="punctuation">,</span> <span class="identifier">count_only</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">m_all</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">m_all</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="float-literal">1.0</span>
+
+    <span class="identifier">mi</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">k_all</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+          <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">label_counts</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span>
+          <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">digamma</span><span class="grouping">(</span><span class="identifier">m_all</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">mi</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_compute_mi</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">x_discrete</span><span class="punctuation">,</span> <span class="identifier">y_discrete</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Compute mutual information between two variables.
+
+    This is a simple wrapper which selects a proper function to call based on
+    whether `x` and `y` are discrete or not.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">x_discrete</span> <span class="logical-operator">and</span> <span class="identifier">y_discrete</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">mutual_info_score</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">x_discrete</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">y_discrete</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">_compute_mi_cd</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="identifier">x_discrete</span> <span class="logical-operator">and</span> <span class="identifier">y_discrete</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">_compute_mi_cd</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">_compute_mi_cc</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_iterate_columns</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">columns</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Iterate over columns of a matrix.
+
+    Parameters
+    ----------
+    X : ndarray or csc_matrix, shape (n_samples, n_features)
+        Matrix over which to iterate.
+
+    columns : iterable or None, default=None
+        Indices of columns to iterate over. If None, iterate over all columns.
+
+    Yields
+    ------
+    x : ndarray, shape (n_samples,)
+        Columns of `X` in dense format.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">columns</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">columns</span> <span class="arithmetic-assignment">=</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">columns</span><span class="punctuation">:</span>
+            <span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">start_ptr</span><span class="punctuation">,</span> <span class="identifier">end_ptr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="identifier">x</span><span class="grouping">[</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">indices</span><span class="grouping">[</span><span class="identifier">start_ptr</span><span class="punctuation">:</span><span class="identifier">end_ptr</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">start_ptr</span><span class="punctuation">:</span><span class="identifier">end_ptr</span><span class="grouping">]</span>
+            <span class="keyword">yield</span> <span class="identifier">x</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">columns</span><span class="punctuation">:</span>
+            <span class="keyword">yield</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_estimate_mi</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">discrete_features</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span> <span class="identifier">discrete_target</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Estimate mutual information between the features and the target.
+
+    Parameters
+    ----------
+    X : array-like or sparse matrix, shape (n_samples, n_features)
+        Feature matrix.
+
+    y : array-like of shape (n_samples,)
+        Target vector.
+
+    discrete_features : {'auto', bool, array-like}, default='auto'
+        If bool, then determines whether to consider all features discrete
+        or continuous. If array, then it should be either a boolean mask
+        with shape (n_features,) or array with indices of discrete features.
+        If 'auto', it is assigned to False for dense `X` and to True for
+        sparse `X`.
+
+    discrete_target : bool, default=False
+        Whether to consider `y` as a discrete variable.
+
+    n_neighbors : int, default=3
+        Number of neighbors to use for MI estimation for continuous variables,
+        see [1]_ and [2]_. Higher values reduce variance of the estimation, but
+        could introduce a bias.
+
+    copy : bool, default=True
+        Whether to make a copy of the given data. If set to False, the initial
+        data will be overwritten.
+
+    random_state : int, RandomState instance or None, default=None
+        Determines random number generation for adding small noise to
+        continuous variables in order to remove repeated values.
+        Pass an int for reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Returns
+    -------
+    mi : ndarray, shape (n_features,)
+        Estimated mutual information between each feature and the target.
+        A negative value will be replaced by 0.
+
+    References
+    ----------
+    .. [1] A. Kraskov, H. Stogbauer and P. Grassberger, "Estimating mutual
+           information". Phys. Rev. E 69, 2004.
+    .. [2] B. C. Ross "Mutual Information between Discrete and Continuous
+           Data Sets". PLoS ONE 9(2), 2014.
+    """</span>
+    <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_X_y</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csc'</span><span class="punctuation">,</span> <span class="identifier">y_numeric</span><span class="arithmetic-assignment">=</span><span class="logical-operator">not</span> <span class="identifier">discrete_target</span><span class="grouping">)</span>
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">discrete_features</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">str</span><span class="punctuation">,</span> <span class="identifier">bool</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">discrete_features</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">discrete_features</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+                <span class="identifier">discrete_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Invalid string value for discrete_features."</span><span class="grouping">)</span>
+        <span class="identifier">discrete_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+        <span class="identifier">discrete_mask</span><span class="punctuation">.</span><span class="identifier">fill</span><span class="grouping">(</span><span class="identifier">discrete_features</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">discrete_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">discrete_features</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">discrete_features</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="relational-operator">!=</span> <span class="string-literal">'bool'</span><span class="punctuation">:</span>
+            <span class="identifier">discrete_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+            <span class="identifier">discrete_mask</span><span class="grouping">[</span><span class="identifier">discrete_features</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">discrete_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">discrete_features</span>
+
+    <span class="identifier">continuous_mask</span> <span class="arithmetic-assignment">=</span> <span class="bitwise-operator">~</span><span class="identifier">discrete_mask</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">continuous_mask</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Sparse matrix `X` can't have continuous features."</span><span class="grouping">)</span>
+
+    <span class="identifier">rng</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">continuous_mask</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">copy</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">discrete_target</span><span class="punctuation">:</span>
+            <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">continuous_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">continuous_mask</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                          <span class="invalid">w</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">n</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="comment"># Add small noise to continuous features as advised in Kraskov et. al.</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">float</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">_astype_copy_false</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">means</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">continuous_mask</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">continuous_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="float-literal">1e-10</span> <span class="arithmetic-operator">*</span> <span class="identifier">means</span> <span class="arithmetic-operator">*</span> <span class="identifier">rng</span><span class="punctuation">.</span><span class="identifier">randn</span><span class="grouping">(</span>
+                <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">continuous_mask</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">discrete_target</span><span class="punctuation">:</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="invalid">w</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">n</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">+=</span> <span class="float-literal">1e-10</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">rng</span><span class="punctuation">.</span><span class="identifier">randn</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+
+    <span class="identifier">mi</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">_compute_mi</span><span class="grouping">(</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">discrete_feature</span><span class="punctuation">,</span> <span class="identifier">discrete_target</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="grouping">)</span> <span class="keyword">for</span>
+          <span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">discrete_feature</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">_iterate_columns</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">discrete_mask</span><span class="grouping">)</span><span class="grouping">]</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">mi</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mutual_info_regression</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">discrete_features</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span>
+                           <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Estimate mutual information for a continuous target variable.
+
+    Mutual information (MI) [1]_ between two random variables is a non-negative
+    value, which measures the dependency between the variables. It is equal
+    to zero if and only if two random variables are independent, and higher
+    values mean higher dependency.
+
+    The function relies on nonparametric methods based on entropy estimation
+    from k-nearest neighbors distances as described in [2]_ and [3]_. Both
+    methods are based on the idea originally proposed in [4]_.
+
+    It can be used for univariate features selection, read more in the
+    :ref:`User Guide &lt;univariate_feature_selection&gt;`.
+
+    Parameters
+    ----------
+    X : array-like or sparse matrix, shape (n_samples, n_features)
+        Feature matrix.
+
+    y : array-like of shape (n_samples,)
+        Target vector.
+
+    discrete_features : {'auto', bool, array-like}, default='auto'
+        If bool, then determines whether to consider all features discrete
+        or continuous. If array, then it should be either a boolean mask
+        with shape (n_features,) or array with indices of discrete features.
+        If 'auto', it is assigned to False for dense `X` and to True for
+        sparse `X`.
+
+    n_neighbors : int, default=3
+        Number of neighbors to use for MI estimation for continuous variables,
+        see [2]_ and [3]_. Higher values reduce variance of the estimation, but
+        could introduce a bias.
+
+    copy : bool, default=True
+        Whether to make a copy of the given data. If set to False, the initial
+        data will be overwritten.
+
+    random_state : int, RandomState instance or None, default=None
+        Determines random number generation for adding small noise to
+        continuous variables in order to remove repeated values.
+        Pass an int for reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Returns
+    -------
+    mi : ndarray, shape (n_features,)
+        Estimated mutual information between each feature and the target.
+
+    Notes
+    -----
+    1. The term "discrete features" is used instead of naming them
+       "categorical", because it describes the essence more accurately.
+       For example, pixel intensities of an image are discrete features
+       (but hardly categorical) and you will get better results if mark them
+       as such. Also note, that treating a continuous variable as discrete and
+       vice versa will usually give incorrect results, so be attentive about
+       that.
+    2. True mutual information can't be negative. If its estimate turns out
+       to be negative, it is replaced by zero.
+
+    References
+    ----------
+    .. [1] `Mutual Information
+           &lt;https://en.wikipedia.org/wiki/Mutual_information&gt;`_
+           on Wikipedia.
+    .. [2] A. Kraskov, H. Stogbauer and P. Grassberger, "Estimating mutual
+           information". Phys. Rev. E 69, 2004.
+    .. [3] B. C. Ross "Mutual Information between Discrete and Continuous
+           Data Sets". PLoS ONE 9(2), 2014.
+    .. [4] L. F. Kozachenko, N. N. Leonenko, "Sample Estimate of the Entropy
+           of a Random Vector", Probl. Peredachi Inf., 23:2 (1987), 9-16
+    """</span>
+    <span class="keyword">return</span> <span class="identifier">_estimate_mi</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">discrete_features</span><span class="punctuation">,</span> <span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                        <span class="identifier">copy</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">mutual_info_classif</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">discrete_features</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span>
+                        <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Estimate mutual information for a discrete target variable.
+
+    Mutual information (MI) [1]_ between two random variables is a non-negative
+    value, which measures the dependency between the variables. It is equal
+    to zero if and only if two random variables are independent, and higher
+    values mean higher dependency.
+
+    The function relies on nonparametric methods based on entropy estimation
+    from k-nearest neighbors distances as described in [2]_ and [3]_. Both
+    methods are based on the idea originally proposed in [4]_.
+
+    It can be used for univariate features selection, read more in the
+    :ref:`User Guide &lt;univariate_feature_selection&gt;`.
+
+    Parameters
+    ----------
+    X : array-like or sparse matrix, shape (n_samples, n_features)
+        Feature matrix.
+
+    y : array-like of shape (n_samples,)
+        Target vector.
+
+    discrete_features : {'auto', bool, array-like}, default='auto'
+        If bool, then determines whether to consider all features discrete
+        or continuous. If array, then it should be either a boolean mask
+        with shape (n_features,) or array with indices of discrete features.
+        If 'auto', it is assigned to False for dense `X` and to True for
+        sparse `X`.
+
+    n_neighbors : int, default=3
+        Number of neighbors to use for MI estimation for continuous variables,
+        see [2]_ and [3]_. Higher values reduce variance of the estimation, but
+        could introduce a bias.
+
+    copy : bool, default=True
+        Whether to make a copy of the given data. If set to False, the initial
+        data will be overwritten.
+
+    random_state : int, RandomState instance or None, default=None
+        Determines random number generation for adding small noise to
+        continuous variables in order to remove repeated values.
+        Pass an int for reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Returns
+    -------
+    mi : ndarray, shape (n_features,)
+        Estimated mutual information between each feature and the target.
+
+    Notes
+    -----
+    1. The term "discrete features" is used instead of naming them
+       "categorical", because it describes the essence more accurately.
+       For example, pixel intensities of an image are discrete features
+       (but hardly categorical) and you will get better results if mark them
+       as such. Also note, that treating a continuous variable as discrete and
+       vice versa will usually give incorrect results, so be attentive about
+       that.
+    2. True mutual information can't be negative. If its estimate turns out
+       to be negative, it is replaced by zero.
+
+    References
+    ----------
+    .. [1] `Mutual Information
+           &lt;https://en.wikipedia.org/wiki/Mutual_information&gt;`_
+           on Wikipedia.
+    .. [2] A. Kraskov, H. Stogbauer and P. Grassberger, "Estimating mutual
+           information". Phys. Rev. E 69, 2004.
+    .. [3] B. C. Ross "Mutual Information between Discrete and Continuous
+           Data Sets". PLoS ONE 9(2), 2014.
+    .. [4] L. F. Kozachenko, N. N. Leonenko, "Sample Estimate of the Entropy
+           of a Random Vector:, Probl. Peredachi Inf., 23:2 (1987), 9-16
+    """</span>
+    <span class="identifier">check_classification_targets</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">_estimate_mi</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">discrete_features</span><span class="punctuation">,</span> <span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                        <span class="identifier">copy</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,430 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Media items (Alignments, Faces, Frames)
+    for alignments tool """</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+<span class="keyword">import</span> <span class="identifier">sys</span>
+
+<span class="keyword">import</span> <span class="identifier">cv2</span>
+<span class="keyword">from</span> <span class="identifier">tqdm</span> <span class="keyword">import</span> <span class="identifier">tqdm</span>
+
+<span class="comment"># TODO imageio single frame seek seems slow. Look into this</span>
+<span class="comment"># import imageio</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">align</span> <span class="keyword">import</span> <span class="identifier">Alignments</span><span class="punctuation">,</span> <span class="identifier">DetectedFace</span><span class="punctuation">,</span> <span class="identifier">update_legacy_png_header</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">image</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">count_frames</span><span class="punctuation">,</span> <span class="identifier">generate_thumbnail</span><span class="punctuation">,</span> <span class="identifier">ImagesLoader</span><span class="punctuation">,</span>
+                       <span class="identifier">png_write_meta</span><span class="punctuation">,</span> <span class="identifier">read_image</span><span class="punctuation">,</span> <span class="identifier">read_image_meta_batch</span><span class="grouping">)</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">_image_extensions</span><span class="punctuation">,</span> <span class="identifier">_video_extensions</span><span class="punctuation">,</span> <span class="identifier">FaceswapError</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+
+<span class="keyword">class</span> <span class="identifier">AlignmentData</span><span class="grouping">(</span><span class="identifier">Alignments</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Class to hold the alignment data """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">alignments_file</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (alignments file: '%s')"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">alignments_file</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"[ALIGNMENT DATA]"</span><span class="grouping">)</span>  <span class="comment"># Tidy up cli output</span>
+        <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">check_file_exists</span><span class="grouping">(</span><span class="identifier">alignments_file</span><span class="grouping">)</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"%s items loaded"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">frames_count</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">check_file_exists</span><span class="grouping">(</span><span class="identifier">alignments_file</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check the alignments file exists"""</span>
+        <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="identifier">alignments_file</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">isfile</span><span class="grouping">(</span><span class="identifier">alignments_file</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">error</span><span class="grouping">(</span><span class="string-literal">"ERROR: alignments file not found at: '%s'"</span><span class="punctuation">,</span> <span class="identifier">alignments_file</span><span class="grouping">)</span>
+            <span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">exit</span><span class="grouping">(</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">folder</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Alignments file exists at '%s'"</span><span class="punctuation">,</span> <span class="identifier">alignments_file</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span>
+
+    <span class="keyword">def</span> <span class="identifier">save</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Backup copy of old alignments and save new alignments """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">backup</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">save</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">reload</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Read the alignments data from the correct format """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Re-loading alignments"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_load</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Re-loaded alignments"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">set_filename</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the :attr:`_file` to the given filename.
+
+        Parameters
+        ----------
+        filename: str
+            The full path and filename to set the alignments file name to
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filename</span>
+
+
+<span class="keyword">class</span> <span class="identifier">MediaLoader</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Class to load images.
+
+    Parameters
+    ----------
+    folder: str
+        The folder of images or video file to load images from
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (folder: '%s')"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"[%s DATA]"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">.</span><span class="identifier">upper</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">folder</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vid_reader</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">check_input_folder</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">file_list_sorted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sorted_items</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">items</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">load_items</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"%s items loaded"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">count</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">is_video</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return whether source is a video or not """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vid_reader</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">count</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Number of faces or frames """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">count_frames</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">file_list_sorted</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_count</span>
+
+    <span class="keyword">def</span> <span class="identifier">check_input_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" makes sure that the frames or faces folder exists
+            If frames folder contains a video file return imageio reader object """</span>
+        <span class="identifier">err</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">loadtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="punctuation">:</span>
+            <span class="identifier">err</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"ERROR: A {} folder must be specified"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">loadtype</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">err</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"ERROR: The {} location {} could not be "</span>
+                   <span class="string-literal">"found"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">loadtype</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">err</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">error</span><span class="grouping">(</span><span class="identifier">err</span><span class="grouping">)</span>
+            <span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">exit</span><span class="grouping">(</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">loadtype</span> <span class="relational-operator">==</span> <span class="string-literal">"Frames"</span> <span class="logical-operator">and</span>
+                <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">isfile</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span> <span class="logical-operator">and</span>
+                <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">_video_extensions</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Video exists at: '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">VideoCapture</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=no-member</span>
+            <span class="comment"># TODO ImageIO single frame seek seems slow. Look into this</span>
+            <span class="comment"># retval = imageio.get_reader(self.folder, "ffmpeg")</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">verbose</span><span class="grouping">(</span><span class="string-literal">"Folder exists at '%s'"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">valid_extension</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Check whether passed in file has a valid extension """</span>
+        <span class="identifier">extension</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">extension</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">_image_extensions</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Filename has valid extension: '%s': %s"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">sorted_items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Override for specific folder processing """</span>
+        <span class="keyword">return</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">process_folder</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Override for specific folder processing """</span>
+        <span class="keyword">return</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">load_items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Override for specific item loading """</span>
+        <span class="keyword">return</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">load_image</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load an image """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_video</span><span class="punctuation">:</span>
+            <span class="identifier">image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">load_video_frame</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">src</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Loading image: '%s'"</span><span class="punctuation">,</span> <span class="identifier">src</span><span class="grouping">)</span>
+            <span class="identifier">image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">read_image</span><span class="grouping">(</span><span class="identifier">src</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">a</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">image</span>
+
+    <span class="keyword">def</span> <span class="identifier">load_video_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load a requested frame from video """</span>
+        <span class="identifier">frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Loading video frame: '%s'"</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="grouping">)</span>
+        <span class="identifier">frame_no</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">[</span><span class="identifier">frame</span><span class="punctuation">.</span><span class="identifier">rfind</span><span class="grouping">(</span><span class="string-literal">"_"</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vid_reader</span><span class="punctuation">.</span><span class="identifier">set</span><span class="grouping">(</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">CAP_PROP_POS_FRAMES</span><span class="punctuation">,</span> <span class="identifier">frame_no</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=no-member</span>
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vid_reader</span><span class="punctuation">.</span><span class="identifier">read</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="comment"># TODO imageio single frame seek seems slow. Look into this</span>
+        <span class="comment"># self.vid_reader.set_image_index(frame_no)</span>
+        <span class="comment"># image = self.vid_reader.get_next_data()[:, :, ::-1]</span>
+        <span class="keyword">return</span> <span class="identifier">image</span>
+
+    <span class="keyword">def</span> <span class="identifier">stream</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">skip_list</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the images in :attr:`folder` in the order they are received from
+        :class:`lib.image.ImagesLoader` in a background thread.
+
+        Parameters
+        ----------
+        skip_list: list, optional
+            A list of frame indices that should not be loaded. Pass ``None`` if all images should
+            be loaded. Default: ``None``
+
+        Yields
+        ------
+        str
+            The filename of the image that is being returned
+        numpy.ndarray
+            The image that has been loaded from disk
+        """</span>
+        <span class="identifier">loader</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ImagesLoader</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">queue_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">32</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">skip_list</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">loader</span><span class="punctuation">.</span><span class="identifier">add_skip_list</span><span class="grouping">(</span><span class="identifier">skip_list</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span> <span class="relational-operator">in</span> <span class="identifier">loader</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">yield</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">save_image</span><span class="grouping">(</span><span class="identifier">output_folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="punctuation">,</span> <span class="identifier">metadata</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Save an image """</span>
+        <span class="identifier">output_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">output_folder</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">output_file</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">output_file</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="string-literal">".png"</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Saving image: '%s'"</span><span class="punctuation">,</span> <span class="identifier">output_file</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">metadata</span><span class="punctuation">:</span>
+            <span class="identifier">encoded_image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">imencode</span><span class="grouping">(</span><span class="string-literal">".png"</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="identifier">encoded_image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">png_write_meta</span><span class="grouping">(</span><span class="identifier">encoded_image</span><span class="punctuation">.</span><span class="identifier">tobytes</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">metadata</span><span class="grouping">)</span>
+            <span class="keyword">with</span> <span class="identifier">open</span><span class="grouping">(</span><span class="identifier">output_file</span><span class="punctuation">,</span> <span class="string-literal">"wb"</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">out_file</span><span class="punctuation">:</span>
+                <span class="identifier">out_file</span><span class="punctuation">.</span><span class="identifier">write</span><span class="grouping">(</span><span class="identifier">encoded_image</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">imwrite</span><span class="grouping">(</span><span class="identifier">output_file</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=no-member</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Faces</span><span class="grouping">(</span><span class="identifier">MediaLoader</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Object to load Extracted Faces from a folder.
+
+    Parameters
+    ----------
+    folder: str
+        The folder to load faces from
+    alignments: :class:`lib.align.Alignments`, optional
+        The alignments object that contains the faces. Used to update legacy hash based faces
+        for &lt;v2.1 alignments to png header based version. Pass in ``None`` to not update legacy
+        faces (raises error instead). Default: ``None``
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignments</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">folder</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">process_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Iterate through the faces folder pulling out various information for each face.
+
+        Yields
+        ------
+        dict
+            A dictionary for each face found containing the keys returned from
+            :class:`lib.image.read_image_meta_batch`
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Loading file list from %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>  <span class="comment"># Legacy updating</span>
+            <span class="identifier">filelist</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="grouping">)</span>
+                        <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">listdir</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>
+                        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">valid_extension</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">filelist</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">face</span><span class="grouping">)</span>
+                        <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">listdir</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>
+                        <span class="keyword">if</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">)</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="string-literal">".png"</span><span class="grouping">]</span>
+
+        <span class="identifier">log_once</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">for</span> <span class="identifier">fullpath</span><span class="punctuation">,</span> <span class="identifier">metadata</span> <span class="relational-operator">in</span> <span class="identifier">tqdm</span><span class="grouping">(</span><span class="identifier">read_image_meta_batch</span><span class="grouping">(</span><span class="identifier">filelist</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">total</span><span class="arithmetic-assignment">=</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">filelist</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                       <span class="identifier">desc</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Reading Face Data"</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+            <span class="keyword">if</span> <span class="string-literal">"itxt" not in metadata or "source" not in metadata["itxt"</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>  <span class="comment"># Can't update legacy</span>
+                    <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span>
+                        <span class="identifier">f</span><span class="string-literal">"The folder '{self.folder}' contains images that do not include Faceswap "</span>
+                        <span class="string-literal">"metadata.\nAll images in the provided folder should contain faces "</span>
+                        <span class="string-literal">"generated from Faceswap's extraction process.\nPlease double check the "</span>
+                        <span class="string-literal">"source and try again."</span><span class="grouping">)</span>
+
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">log_once</span><span class="punctuation">:</span>
+                    <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">warning</span><span class="grouping">(</span><span class="string-literal">"Legacy faces discovered. These faces will be updated"</span><span class="grouping">)</span>
+                    <span class="identifier">log_once</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+                <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">update_legacy_png_header</span><span class="grouping">(</span><span class="identifier">fullpath</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">data</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span>
+                        <span class="string-literal">"Some of the faces being passed in from '{}' could not be matched to the "</span>
+                        <span class="string-literal">"alignments file '{}'\nPlease double check your sources and try "</span>
+                        <span class="string-literal">"again."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_alignments</span><span class="punctuation">.</span><span class="identifier">file</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="string-literal">"source"</span><span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">metadata</span><span class="grouping">[</span><span class="string-literal">"itxt"]["source"</span><span class="grouping">]</span>
+
+            <span class="identifier">retval</span><span class="grouping">[</span><span class="string-literal">"current_filename"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">fullpath</span><span class="grouping">)</span>
+            <span class="keyword">yield</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">load_items</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the face names into dictionary.
+
+        Returns
+        -------
+        dict
+            The source filename as key with list of face indices for the frame as value
+        """</span>
+        <span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">file_list_sorted</span><span class="punctuation">:</span>
+            <span class="identifier">faces</span><span class="punctuation">.</span><span class="identifier">setdefault</span><span class="grouping">(</span><span class="identifier">face</span><span class="grouping">[</span><span class="string-literal">"source_filename"], list()).append(face["face_index"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">faces</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">faces</span>
+
+    <span class="keyword">def</span> <span class="identifier">sorted_items</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the items sorted by the saved file name.
+
+        Returns
+        --------
+        list
+            List of `dict` objects for each face found, sorted by the face's current filename
+        """</span>
+        <span class="identifier">items</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">process_folder</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">key</span><span class="arithmetic-assignment">=</span><span class="keyword">lambda</span> <span class="identifier">x</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="identifier">x</span><span class="grouping">[</span><span class="string-literal">"current_filename"</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">items</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">items</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Frames</span><span class="grouping">(</span><span class="identifier">MediaLoader</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Object to hold the frames that are to be checked against """</span>
+
+    <span class="keyword">def</span> <span class="identifier">process_folder</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Iterate through the frames folder pulling the base filename """</span>
+        <span class="identifier">iterator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">process_video</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">is_video</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">process_frames</span>
+        <span class="keyword">for</span> <span class="identifier">item</span> <span class="relational-operator">in</span> <span class="identifier">iterator</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">yield</span> <span class="identifier">item</span>
+
+    <span class="keyword">def</span> <span class="identifier">process_frames</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Process exported Frames """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Loading file list from %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">frame</span> <span class="relational-operator">in</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">listdir</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">valid_extension</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">continue</span>
+            <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">file_extension</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">"frame_fullname"</span><span class="punctuation">:</span> <span class="identifier">frame</span><span class="punctuation">,</span>
+                      <span class="string-literal">"frame_name"</span><span class="punctuation">:</span> <span class="identifier">filename</span><span class="punctuation">,</span>
+                      <span class="string-literal">"frame_extension"</span><span class="punctuation">:</span> <span class="identifier">file_extension</span><span class="grouping">}</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+            <span class="keyword">yield</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">process_video</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Dummy in frames for video """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">"Loading video frames from %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span>
+        <span class="identifier">vidname</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">basename</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">folder</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">count</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+            <span class="comment"># Keep filename format for outputted face</span>
+            <span class="identifier">filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}_{:06d}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">vidname</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="grouping">)</span>
+            <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">"frame_fullname": "{}.png"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="string-literal">"frame_name"</span><span class="punctuation">:</span> <span class="identifier">filename</span><span class="punctuation">,</span>
+                      <span class="string-literal">"frame_extension": ".png"</span><span class="grouping">}</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+            <span class="keyword">yield</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">load_items</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Load the frame info into dictionary """</span>
+        <span class="identifier">frames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">frame</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">file_list_sorted</span><span class="punctuation">:</span>
+            <span class="identifier">frames</span><span class="grouping">[</span><span class="identifier">frame</span><span class="grouping">[</span><span class="string-literal">"frame_fullname"]] = (frame["frame_name"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                               <span class="identifier">frame</span><span class="grouping">[</span><span class="string-literal">"frame_extension"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">frames</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">frames</span>
+
+    <span class="keyword">def</span> <span class="identifier">sorted_items</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the items sorted by filename """</span>
+        <span class="identifier">items</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sorted</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">process_folder</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">key</span><span class="arithmetic-assignment">=</span><span class="keyword">lambda</span> <span class="identifier">x</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="identifier">x</span><span class="grouping">[</span><span class="string-literal">"frame_name"</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">items</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">items</span>
+
+
+<span class="keyword">class</span> <span class="identifier">ExtractedFaces</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Holds the extracted faces and matrix for
+        alignments """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frames</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">512</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: size: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">padding</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">size</span> <span class="arithmetic-operator">*</span> <span class="float-literal">0.1875</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignments</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">frames</span> <span class="arithmetic-assignment">=</span> <span class="identifier">frames</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">current_frame</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_faces</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return faces and transformed landmarks
+            for each face in a given frame with it's alignments"""</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Getting faces for frame: '%s'"</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">current_frame</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">alignments</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alignments</span><span class="punctuation">.</span><span class="identifier">get_faces_in_frame</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Alignments for frame: (frame: '%s', alignments: %s)"</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">alignments</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">return</span>
+        <span class="identifier">image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">frames</span><span class="punctuation">.</span><span class="identifier">load_image</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">image</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">image</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">faces</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">extract_one_face</span><span class="grouping">(</span><span class="identifier">alignment</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">alignment</span> <span class="relational-operator">in</span> <span class="identifier">alignments</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">current_frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">frame</span>
+
+    <span class="keyword">def</span> <span class="identifier">extract_one_face</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">alignment</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Extract one face from image """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Extracting one face: (frame: '%s', alignment: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">current_frame</span><span class="punctuation">,</span> <span class="identifier">alignment</span><span class="grouping">)</span>
+        <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">alignment</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">image</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">load_aligned</span><span class="grouping">(</span><span class="identifier">image</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"head"</span><span class="grouping">)</span>
+        <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">thumbnail</span> <span class="arithmetic-assignment">=</span> <span class="identifier">generate_thumbnail</span><span class="grouping">(</span><span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">aligned</span><span class="punctuation">.</span><span class="identifier">face</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">80</span><span class="punctuation">,</span> <span class="identifier">quality</span><span class="arithmetic-assignment">=</span><span class="int-literal">60</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">face</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_faces_in_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">update</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the faces for the selected frame """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"frame: '%s', update: %s"</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">update</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">current_frame</span> <span class="relational-operator">!=</span> <span class="identifier">frame</span> <span class="logical-operator">or</span> <span class="identifier">update</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">get_faces</span><span class="grouping">(</span><span class="identifier">frame</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">image</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">faces</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_roi_size_for_frame</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the size of the original extract box for
+            the selected frame """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"frame: '%s'"</span><span class="punctuation">,</span> <span class="identifier">frame</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">current_frame</span> <span class="relational-operator">!=</span> <span class="identifier">frame</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">get_faces</span><span class="grouping">(</span><span class="identifier">frame</span><span class="grouping">)</span>
+        <span class="identifier">sizes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">face</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">faces</span><span class="punctuation">:</span>
+            <span class="identifier">roi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">aligned</span><span class="punctuation">.</span><span class="identifier">original_roi</span><span class="punctuation">.</span><span class="identifier">squeeze</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">top_left</span><span class="punctuation">,</span> <span class="identifier">top_right</span> <span class="arithmetic-assignment">=</span> <span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span>
+            <span class="identifier">len_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">top_right</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">top_left</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">len_y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">top_right</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">top_left</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">top_left</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">top_right</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="identifier">length</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len_y</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">length</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">len_x</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">len_y</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">**</span> <span class="float-literal">0.5</span><span class="grouping">)</span>
+            <span class="identifier">sizes</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">length</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"sizes: '%s'"</span><span class="punctuation">,</span> <span class="identifier">sizes</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">sizes</span>
+
+    </pre>
+  </body>
+</html>

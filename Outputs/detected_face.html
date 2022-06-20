@@ -1,0 +1,958 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin python3</span>
+<span class="comment">""" Face and landmarks detection for faceswap.py """</span>
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">os</span>
+
+<span class="keyword">from</span> <span class="identifier">hashlib</span> <span class="keyword">import</span> <span class="identifier">sha1</span>
+<span class="keyword">from</span> <span class="identifier">zlib</span> <span class="keyword">import</span> <span class="identifier">compress</span><span class="punctuation">,</span> <span class="identifier">decompress</span>
+
+<span class="keyword">import</span> <span class="identifier">cv2</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">image</span> <span class="keyword">import</span> <span class="identifier">encode_image</span><span class="punctuation">,</span> <span class="identifier">read_image</span>
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">FaceswapError</span>
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">AlignedFace</span><span class="punctuation">,</span> <span class="identifier">_EXTRACT_RATIOS</span><span class="punctuation">,</span> <span class="identifier">get_centered_size</span>
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>  <span class="comment"># pylint: disable=invalid-name</span>
+
+
+<span class="keyword">class</span> <span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Detected face and landmark information
+
+    Holds information about a detected face, it's location in a source image
+    and the face's 68 point landmarks.
+
+    Methods for aligning a face are also callable from here.
+
+    Parameters
+    ----------
+    image: numpy.ndarray, optional
+        Original frame that holds this face. Optional (not required if just storing coordinates)
+    x: int
+        The left most point (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    w: int
+        The width (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    y: int
+        The top most point (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    h: int
+        The height (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    landmarks_xy: list
+        The 68 point landmarks as discovered in :mod:`plugins.extract.align`. Should be a ``list``
+        of 68 `(x, y)` ``tuples`` with each of the landmark co-ordinates.
+    mask: dict
+        The generated mask(s) for the face as generated in :mod:`plugins.extract.mask`. Must be a
+        dict of {**name** (`str`): :class:`Mask`}.
+
+    Attributes
+    ----------
+    image: numpy.ndarray, optional
+        This is a generic image placeholder that should not be relied on to be holding a particular
+        image. It may hold the source frame that holds the face, a cropped face or a scaled image
+        depending on the method using this object.
+    x: int
+        The left most point (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    w: int
+        The width (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    y: int
+        The top most point (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    h: int
+        The height (in pixels) of the face's bounding box as discovered in
+        :mod:`plugins.extract.detect`
+    landmarks_xy: list
+        The 68 point landmarks as discovered in :mod:`plugins.extract.align`.
+    mask: dict
+        The generated mask(s) for the face as generated in :mod:`plugins.extract.mask`. Is a
+        dict of {**name** (`str`): :class:`Mask`}.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">w</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">h</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">landmarks_xy</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (image: %s, x: %s, w: %s, y: %s, h:%s, landmarks_xy: %s, "</span>
+                     <span class="string-literal">"mask: %s, filename: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span>
+                     <span class="identifier">image</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">if</span> <span class="identifier">image</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">image</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">image</span><span class="punctuation">,</span>
+                     <span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">w</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">h</span><span class="punctuation">,</span> <span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                     <span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">mask</span><span class="grouping">}</span> <span class="keyword">if</span> <span class="identifier">mask</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">mask</span><span class="punctuation">,</span>
+                     <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">image</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">x</span>  <span class="comment"># pylint:disable=invalid-name</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span> <span class="arithmetic-assignment">=</span> <span class="identifier">w</span>  <span class="comment"># pylint:disable=invalid-name</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span>  <span class="comment"># pylint:disable=invalid-name</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span> <span class="arithmetic-assignment">=</span> <span class="identifier">h</span>  <span class="comment"># pylint:disable=invalid-name</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">landmarks_xy</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">thumbnail</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">mask</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">mask</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">left</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""int: Left point (in pixels) of face detection bounding box within the parent image """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">top</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""int: Top point (in pixels) of face detection bounding box within the parent image """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">right</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""int: Right point (in pixels) of face detection bounding box within the parent image """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">bottom</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""int: Bottom point (in pixels) of face detection bounding box within the parent image """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span>
+
+    <span class="keyword">def</span> <span class="identifier">add_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">affine_matrix</span><span class="punctuation">,</span> <span class="identifier">interpolator</span><span class="punctuation">,</span>
+                 <span class="identifier">storage_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">128</span><span class="punctuation">,</span> <span class="identifier">storage_centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"face"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a :class:`Mask` to this detected face
+
+        The mask should be the original output from  :mod:`plugins.extract.mask`
+        If a mask with this name already exists it will be overwritten by the given
+        mask.
+
+        Parameters
+        ----------
+        name: str
+            The name of the mask as defined by the :attr:`plugins.extract.mask._base.name`
+            parameter.
+        mask: numpy.ndarray
+            The mask that is to be added as output from :mod:`plugins.extract.mask`
+            It should be in the range 0.0 - 1.0 ideally with a ``dtype`` of ``float32``
+        affine_matrix: numpy.ndarray
+            The transformation matrix required to transform the mask to the original frame.
+        interpolator, int:
+            The CV2 interpolator required to transform this mask to it's original frame.
+        storage_size, int (optional):
+            The size the mask is to be stored at. Default: 128
+        storage_centering, str (optional):
+            The centering to store the mask at. One of `"legacy"`, `"face"`, `"head"`.
+            Default: `"face"`
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"name: '%s', mask shape: %s, affine_matrix: %s, interpolator: %s, "</span>
+                     <span class="string-literal">"storage_size: %s, storage_centering: %s)"</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">affine_matrix</span><span class="punctuation">,</span>
+                     <span class="identifier">interpolator</span><span class="punctuation">,</span> <span class="identifier">storage_size</span><span class="punctuation">,</span> <span class="identifier">storage_centering</span><span class="grouping">)</span>
+        <span class="identifier">fsmask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Mask</span><span class="grouping">(</span><span class="identifier">storage_size</span><span class="arithmetic-assignment">=</span><span class="identifier">storage_size</span><span class="punctuation">,</span> <span class="identifier">storage_centering</span><span class="arithmetic-assignment">=</span><span class="identifier">storage_centering</span><span class="grouping">)</span>
+        <span class="identifier">fsmask</span><span class="punctuation">.</span><span class="identifier">add</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">affine_matrix</span><span class="punctuation">,</span> <span class="identifier">interpolator</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fsmask</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_landmark_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">area</span><span class="punctuation">,</span>
+                          <span class="identifier">aligned</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"face"</span><span class="punctuation">,</span> <span class="identifier">dilation</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">blur_kernel</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain a single channel mask based on the face's landmark points.
+
+        Parameters
+        ----------
+        size: int or tuple
+            The size of the aligned mask to retrieve. Should be an `int` if an aligned face is
+            being requested, or a ('height', 'width') shape tuple if a full frame is being
+            requested
+        area: ["mouth", "eyes"]
+            The type of mask to obtain. `face` is a full face mask the others are masks for those
+            specific areas
+        aligned: bool, optional
+            ``True`` if the returned mask should be for an aligned face. ``False`` if a full frame
+            mask should be returned. Default ``True``
+        centering: ["legacy", "face", "head"], optional
+            Only used if `aligned`=``True``. The centering for the landmarks based mask. Should be
+            the same as the centering used for the extracted face that this mask will be applied
+            to. "legacy" places the nose in the center of the image (the original method for
+            aligning). "face" aligns for the nose to be in the center of the face (top to bottom)
+            but the center of the skull for left to right. "head" aligns for the center of the
+            skull (in 3D space) being the center of the extracted image, with the crop holding the
+            full head. Default: `"face"`
+        dilation: int, optional
+            The amount of dilation to apply to the mask. `0` for none. Default: `0`
+        blur_kernel: int, optional
+            The kernel size for applying gaussian blur to apply to the mask. `0` for none.
+            Default: `0`
+        as_zip: bool, optional
+            ``True`` if the mask should be returned zipped otherwise ``False``
+
+        Returns
+        -------
+        :class:`numpy.ndarray` or zipped array
+            The mask as a single channel image of the given :attr:`size` dimension. If
+            :attr:`as_zip` is ``True`` then the :class:`numpy.ndarray` will be contained within a
+            zipped container
+        """</span>
+        <span class="comment"># TODO Face mask generation from landmarks</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"size: %s, area: %s, aligned: %s, dilation: %s, blur_kernel: %s, as_zip: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">area</span><span class="punctuation">,</span> <span class="identifier">aligned</span><span class="punctuation">,</span> <span class="identifier">dilation</span><span class="punctuation">,</span> <span class="identifier">blur_kernel</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span><span class="grouping">)</span>
+        <span class="identifier">areas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">mouth</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">slice</span><span class="grouping">(</span><span class="int-literal">48</span><span class="punctuation">,</span> <span class="int-literal">60</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">eyes</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">slice</span><span class="grouping">(</span><span class="int-literal">36</span><span class="punctuation">,</span> <span class="int-literal">42</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">slice</span><span class="grouping">(</span><span class="int-literal">42</span><span class="punctuation">,</span> <span class="int-literal">48</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">aligned</span><span class="punctuation">:</span>
+            <span class="identifier">face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span> <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="identifier">centering</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">size</span><span class="grouping">)</span>
+            <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">face</span><span class="punctuation">.</span><span class="identifier">landmarks</span>
+            <span class="identifier">size</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span>
+        <span class="identifier">points</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">landmarks</span><span class="grouping">[</span><span class="identifier">zone</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">zone</span> <span class="relational-operator">in</span> <span class="identifier">areas</span><span class="grouping">[</span><span class="identifier">area</span><span class="grouping">]</span><span class="grouping">]</span>  <span class="comment"># pylint:disable=unsubscriptable-object</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_LandmarksMask</span><span class="grouping">(</span><span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">points</span><span class="punctuation">,</span> <span class="identifier">dilation</span><span class="arithmetic-assignment">=</span><span class="identifier">dilation</span><span class="punctuation">,</span> <span class="identifier">blur_kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">blur_kernel</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span><span class="arithmetic-assignment">=</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">to_alignment</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""  Return the detected face formatted for an alignments file
+
+        returns
+        -------
+        alignment: dict
+            The alignment dict will be returned with the keys ``x``, ``w``, ``y``, ``h``,
+            ``landmarks_xy``, ``mask``. The additional key ``thumb`` will be provided if the
+            detected face object contains a thumbnail.
+        """</span>
+        <span class="identifier">alignment</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span>
+                         <span class="identifier">w</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span><span class="punctuation">,</span>
+                         <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span><span class="punctuation">,</span>
+                         <span class="identifier">h</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span><span class="punctuation">,</span>
+                         <span class="identifier">landmarks_xy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                         <span class="identifier">mask</span><span class="arithmetic-assignment">=</span><span class="grouping">{</span><span class="identifier">name</span><span class="punctuation">:</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">to_dict</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">mask</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">thumbnail</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"thumb"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">thumbnail</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Returning: %s"</span><span class="punctuation">,</span> <span class="identifier">alignment</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">alignment</span>
+
+    <span class="keyword">def</span> <span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">alignment</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="invalid">w</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">b</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the attributes of this class from an alignments file and optionally load the face
+        into the ``image`` attribute.
+
+        Parameters
+        ----------
+        alignment: dict
+            A dictionary entry for a face from an alignments file containing the keys
+            ``x``, ``w``, ``y``, ``h``, ``landmarks_xy``.
+            Optionally the key ``thumb`` will be provided. This is for use in the manual tool and
+            contains the compressed jpg thumbnail of the face to be allocated to :attr:`thumbnail.
+            Optionally the key ``mask`` will be provided, but legacy alignments will not have
+            this key.
+        image: numpy.ndarray, optional
+            If an image is passed in, then the ``image`` attribute will
+            be set to the cropped face based on the passed in bounding box co-ordinates
+        with_thumb: bool, optional
+            Whether to load the jpg thumbnail into the detected face object, if provided.
+            Default: ``False``
+        """</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Creating from alignment: (alignment: %s, has_image: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">alignment</span><span class="punctuation">,</span> <span class="identifier">bool</span><span class="grouping">(</span><span class="identifier">image</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"x"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"w"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"y"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"h"</span><span class="grouping">]</span>
+        <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"landmarks_xy"</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">landmarks</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">landmarks</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">landmarks</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float32"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">landmarks</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="invalid">w</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">b</span><span class="punctuation">:</span>
+            <span class="comment"># Thumbnails currently only used for manual tool. Default to None</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">thumbnail</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"thumb"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="comment"># Manual tool and legacy alignments will not have a mask</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="keyword">if</span> <span class="identifier">alignment</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"mask"</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">mask_dict</span> <span class="relational-operator">in</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"mask"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Mask</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">c</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">mask_dict</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">image</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">image</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_image_to_face</span><span class="grouping">(</span><span class="identifier">image</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Created from alignment: (x: %s, w: %s, y: %s. h: %s, "</span>
+                     <span class="string-literal">"landmarks: %s, mask: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">to_png_meta</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the detected face formatted for insertion into a png itxt header.
+
+        returns: dict
+            The alignments dict will be returned with the keys ``x``, ``w``, ``y``, ``h``,
+            ``landmarks_xy`` and ``mask``
+        """</span>
+        <span class="identifier">alignment</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">x</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span>
+                         <span class="identifier">w</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span><span class="punctuation">,</span>
+                         <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span><span class="punctuation">,</span>
+                         <span class="identifier">h</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span><span class="punctuation">,</span>
+                         <span class="identifier">landmarks_xy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">.</span><span class="identifier">tolist</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                         <span class="identifier">mask</span><span class="arithmetic-assignment">=</span><span class="grouping">{</span><span class="identifier">name</span><span class="punctuation">:</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">to_png_meta</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">mask</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">alignment</span>
+
+    <span class="keyword">def</span> <span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">p</span><span class="invalid">n</span><span class="invalid">g</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">a</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">alignment</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the attributes of this class from alignments stored in a png exif header.
+
+        Parameters
+        ----------
+        alignment: dict
+            A dictionary entry for a face from alignments stored in a png exif header containing
+            the keys ``x``, ``w``, ``y``, ``h``, ``landmarks_xy`` and ``mask``
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"x"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"w"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"y"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"h"</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"landmarks_xy"], dtype="float32"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">mask_dict</span> <span class="relational-operator">in</span> <span class="identifier">alignment</span><span class="grouping">[</span><span class="string-literal">"mask"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Mask</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">c</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">mask_dict</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Created from png exif header: (x: %s, w: %s, y: %s. h: %s, landmarks: %s, "</span>
+                     <span class="string-literal">"mask: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">w</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">h</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_image_to_face</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" set self.image to be the cropped face from detected bounding box """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Cropping face from image"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">image</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">top</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bottom</span><span class="punctuation">,</span>
+                           <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">left</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">right</span><span class="grouping">]</span>
+
+    <span class="comment"># &lt;&lt;&lt; Aligned Face methods and properties &gt;&gt;&gt; #</span>
+    <span class="keyword">def</span> <span class="identifier">load_aligned</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">image</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="int-literal">256</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"head"</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Align a face from a given image.
+
+        Aligning a face is a relatively expensive task and is not required for all uses of
+        the :class:`~lib.align.DetectedFace` object, so call this function explicitly to
+        load an aligned face.
+
+        This method plugs into :mod:`lib.align.AlignedFace` to perform face alignment based on this
+        face's ``landmarks_xy``. If the face has already been aligned, then this function will
+        return having performed no action.
+
+        Parameters
+        ----------
+        image: numpy.ndarray
+            The image that contains the face to be aligned
+        size: int
+            The size of the output face in pixels
+        dtype: str, optional
+            Optionally set a ``dtype`` for the final face to be formatted in. Default: ``None``
+        centering: ["legacy", "face", "head"], optional
+            The type of extracted face that should be loaded. "legacy" places the nose in the
+            center of the image (the original method for aligning). "face" aligns for the nose to
+            be in the center of the face (top to bottom) but the center of the skull for left to
+            right. "head" aligns for the center of the skull (in 3D space) being the center of the
+            extracted image, with the crop holding the full head.
+            Default: `"head"`
+        force: bool, optional
+            Force an update of the aligned face, even if it is already loaded. Default: ``False``
+
+        Notes
+        -----
+        This method must be executed to get access to the following an :class:`AlignedFace` object
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">aligned</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+            <span class="comment"># Don't reload an already aligned face</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Skipping alignment calculation for already aligned face"</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Loading aligned face: (size: %s, dtype: %s)"</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">aligned</span> <span class="arithmetic-assignment">=</span> <span class="identifier">AlignedFace</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">landmarks_xy</span><span class="punctuation">,</span>
+                                       <span class="identifier">image</span><span class="arithmetic-assignment">=</span><span class="identifier">image</span><span class="punctuation">,</span>
+                                       <span class="identifier">centering</span><span class="arithmetic-assignment">=</span><span class="identifier">centering</span><span class="punctuation">,</span>
+                                       <span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">size</span><span class="punctuation">,</span>
+                                       <span class="identifier">coverage_ratio</span><span class="arithmetic-assignment">=</span><span class="float-literal">1.0</span><span class="punctuation">,</span>
+                                       <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="punctuation">,</span>
+                                       <span class="identifier">is_aligned</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_LandmarksMask</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Create a single channel mask from aligned landmark points.
+
+    size: tuple
+        The (height, width) shape tuple that the mask should be returned as
+    points: list
+        A list of landmark points that correspond to the given shape tuple to create
+        the mask. Each item in the list should be a :class:`numpy.ndarray` that a filled
+        convex polygon will be created from
+    dilation: int, optional
+        The amount of dilation to apply to the mask. `0` for none. Default: `0`
+    blur_kernel: int, optional
+        The kernel size for applying gaussian blur to apply to the mask. `0` for none. Default: `0`
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">points</span><span class="punctuation">,</span> <span class="identifier">dilation</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">blur_kernel</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s: (size: %s, points: %s, dilation: %s, blur_kernel: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">size</span><span class="punctuation">,</span> <span class="identifier">points</span><span class="punctuation">,</span> <span class="identifier">dilation</span><span class="punctuation">,</span> <span class="identifier">blur_kernel</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">points</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_dilation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dilation</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blur_kernel</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">get</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Obtain the mask.
+
+        Parameters
+        ----------
+        as_zip: bool, optional
+            ``True`` if the mask should be returned zipped otherwise ``False``
+
+        Returns
+        -------
+        :class:`numpy.ndarray` or zipped array
+            The mask as a single channel image of the given :attr:`size` dimension. If
+            :attr:`as_zip` is ``True`` then the :class:`numpy.ndarray` will be contained within a
+            zipped container
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_generate_mask</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">compress</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span> <span class="keyword">else</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"as_zip: %s, retval type: %s"</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">_</span><span class="invalid">z</span><span class="invalid">i</span><span class="invalid">p</span><span class="punctuation">,</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_generate_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Generate the mask.
+
+        Creates the mask applying any requested dilation and blurring and assigns to
+        :attr:`_mask`
+
+        Returns
+        -------
+        :class:`numpy.ndarray`
+            The mask as a single channel image of the given :attr:`size` dimension.
+        """</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_size</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float32"</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">landmarks</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_points</span><span class="punctuation">:</span>
+            <span class="identifier">lms</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">rint</span><span class="grouping">(</span><span class="identifier">landmarks</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"int"</span><span class="grouping">)</span>
+            <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">fillConvexPoly</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">convexHull</span><span class="grouping">(</span><span class="identifier">lms</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="identifier">lineType</span><span class="arithmetic-assignment">=</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">LINE_AA</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_dilation</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">dilate</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">,</span>
+                              <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">getStructuringElement</span><span class="grouping">(</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">MORPH_ELLIPSE</span><span class="punctuation">,</span>
+                                                        <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_dilation</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_dilation</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">iterations</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_kernel</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">BlurMask</span><span class="grouping">(</span><span class="string-literal">"gaussian"</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_kernel</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">blurred</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"mask: (shape: %s, dtype: %s)"</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">mask</span> <span class="arithmetic-operator">*</span> <span class="float-literal">255.0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"uint8"</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Mask</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Face Mask information and convenience methods
+
+    Holds a Faceswap mask as generated from :mod:`plugins.extract.mask` and the information
+    required to transform it to its original frame.
+
+    Holds convenience methods to handle the warping, storing and retrieval of the mask.
+
+    Parameters
+    ----------
+    storage_size: int, optional
+        The size (in pixels) that the mask should be stored at. Default: 128.
+    storage_centering, str (optional):
+        The centering to store the mask at. One of `"legacy"`, `"face"`, `"head"`.
+        Default: `"face"`
+
+    Attributes
+    ----------
+    stored_size: int
+        The size, in pixels, of the stored mask across its height and width.
+    stored_centering: str
+        The centering that the mask is stored at. One of `"legacy"`, `"face"`, `"head"`
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">storage_size</span><span class="arithmetic-assignment">=</span><span class="int-literal">128</span><span class="punctuation">,</span> <span class="identifier">storage_centering</span><span class="arithmetic-assignment">=</span><span class="string-literal">"face"</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initializing: %s (storage_size: %s, storage_centering: %s)"</span><span class="punctuation">,</span>
+                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">storage_size</span><span class="punctuation">,</span> <span class="identifier">storage_centering</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">storage_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_centering</span> <span class="arithmetic-assignment">=</span> <span class="identifier">storage_centering</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_affine_matrix</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolator</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_kernel</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threshold</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">slice_in</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">slice_out</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">set_blur_and_threshold</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initialized: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" numpy.ndarray: The mask at the size of :attr:`stored_size` with any requested blurring,
+        threshold amount and centering applied."""</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_mask</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threshold</span> <span class="relational-operator">!=</span> <span class="float-literal">0.0</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"kernel"</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threshold</span> <span class="relational-operator">!=</span> <span class="float-literal">0.0</span><span class="punctuation">:</span>
+            <span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">mask</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threshold</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+            <span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">mask</span> <span class="relational-operator">&gt;</span> <span class="float-literal">255.0</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threshold</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">255.0</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"kernel"</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">BlurMask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"type"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                            <span class="identifier">mask</span><span class="punctuation">,</span>
+                            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"kernel"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                            <span class="invalid">p</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"passes"</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">blurred</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span><span class="grouping">[</span><span class="string-literal">"size"</span><span class="grouping">]</span><span class="punctuation">:</span>  <span class="comment"># Crop the mask to the given centering</span>
+            <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span><span class="grouping">[</span><span class="string-literal">"size"], self._sub_crop["size"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+            <span class="identifier">slice_in</span><span class="punctuation">,</span> <span class="identifier">slice_out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span><span class="grouping">[</span><span class="string-literal">"slice_in"], self._sub_crop["slice_out"</span><span class="grouping">]</span>
+            <span class="identifier">out</span><span class="grouping">[</span><span class="identifier">slice_out</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">slice_out</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask</span><span class="grouping">[</span><span class="identifier">slice_in</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">slice_in</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+            <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"mask shape: %s"</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">mask</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">stored_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`numpy.ndarray`: The mask at the size of :attr:`stored_size` as it is stored
+        (i.e. with no blurring/centering applied). """</span>
+        <span class="identifier">dims</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">u</span><span class="invalid">f</span><span class="invalid">f</span><span class="invalid">e</span><span class="invalid">r</span><span class="grouping">(</span><span class="identifier">decompress</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"uint8"</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">dims</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"stored mask shape: %s"</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">mask</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">original_roi</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class: `numpy.ndarray`: The original region of interest of the mask in the
+        source frame. """</span>
+        <span class="identifier">points</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                           <span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+                           <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span>
+                           <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int32</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">invertAffineTransform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_affine_matrix</span><span class="grouping">)</span>
+        <span class="identifier">roi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">points</span><span class="punctuation">,</span> <span class="identifier">matrix</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">4</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Returning: %s"</span><span class="punctuation">,</span> <span class="identifier">roi</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">roi</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">affine_matrix</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class: `numpy.ndarray`: The affine matrix to transpose the mask to a full frame. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_affine_matrix</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">interpolator</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The cv2 interpolator required to transpose the mask to a full frame. """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolator</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_full_frame_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">width</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Return the stored mask in a full size frame of the given dimensions
+
+        Parameters
+        ----------
+        width: int
+            The width of the original frame that the mask was extracted from
+        height: int
+            The height of the original frame that the mask was extracted from
+
+        Returns
+        -------
+        numpy.ndarray: The mask affined to the original full frame of the given dimensions
+        """</span>
+        <span class="identifier">frame</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">width</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"uint8"</span><span class="grouping">)</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">warpAffine</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mask</span><span class="punctuation">,</span>
+                              <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_affine_matrix</span><span class="punctuation">,</span>
+                              <span class="grouping">(</span><span class="identifier">width</span><span class="punctuation">,</span> <span class="identifier">height</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">frame</span><span class="punctuation">,</span>
+                              <span class="identifier">flags</span><span class="arithmetic-assignment">=</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">WARP_INVERSE_MAP</span> <span class="bitwise-operator">|</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolator</span><span class="punctuation">,</span>
+                              <span class="identifier">borderMode</span><span class="arithmetic-assignment">=</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">BORDER_CONSTANT</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"mask shape: %s, mask dtype: %s, mask min: %s, mask max: %s"</span><span class="punctuation">,</span>
+                     <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">mask</span>
+
+    <span class="keyword">def</span> <span class="identifier">add</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">affine_matrix</span><span class="punctuation">,</span> <span class="identifier">interpolator</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Add a Faceswap mask to this :class:`Mask`.
+
+        The mask should be the original output from  :mod:`plugins.extract.mask`
+
+        Parameters
+        ----------
+        mask: numpy.ndarray
+            The mask that is to be added as output from :mod:`plugins.extract.mask`
+            It should be in the range 0.0 - 1.0 ideally with a ``dtype`` of ``float32``
+        affine_matrix: numpy.ndarray
+            The transformation matrix required to transform the mask to the original frame.
+        interpolator, int:
+            The CV2 interpolator required to transform this mask to it's original frame
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"mask shape: %s, mask dtype: %s, mask min: %s, mask max: %s, "</span>
+                     <span class="string-literal">"affine_matrix: %s, interpolator: %s)"</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                     <span class="identifier">affine_matrix</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">interpolator</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_affine_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_adjust_affine_matrix</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">affine_matrix</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_interpolator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">interpolator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">replace_mask</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">replace_mask</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Replace the existing :attr:`_mask` with the given mask.
+
+        Parameters
+        ----------
+        mask: numpy.ndarray
+            The mask that is to be added as output from :mod:`plugins.extract.mask`.
+            It should be in the range 0.0 - 1.0 ideally with a ``dtype`` of ``float32``
+        """</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">resize</span><span class="grouping">(</span><span class="identifier">mask</span><span class="punctuation">,</span>
+                           <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="grouping">)</span><span class="punctuation">,</span>
+                           <span class="identifier">interpolation</span><span class="arithmetic-assignment">=</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">INTER_AREA</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="float-literal">255.0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"uint8"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">compress</span><span class="grouping">(</span><span class="identifier">mask</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">set_blur_and_threshold</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                               <span class="identifier">blur_kernel</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">blur_type</span><span class="arithmetic-assignment">=</span><span class="string-literal">"gaussian"</span><span class="punctuation">,</span> <span class="identifier">blur_passes</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">threshold</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the internal blur kernel and threshold amount for returned masks
+
+        Parameters
+        ----------
+        blur_kernel: int, optional
+            The kernel size, in pixels to apply gaussian blurring to the mask. Set to 0 for no
+            blurring. Should be odd, if an even number is passed in (outside of 0) then it is
+            rounded up to the next odd number. Default: 0
+        blur_type: ["gaussian", "normalized"], optional
+            The blur type to use. ``gaussian`` or ``normalized`` box filter. Default: ``gaussian``
+        blur_passes: int, optional
+            The number of passed to perform when blurring. Default: 1
+        threshold: int, optional
+            The threshold amount to minimize/maximize mask values to 0 and 100. Percentage value.
+            Default: 0
+        """</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"blur_kernel: %s, threshold: %s"</span><span class="punctuation">,</span> <span class="identifier">blur_kernel</span><span class="punctuation">,</span> <span class="identifier">threshold</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">blur_type</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">blur_kernel</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">0</span> <span class="keyword">if</span> <span class="identifier">blur_kernel</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">blur_kernel</span> <span class="arithmetic-operator">%</span> <span class="int-literal">2</span> <span class="relational-operator">==</span> <span class="int-literal">1</span> <span class="keyword">else</span> <span class="int-literal">1</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"kernel"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blur_kernel</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"type"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blur_type</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur</span><span class="grouping">[</span><span class="string-literal">"passes"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blur_passes</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_threshold</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">threshold</span> <span class="arithmetic-operator">/</span> <span class="float-literal">100.0</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="float-literal">255.0</span>
+
+    <span class="keyword">def</span> <span class="identifier">set_sub_crop</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">offset</span><span class="punctuation">,</span> <span class="identifier">centering</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the internal crop area of the mask to be returned.
+
+        This impacts the returned mask from :attr:`mask` if the requested mask is required for
+        different face centering than what has been stored.
+
+        Parameters
+        ----------
+        offset: :class:`numpy.ndarray`
+            The (x, y) offset from the center point to return the mask for
+        centering: str
+            The centering to set the sub crop area for. One of `"legacy"`, `"face"`. `"head"`
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">centering</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_centering</span><span class="punctuation">:</span>
+            <span class="keyword">return</span>
+
+        <span class="identifier">src_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">*</span> <span class="identifier">_EXTRACT_RATIOS</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_centering</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">offset</span> <span class="arithmetic-assignment">*=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">-</span> <span class="grouping">(</span><span class="identifier">src_size</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="grouping">)</span>
+        <span class="identifier">center</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">rint</span><span class="grouping">(</span><span class="identifier">offset</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">"int32"</span><span class="grouping">)</span>
+
+        <span class="identifier">crop_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_centered_size</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_centering</span><span class="punctuation">,</span> <span class="identifier">centering</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="grouping">)</span>
+        <span class="identifier">roi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">center</span> <span class="arithmetic-operator">-</span> <span class="identifier">crop_size</span> <span class="arithmetic-operator">//</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">center</span> <span class="arithmetic-operator">+</span> <span class="identifier">crop_size</span> <span class="arithmetic-operator">//</span> <span class="int-literal">2</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span><span class="grouping">[</span><span class="string-literal">"size"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">crop_size</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span><span class="grouping">[</span><span class="string-literal">"slice_in"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">slice</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                      <span class="identifier">slice</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span><span class="grouping">[</span><span class="string-literal">"slice_out"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+            <span class="identifier">slice</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span>
+                  <span class="identifier">crop_size</span> <span class="arithmetic-operator">-</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">crop_size</span><span class="punctuation">,</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">3</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">slice</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span>
+                  <span class="identifier">crop_size</span> <span class="arithmetic-operator">-</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">crop_size</span><span class="punctuation">,</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">roi</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"src_size: %s, roi: %s, sub_crop: %s"</span><span class="punctuation">,</span> <span class="identifier">src_size</span><span class="punctuation">,</span> <span class="identifier">roi</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sub_crop</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_adjust_affine_matrix</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">mask_size</span><span class="punctuation">,</span> <span class="identifier">affine_matrix</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Adjust the affine matrix for the mask's storage size
+
+        Parameters
+        ----------
+        mask_size: int
+            The original size of the mask.
+        affine_matrix: numpy.ndarray
+            The affine matrix to transform the mask at original size to the parent frame.
+
+        Returns
+        -------
+        affine_matrix: numpy,ndarray
+            The affine matrix adjusted for the mask at its stored dimensions.
+        """</span>
+        <span class="identifier">zoom</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span> <span class="arithmetic-operator">/</span> <span class="identifier">mask_size</span>
+        <span class="identifier">zoom_mat</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">zoom</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">zoom</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">adjust_mat</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">zoom_mat</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">concatenate</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">affine_matrix</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="int-literal">0</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"storage_size: %s, mask_size: %s, zoom: %s, original matrix: %s, "</span>
+                     <span class="string-literal">"adjusted_matrix: %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">stored_size</span><span class="punctuation">,</span> <span class="identifier">mask_size</span><span class="punctuation">,</span> <span class="identifier">zoom</span><span class="punctuation">,</span> <span class="identifier">affine_matrix</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span>
+                     <span class="identifier">adjust_mat</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">adjust_mat</span>
+
+    <span class="keyword">def</span> <span class="identifier">to_dict</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Convert the mask to a dictionary for saving to an alignments file
+
+        Returns
+        -------
+        dict:
+            The :class:`Mask` for saving to an alignments file. Contains the keys ``mask``,
+            ``affine_matrix``, ``interpolator``, ``stored_size``, ``stored_centering``
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"mask", "affine_matrix", "interpolator", "stored_size", "stored_centering"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_attr_name</span><span class="grouping">(</span><span class="identifier">key</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span> <span class="keyword">if</span> <span class="identifier">k</span> <span class="relational-operator">!=</span> <span class="string-literal">"mask"</span> <span class="keyword">else</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">v</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">to_png_meta</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Convert the mask to a dictionary supported by png itxt headers.
+
+        Returns
+        -------
+        dict:
+            The :class:`Mask` for saving to an alignments file. Contains the keys ``mask``,
+            ``affine_matrix``, ``interpolator``, ``stored_size``, ``stored_centering``
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"mask", "affine_matrix", "interpolator", "stored_size", "stored_centering"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">val</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_attr_name</span><span class="grouping">(</span><span class="identifier">key</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">val</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">val</span><span class="punctuation">.</span><span class="identifier">tolist</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">retval</span><span class="grouping">[</span><span class="identifier">key</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">val</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="grouping">{</span><span class="identifier">k</span><span class="punctuation">:</span> <span class="identifier">v</span> <span class="keyword">if</span> <span class="identifier">k</span> <span class="relational-operator">!=</span> <span class="string-literal">"mask"</span> <span class="keyword">else</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">v</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">retval</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">c</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">mask_dict</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Populates the :class:`Mask` from a dictionary loaded from an alignments file.
+
+        Parameters
+        ----------
+        mask_dict: dict
+            A dictionary stored in an alignments file containing the keys ``mask``,
+            ``affine_matrix``, ``interpolator``, ``stored_size``, ``stored_centering``
+        """</span>
+        <span class="keyword">for</span> <span class="identifier">key</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"mask", "affine_matrix", "interpolator", "stored_size", "stored_centering"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">val</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask_dict</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">key</span><span class="grouping">)</span>
+            <span class="identifier">val</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"face" if key == "stored_centering"</span> <span class="logical-operator">and</span> <span class="identifier">val</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">val</span>
+            <span class="keyword">if</span> <span class="identifier">key</span> <span class="relational-operator">==</span> <span class="string-literal">"affine_matrix"</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">val</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ndarray</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">val</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">val</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float64"</span><span class="grouping">)</span>
+            <span class="identifier">setattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_attr_name</span><span class="grouping">(</span><span class="identifier">key</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">val</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"%s - %s", key, val if key != "mask"</span> <span class="keyword">else</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">val</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_attr_name</span><span class="grouping">(</span><span class="identifier">dict_key</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" The :class:`Mask` attribute name for the given dictionary key
+
+        Parameters
+        ----------
+        dict_key: str
+            The key name from an alignments dictionary
+
+        Returns
+        -------
+        attribute_name: str
+            The attribute name for the given key for :class:`Mask`
+        """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"_{}".format(dict_key) if not dict_key.startswith("stored"</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="identifier">dict_key</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"dict_key: %s, attribute_name: %s"</span><span class="punctuation">,</span> <span class="identifier">dict_key</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="keyword">class</span> <span class="identifier">BlurMask</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Factory class to return the correct blur object for requested blur type.
+
+    Works for square images only. Currently supports Gaussian and Normalized Box Filters.
+
+    Parameters
+    ----------
+    blur_type: ["gaussian", "normalized"]
+        The type of blur to use
+    mask: :class:`numpy.ndarray`
+        The mask to apply the blur to
+    kernel: int or float
+        Either the kernel size (in pixels) or the size of the kernel as a ratio of mask size
+    is_ratio: bool, optional
+        Whether the given :attr:`kernel` parameter is a ratio or not. If ``True`` then the
+        actual kernel size will be calculated from the given ratio and the mask size. If
+        ``False`` then the kernel size will be set directly from the :attr:`kernel` parameter.
+        Default: ``False``
+    passes: int, optional
+        The number of passes to perform when blurring. Default: ``1``
+
+    Example
+    -------
+    &gt;&gt;&gt; print(mask.shape)
+    (128, 128, 1)
+    &gt;&gt;&gt; new_mask = BlurMask("gaussian", mask, 3, is_ratio=False, passes=1).blurred
+    &gt;&gt;&gt; print(new_mask.shape)
+    (128, 128, 1)
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">blur_type</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="punctuation">,</span> <span class="identifier">is_ratio</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="invalid">p</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initializing %s: (blur_type: '%s', mask_shape: %s, kernel: %s, "</span>
+                     <span class="string-literal">"is_ratio: %s, passes: %s)"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">blur_type</span><span class="punctuation">,</span> <span class="identifier">mask</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span>
+                     <span class="identifier">kernel</span><span class="punctuation">,</span> <span class="identifier">is_ratio</span><span class="punctuation">,</span> <span class="invalid">p</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blur_type</span><span class="punctuation">.</span><span class="identifier">lower</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mask</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_passes</span> <span class="arithmetic-assignment">=</span> <span class="invalid">p</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span>
+        <span class="identifier">kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel_size</span><span class="grouping">(</span><span class="identifier">kernel</span><span class="punctuation">,</span> <span class="identifier">is_ratio</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel_tuple</span><span class="grouping">(</span><span class="identifier">kernel_size</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Initialized %s"</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">blurred</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" :class:`numpy.ndarray`: The final mask with blurring applied. """</span>
+        <span class="identifier">func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_func_mapping</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_type</span><span class="grouping">]</span>
+        <span class="identifier">kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kwargs</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">blurred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_passes</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">ksize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"ksize"</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Pass: %s, kernel_size: %s"</span><span class="punctuation">,</span> <span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">ksize</span><span class="punctuation">,</span> <span class="identifier">ksize</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">blurred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">func</span><span class="grouping">(</span><span class="identifier">blurred</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+            <span class="identifier">ksize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">round</span><span class="grouping">(</span><span class="identifier">ksize</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_multipass_factor</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">"ksize"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel_tuple</span><span class="grouping">(</span><span class="identifier">ksize</span><span class="grouping">)</span>
+        <span class="identifier">blurred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blurred</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"Returning blurred mask. Shape: %s"</span><span class="punctuation">,</span> <span class="identifier">blurred</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">blurred</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_multipass_factor</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" For multiple passes the kernel must be scaled down. This value is
+            different for box filter and gaussian """</span>
+        <span class="identifier">factor</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">gaussian</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.8</span><span class="punctuation">,</span> <span class="identifier">normalized</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">factor</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_type</span><span class="grouping">]</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_sigma</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" int: The Sigma for Gaussian Blur. Returns 0 to force calculation from kernel size. """</span>
+        <span class="keyword">return</span> <span class="int-literal">0</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_func_mapping</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: :attr:`_blur_type` mapped to cv2 Function name. """</span>
+        <span class="keyword">return</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">gaussian</span><span class="arithmetic-assignment">=</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">GaussianBlur</span><span class="punctuation">,</span>  <span class="comment"># pylint: disable = no-member</span>
+                    <span class="identifier">normalized</span><span class="arithmetic-assignment">=</span><span class="identifier">cv2</span><span class="punctuation">.</span><span class="identifier">blur</span><span class="grouping">)</span>  <span class="comment"># pylint: disable = no-member</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_kwarg_requirements</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: :attr:`_blur_type` mapped to cv2 Function required keyword arguments. """</span>
+        <span class="keyword">return</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">gaussian</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">"ksize", "sigmaX"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                    <span class="identifier">normalized</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">"ksize"</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">_kwarg_mapping</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: cv2 function keyword arguments mapped to their parameters. """</span>
+        <span class="keyword">return</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">ksize</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kernel_size</span><span class="punctuation">,</span>
+                    <span class="identifier">sigmaX</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sigma</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_kernel_size</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="punctuation">,</span> <span class="identifier">is_ratio</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Set the kernel size to absolute value.
+
+        If :attr:`is_ratio` is ``True`` then the kernel size is calculated from the given ratio and
+        the :attr:`_mask` size, otherwise the given kernel size is just returned.
+
+        Parameters
+        ----------
+        kernel: int or float
+            Either the kernel size (in pixels) or the size of the kernel as a ratio of mask size
+        is_ratio: bool, optional
+            Whether the given :attr:`kernel` parameter is a ratio or not. If ``True`` then the
+            actual kernel size will be calculated from the given ratio and the mask size. If
+            ``False`` then the kernel size will be set directly from the :attr:`kernel` parameter.
+
+        Returns
+        -------
+        int
+            The size (in pixels) of the blur kernel
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">is_ratio</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">kernel</span>
+
+        <span class="identifier">mask_diameter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_mask</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">radius</span> <span class="arithmetic-assignment">=</span> <span class="identifier">round</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="identifier">mask_diameter</span> <span class="arithmetic-operator">*</span> <span class="identifier">kernel</span> <span class="arithmetic-operator">/</span> <span class="int-literal">100</span><span class="punctuation">.</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">kernel_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">radius</span> <span class="arithmetic-operator">*</span> <span class="int-literal">2</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"kernel_size: %s"</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">kernel_size</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_get_kernel_tuple</span><span class="grouping">(</span><span class="identifier">kernel_size</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Make sure kernel_size is odd and return it as a tuple.
+
+        Parameters
+        ----------
+        kernel_size: int
+            The size in pixels of the blur kernel
+
+        Returns
+        -------
+        tuple
+            The kernel size as a tuple of ('int', 'int')
+        """</span>
+        <span class="identifier">kernel_size</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">kernel_size</span> <span class="arithmetic-operator">%</span> <span class="int-literal">2</span> <span class="relational-operator">==</span> <span class="int-literal">0</span> <span class="keyword">else</span> <span class="int-literal">0</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">kernel_size</span><span class="punctuation">,</span> <span class="identifier">kernel_size</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_kwargs</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" dict: the valid keyword arguments for the requested :attr:`_blur_type` """</span>
+        <span class="identifier">retval</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">kword</span><span class="punctuation">:</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwarg_mapping</span><span class="grouping">[</span><span class="identifier">kword</span><span class="grouping">]</span>
+                  <span class="keyword">for</span> <span class="identifier">kword</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwarg_requirements</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_blur_type</span><span class="grouping">]</span><span class="grouping">}</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"BlurMask kwargs: %s"</span><span class="punctuation">,</span> <span class="identifier">retval</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">retval</span>
+
+
+<span class="identifier">_HASHES_SEEN</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">update_legacy_png_header</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="identifier">alignments</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Update a legacy extracted face from pre v2.1 alignments by placing the alignment data for
+    the face in the png exif header for the given filename with the given alignment data.
+
+    If the given file is not a .png then a png is created and the original file is removed
+
+    Parameters
+    ----------
+    filename: str
+        The image file to update
+    alignments: :class:`lib.align.alignments.Alignments`
+        The alignments data the contains the information to store in the image header. This must be
+        a v2.0 or less alignments file as later versions no longer store the face hash (not
+        required)
+
+    Returns
+    -------
+    dict
+        The metadata that has been applied to the given image
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">alignments</span><span class="punctuation">.</span><span class="identifier">version</span> <span class="relational-operator">&gt;</span> <span class="float-literal">2.0</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">FaceswapError</span><span class="grouping">(</span><span class="string-literal">"The faces being passed in do not correspond to the given Alignments "</span>
+                            <span class="string-literal">"file. Please double check your sources and try again."</span><span class="grouping">)</span>
+    <span class="comment"># Track hashes for multiple files with the same hash. Not the most robust but should be</span>
+    <span class="comment"># effective enough</span>
+    <span class="identifier">folder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">dirname</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">folder</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">_HASHES_SEEN</span><span class="punctuation">:</span>
+        <span class="identifier">_HASHES_SEEN</span><span class="grouping">[</span><span class="identifier">folder</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">hashes_seen</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_HASHES_SEEN</span><span class="grouping">[</span><span class="identifier">folder</span><span class="grouping">]</span>
+
+    <span class="identifier">in_image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">read_image</span><span class="grouping">(</span><span class="identifier">filename</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">a</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+    <span class="identifier">in_hash</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sha1</span><span class="grouping">(</span><span class="identifier">in_image</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">hexdigest</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">hashes_seen</span><span class="grouping">[</span><span class="identifier">in_hash</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hashes_seen</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">in_hash</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+
+    <span class="identifier">alignment</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alignments</span><span class="punctuation">.</span><span class="identifier">hashes_to_alignment</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">in_hash</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">alignment</span><span class="punctuation">:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Alignments not found for image: '%s'"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="none-literal">None</span>
+
+    <span class="identifier">detected_face</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DetectedFace</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="identifier">detected_face</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">m</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">n</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">alignment</span><span class="grouping">)</span>
+    <span class="comment"># For dupe hash handling, make sure we get a different filename for repeat hashes</span>
+    <span class="identifier">src_fname</span><span class="punctuation">,</span> <span class="identifier">face_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">alignments</span><span class="punctuation">.</span><span class="identifier">hashes_to_frame</span><span class="grouping">[</span><span class="identifier">in_hash</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">hashes_seen</span><span class="grouping">[</span><span class="identifier">in_hash</span><span class="grouping">]</span><span class="grouping">]</span>
+    <span class="identifier">orig_filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"{}_{}.png"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span><span class="punctuation">.</span><span class="identifier">splitext</span><span class="grouping">(</span><span class="identifier">src_fname</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">face_idx</span><span class="grouping">)</span>
+    <span class="identifier">meta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">alignments</span><span class="arithmetic-assignment">=</span><span class="identifier">detected_face</span><span class="punctuation">.</span><span class="identifier">to_png_meta</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="identifier">source</span><span class="arithmetic-assignment">=</span><span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">alignments_version</span><span class="arithmetic-assignment">=</span><span class="identifier">alignments</span><span class="punctuation">.</span><span class="identifier">version</span><span class="punctuation">,</span>
+                            <span class="identifier">original_filename</span><span class="arithmetic-assignment">=</span><span class="identifier">orig_filename</span><span class="punctuation">,</span>
+                            <span class="identifier">face_index</span><span class="arithmetic-assignment">=</span><span class="identifier">face_idx</span><span class="punctuation">,</span>
+                            <span class="identifier">source_filename</span><span class="arithmetic-assignment">=</span><span class="identifier">src_fname</span><span class="punctuation">,</span>
+                            <span class="identifier">source_is_video</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="grouping">)</span>  <span class="comment"># Can't check so set false</span>
+
+    <span class="identifier">out_filename</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span><span class="string-literal">"{os.path.splitext(filename)[0]}.png"</span>  <span class="comment"># Make sure saved file is png</span>
+    <span class="identifier">out_image</span> <span class="arithmetic-assignment">=</span> <span class="identifier">encode_image</span><span class="grouping">(</span><span class="identifier">in_image</span><span class="punctuation">,</span> <span class="string-literal">".png"</span><span class="punctuation">,</span> <span class="identifier">metadata</span><span class="arithmetic-assignment">=</span><span class="identifier">meta</span><span class="grouping">)</span>
+
+    <span class="keyword">with</span> <span class="identifier">open</span><span class="grouping">(</span><span class="identifier">out_filename</span><span class="punctuation">,</span> <span class="string-literal">"wb"</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">out_file</span><span class="punctuation">:</span>
+        <span class="identifier">out_file</span><span class="punctuation">.</span><span class="identifier">write</span><span class="grouping">(</span><span class="identifier">out_image</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">filename</span> <span class="relational-operator">!=</span> <span class="identifier">out_filename</span><span class="punctuation">:</span>  <span class="comment"># Remove the old non-png:</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">"Removing replaced face with deprecated extension: '%s'"</span><span class="punctuation">,</span> <span class="identifier">filename</span><span class="grouping">)</span>
+        <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">remove</span><span class="grouping">(</span><span class="identifier">filename</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">meta</span>
+
+    </pre>
+  </body>
+</html>

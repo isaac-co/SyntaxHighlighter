@@ -1,0 +1,141 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+=======================================================================
+Shrinkage covariance estimation: LedoitWolf vs OAS and max-likelihood
+=======================================================================
+
+When working with covariance estimation, the usual approach is to use
+a maximum likelihood estimator, such as the
+:class:`~sklearn.covariance.EmpiricalCovariance`. It is unbiased, i.e. it
+converges to the true (population) covariance when given many
+observations. However, it can also be beneficial to regularize it, in
+order to reduce its variance; this, in turn, introduces some bias. This
+example illustrates the simple regularization used in
+:ref:`shrunk_covariance` estimators. In particular, it focuses on how to
+set the amount of regularization, i.e. how to choose the bias-variance
+trade-off.
+
+Here we compare 3 approaches:
+
+* Setting the parameter by cross-validating the likelihood on three folds
+  according to a grid of potential shrinkage parameters.
+
+* A close formula proposed by Ledoit and Wolf to compute
+  the asymptotically optimal regularization parameter (minimizing a MSE
+  criterion), yielding the :class:`~sklearn.covariance.LedoitWolf`
+  covariance estimate.
+
+* An improvement of the Ledoit-Wolf shrinkage, the
+  :class:`~sklearn.covariance.OAS`, proposed by Chen et al. Its
+  convergence is significantly better under the assumption that the data
+  are Gaussian, in particular for small samples.
+
+To quantify estimation error, we plot the likelihood of unseen data for
+different values of the shrinkage parameter. We also show the choices by
+cross-validation, or with the LedoitWolf and OAS estimates.
+
+Note that the maximum likelihood estimate corresponds to no shrinkage,
+and thus performs poorly. The Ledoit-Wolf estimate performs really well,
+as it is close to the optimal and is computational not costly. In this
+example, the OAS estimate is a bit further away. Interestingly, both
+approaches outperform cross-validation, which is significantly most
+computationally costly.
+
+"""</span>
+<span class="identifier">print</span><span class="grouping">(</span><span class="identifier">__doc__</span><span class="grouping">)</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">import</span> <span class="identifier">matplotlib</span><span class="punctuation">.</span><span class="identifier">pyplot</span> <span class="keyword">as</span> <span class="identifier">plt</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">covariance</span> <span class="keyword">import</span> <span class="identifier">LedoitWolf</span><span class="punctuation">,</span> <span class="identifier">OAS</span><span class="punctuation">,</span> <span class="identifier">ShrunkCovariance</span><span class="punctuation">,</span> <span class="invalid">\</span>
+    <span class="identifier">log_likelihood</span><span class="punctuation">,</span> <span class="identifier">empirical_covariance</span>
+<span class="keyword">from</span> <span class="identifier">sklearn</span><span class="punctuation">.</span><span class="identifier">model_selection</span> <span class="keyword">import</span> <span class="identifier">GridSearchCV</span>
+
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Generate sample data</span>
+<span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">40</span><span class="punctuation">,</span> <span class="int-literal">20</span>
+<span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">random</span><span class="punctuation">.</span><span class="identifier">seed</span><span class="grouping">(</span><span class="int-literal">42</span><span class="grouping">)</span>
+<span class="identifier">base_X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">random</span><span class="punctuation">.</span><span class="identifier">normal</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">base_X_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">random</span><span class="punctuation">.</span><span class="identifier">normal</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="comment"># Color samples</span>
+<span class="identifier">coloring_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">random</span><span class="punctuation">.</span><span class="identifier">normal</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">base_X_train</span><span class="punctuation">,</span> <span class="identifier">coloring_matrix</span><span class="grouping">)</span>
+<span class="identifier">X_test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">base_X_test</span><span class="punctuation">,</span> <span class="identifier">coloring_matrix</span><span class="grouping">)</span>
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Compute the likelihood on test data</span>
+
+<span class="comment"># spanning a range of possible shrinkage coefficient values</span>
+<span class="identifier">shrinkages</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logspace</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="int-literal">30</span><span class="grouping">)</span>
+<span class="identifier">negative_logliks</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="identifier">ShrunkCovariance</span><span class="grouping">(</span><span class="identifier">shrinkage</span><span class="arithmetic-assignment">=</span><span class="identifier">s</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+                    <span class="keyword">for</span> <span class="identifier">s</span> <span class="relational-operator">in</span> <span class="identifier">shrinkages</span><span class="grouping">]</span>
+
+<span class="comment"># under the ground-truth model, which we would not have access to in real</span>
+<span class="comment"># settings</span>
+<span class="identifier">real_cov</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">coloring_matrix</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">coloring_matrix</span><span class="grouping">)</span>
+<span class="identifier">emp_cov</span> <span class="arithmetic-assignment">=</span> <span class="identifier">empirical_covariance</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span>
+<span class="identifier">loglik_real</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">log_likelihood</span><span class="grouping">(</span><span class="identifier">emp_cov</span><span class="punctuation">,</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">inv</span><span class="grouping">(</span><span class="identifier">real_cov</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Compare different approaches to setting the parameter</span>
+
+<span class="comment"># GridSearch for an optimal shrinkage coefficient</span>
+<span class="identifier">tuned_parameters</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">{</span><span class="string-literal">'shrinkage'</span><span class="punctuation">:</span> <span class="identifier">shrinkages</span><span class="grouping">}</span><span class="grouping">]</span>
+<span class="identifier">cv</span> <span class="arithmetic-assignment">=</span> <span class="identifier">GridSearchCV</span><span class="grouping">(</span><span class="identifier">ShrunkCovariance</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">tuned_parameters</span><span class="grouping">)</span>
+<span class="identifier">cv</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span>
+
+<span class="comment"># Ledoit-Wolf optimal shrinkage coefficient estimate</span>
+<span class="identifier">lw</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LedoitWolf</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">loglik_lw</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lw</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+
+<span class="comment"># OAS coefficient estimate</span>
+<span class="identifier">oa</span> <span class="arithmetic-assignment">=</span> <span class="identifier">OAS</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">loglik_oa</span> <span class="arithmetic-assignment">=</span> <span class="identifier">oa</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X_train</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span>
+
+<span class="comment"># #############################################################################</span>
+<span class="comment"># Plot results</span>
+<span class="identifier">fig</span> <span class="arithmetic-assignment">=</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">figure</span><span class="grouping">(</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">title</span><span class="grouping">(</span><span class="string-literal">"Regularized covariance: likelihood and shrinkage coefficient"</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlabel</span><span class="grouping">(</span><span class="string-literal">'Regularization parameter: shrinkage coefficient'</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylabel</span><span class="grouping">(</span><span class="string-literal">'Error: negative log-likelihood on test data'</span><span class="grouping">)</span>
+<span class="comment"># range shrinkage curve</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">loglog</span><span class="grouping">(</span><span class="identifier">shrinkages</span><span class="punctuation">,</span> <span class="identifier">negative_logliks</span><span class="punctuation">,</span> <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Negative log-likelihood"</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">plot</span><span class="grouping">(</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="grouping">[</span><span class="identifier">loglik_real</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="string-literal">'--r'</span><span class="punctuation">,</span>
+         <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="string-literal">"Real covariance likelihood"</span><span class="grouping">)</span>
+
+<span class="comment"># adjust view</span>
+<span class="identifier">lik_max</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">amax</span><span class="grouping">(</span><span class="identifier">negative_logliks</span><span class="grouping">)</span>
+<span class="identifier">lik_min</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">amin</span><span class="grouping">(</span><span class="identifier">negative_logliks</span><span class="grouping">)</span>
+<span class="identifier">ymin</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lik_min</span> <span class="arithmetic-operator">-</span> <span class="int-literal">6</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+<span class="identifier">ymax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lik_max</span> <span class="arithmetic-operator">+</span> <span class="int-literal">10</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">lik_max</span> <span class="arithmetic-operator">-</span> <span class="identifier">lik_min</span><span class="grouping">)</span>
+<span class="identifier">xmin</span> <span class="arithmetic-assignment">=</span> <span class="identifier">shrinkages</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+<span class="identifier">xmax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">shrinkages</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+<span class="comment"># LW likelihood</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">vlines</span><span class="grouping">(</span><span class="identifier">lw</span><span class="punctuation">.</span><span class="identifier">shrinkage_</span><span class="punctuation">,</span> <span class="identifier">ymin</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">loglik_lw</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'magenta'</span><span class="punctuation">,</span>
+           <span class="identifier">linewidth</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="string-literal">'Ledoit-Wolf estimate'</span><span class="grouping">)</span>
+<span class="comment"># OAS likelihood</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">vlines</span><span class="grouping">(</span><span class="identifier">oa</span><span class="punctuation">.</span><span class="identifier">shrinkage_</span><span class="punctuation">,</span> <span class="identifier">ymin</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">loglik_oa</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'purple'</span><span class="punctuation">,</span>
+           <span class="identifier">linewidth</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="string-literal">'OAS estimate'</span><span class="grouping">)</span>
+<span class="comment"># best CV estimator likelihood</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">vlines</span><span class="grouping">(</span><span class="identifier">cv</span><span class="punctuation">.</span><span class="identifier">best_estimator_</span><span class="punctuation">.</span><span class="identifier">shrinkage</span><span class="punctuation">,</span> <span class="identifier">ymin</span><span class="punctuation">,</span>
+           <span class="arithmetic-operator">-</span><span class="identifier">cv</span><span class="punctuation">.</span><span class="identifier">best_estimator_</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="identifier">X_test</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">color</span><span class="arithmetic-assignment">=</span><span class="string-literal">'cyan'</span><span class="punctuation">,</span>
+           <span class="identifier">linewidth</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">label</span><span class="arithmetic-assignment">=</span><span class="string-literal">'Cross-validation best estimate'</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">ylim</span><span class="grouping">(</span><span class="identifier">ymin</span><span class="punctuation">,</span> <span class="identifier">ymax</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">xlim</span><span class="grouping">(</span><span class="identifier">xmin</span><span class="punctuation">,</span> <span class="identifier">xmax</span><span class="grouping">)</span>
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">legend</span><span class="grouping">(</span><span class="grouping">)</span>
+
+<span class="identifier">plt</span><span class="punctuation">.</span><span class="identifier">show</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

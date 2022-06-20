@@ -1,0 +1,1116 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Hierarchical Agglomerative Clustering
+
+These routines perform some hierarchical agglomerative clustering of some
+input data.
+
+Authors : Vincent Michel, Bertrand Thirion, Alexandre Gramfort,
+          Gael Varoquaux
+License: BSD 3 clause
+"""</span>
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">from</span> <span class="identifier">heapq</span> <span class="keyword">import</span> <span class="identifier">heapify</span><span class="punctuation">,</span> <span class="identifier">heappop</span><span class="punctuation">,</span> <span class="identifier">heappush</span><span class="punctuation">,</span> <span class="identifier">heappushpop</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">sparse</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">csgraph</span> <span class="keyword">import</span> <span class="identifier">connected_components</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">ClusterMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">paired_distances</span><span class="punctuation">,</span> <span class="identifier">pairwise_distances</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span> <span class="keyword">import</span> <span class="identifier">DistanceMetric</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span><span class="punctuation">.</span><span class="identifier">_dist_metrics</span> <span class="keyword">import</span> <span class="identifier">METRIC_MAPPING</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_fast_dict</span> <span class="keyword">import</span> <span class="identifier">IntFloatDict</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="identifier">_astype_copy_false</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_memory</span>
+<span class="comment"># mypy error: Module 'sklearn.cluster' has no attribute '_hierarchical_fast'</span>
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">_hierarchical_fast</span> <span class="keyword">as</span> <span class="identifier">_hierarchical</span>  <span class="comment"># type: ignore</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_feature_agglomeration</span> <span class="keyword">import</span> <span class="identifier">AgglomerationTransform</span>
+
+<span class="comment">###############################################################################</span>
+<span class="comment"># For non fully-connected graphs</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_fix_connectivity</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="punctuation">,</span> <span class="identifier">affinity</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Fixes the connectivity matrix
+
+        - copies it
+        - makes it symmetric
+        - converts it to LIL if necessary
+        - completes it if necessary
+    """</span>
+    <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">n_samples</span> <span class="logical-operator">or</span>
+            <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Wrong shape for connectivity matrix: %s '</span>
+                         <span class="string-literal">'when X is %s'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Make the connectivity matrix symmetric:</span>
+    <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span> <span class="arithmetic-operator">+</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+    <span class="comment"># Convert connectivity matrix to LIL</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">isspmatrix_lil</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">isspmatrix</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">lil_matrix</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">tolil</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># Compute the number of nodes</span>
+    <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connected_components</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">n_connected_components</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"the number of connected components of the "</span>
+                      <span class="string-literal">"connectivity matrix is %d &gt; 1. Completing it to avoid "</span>
+                      <span class="string-literal">"stopping the tree early."</span> <span class="arithmetic-operator">%</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span>
+                      <span class="identifier">stacklevel</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span>
+        <span class="comment"># XXX: Can we do without completing the matrix?</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_connected_components</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">idx_i</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">labels</span> <span class="relational-operator">==</span> <span class="identifier">i</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_i</span><span class="grouping">]</span>
+            <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">i</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">idx_j</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">labels</span> <span class="relational-operator">==</span> <span class="identifier">j</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                <span class="identifier">Xj</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">idx_j</span><span class="grouping">]</span>
+                <span class="identifier">D</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pairwise_distances</span><span class="grouping">(</span><span class="identifier">Xi</span><span class="punctuation">,</span> <span class="identifier">Xj</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">affinity</span><span class="grouping">)</span>
+                <span class="identifier">ii</span><span class="punctuation">,</span> <span class="identifier">jj</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">D</span> <span class="relational-operator">==</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">D</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ii</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                <span class="identifier">jj</span> <span class="arithmetic-assignment">=</span> <span class="identifier">jj</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                <span class="identifier">connectivity</span><span class="grouping">[</span><span class="identifier">idx_i</span><span class="grouping">[</span><span class="identifier">ii</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">idx_j</span><span class="grouping">[</span><span class="identifier">jj</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+                <span class="identifier">connectivity</span><span class="grouping">[</span><span class="identifier">idx_j</span><span class="grouping">[</span><span class="identifier">jj</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">idx_i</span><span class="grouping">[</span><span class="identifier">ii</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">return</span> <span class="identifier">connectivity</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_single_linkage_tree</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="punctuation">,</span>
+                         <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Perform single linkage clustering on sparse data via the minimum
+    spanning tree from scipy.sparse.csgraph, then using union-find to label.
+    The parent array is then generated by walking through the tree.
+    """</span>
+    <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">csgraph</span> <span class="keyword">import</span> <span class="identifier">minimum_spanning_tree</span>
+
+    <span class="comment"># explicitly cast connectivity to ensure safety</span>
+    <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">'float64'</span><span class="punctuation">,</span>
+                                       <span class="arithmetic-operator">**</span><span class="identifier">_astype_copy_false</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Ensure zero distances aren't ignored by setting them to "epsilon"</span>
+    <span class="identifier">epsilon_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+    <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">epsilon_value</span>
+
+    <span class="comment"># Use scipy.sparse.csgraph to generate a minimum spanning tree</span>
+    <span class="identifier">mst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">minimum_spanning_tree</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">tocsr</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># Convert the graph to scipy.cluster.hierarchy array format</span>
+    <span class="identifier">mst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mst</span><span class="punctuation">.</span><span class="identifier">tocoo</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># Undo the epsilon values</span>
+    <span class="identifier">mst</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">mst</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="relational-operator">==</span> <span class="identifier">epsilon_value</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="identifier">mst_array</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">mst</span><span class="punctuation">.</span><span class="identifier">row</span><span class="punctuation">,</span> <span class="identifier">mst</span><span class="punctuation">.</span><span class="identifier">col</span><span class="punctuation">,</span> <span class="identifier">mst</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+    <span class="comment"># Sort edges of the min_spanning_tree by weight</span>
+    <span class="identifier">mst_array</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mst_array</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">mst_array</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'mergesort'</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+
+    <span class="comment"># Convert edge list into standard hierarchical clustering format</span>
+    <span class="identifier">single_linkage_tree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">_single_linkage_label</span><span class="grouping">(</span><span class="identifier">mst_array</span><span class="grouping">)</span>
+    <span class="identifier">children_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">single_linkage_tree</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">int</span><span class="grouping">)</span>
+
+    <span class="comment"># Compute parents</span>
+    <span class="identifier">parent</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">left</span><span class="punctuation">,</span> <span class="identifier">right</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">children_</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">n_clusters</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">i</span> <span class="relational-operator">&gt;=</span> <span class="identifier">n_nodes</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+        <span class="keyword">if</span> <span class="identifier">left</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_nodes</span><span class="punctuation">:</span>
+            <span class="identifier">parent</span><span class="grouping">[</span><span class="identifier">left</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span>
+        <span class="keyword">if</span> <span class="identifier">right</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_nodes</span><span class="punctuation">:</span>
+            <span class="identifier">parent</span><span class="grouping">[</span><span class="identifier">right</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">single_linkage_tree</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">children_</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">distances</span>
+    <span class="keyword">return</span> <span class="identifier">children_</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">parent</span>
+
+
+<span class="comment">###############################################################################</span>
+<span class="comment"># Hierarchical tree building functions</span>
+
+<span class="keyword">def</span> <span class="identifier">ward_tree</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Ward clustering based on a Feature matrix.
+
+    Recursively merges the pair of clusters that minimally increases
+    within-cluster variance.
+
+    The inertia matrix uses a Heapq-based representation.
+
+    This is the structured version, that takes into account some topological
+    structure between samples.
+
+    Read more in the :ref:`User Guide &lt;hierarchical_clustering&gt;`.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        feature matrix representing n_samples samples to be clustered
+
+    connectivity : sparse matrix, default=None
+        connectivity matrix. Defines for each sample the neighboring samples
+        following a given structure of the data. The matrix is assumed to
+        be symmetric and only the upper triangular half is used.
+        Default is None, i.e, the Ward algorithm is unstructured.
+
+    n_clusters : int, default=None
+        Stop early the construction of the tree at n_clusters. This is
+        useful to decrease computation time if the number of clusters is
+        not small compared to the number of samples. In this case, the
+        complete tree is not computed, thus the 'children' output is of
+        limited use, and the 'parents' output should rather be used.
+        This option is valid only when specifying a connectivity matrix.
+
+    return_distance : bool, default=None
+        If True, return the distance between the clusters.
+
+    Returns
+    -------
+    children : ndarray of shape (n_nodes-1, 2)
+        The children of each non-leaf node. Values less than `n_samples`
+        correspond to leaves of the tree which are the original samples.
+        A node `i` greater than or equal to `n_samples` is a non-leaf
+        node and has children `children_[i - n_samples]`. Alternatively
+        at the i-th iteration, children[i][0] and children[i][1]
+        are merged to form node `n_samples + i`
+
+    n_connected_components : int
+        The number of connected components in the graph.
+
+    n_leaves : int
+        The number of leaves in the tree
+
+    parents : ndarray of shape (n_nodes,) or None
+        The parent of each node. Only returned when a connectivity matrix
+        is specified, elsewhere 'None' is returned.
+
+    distances : ndarray of shape (n_nodes-1,)
+        Only returned if return_distance is set to True (for compatibility).
+        The distances between the centers of the nodes. `distances[i]`
+        corresponds to a weighted euclidean distance between
+        the nodes `children[i, 1]` and `children[i, 2]`. If the nodes refer to
+        leaves of the tree, then `distances[i]` is their unweighted euclidean
+        distance. Distances are updated in the following way
+        (from scipy.hierarchy.linkage):
+
+        The new entry :math:`d(u,v)` is computed as follows,
+
+        .. math::
+
+           d(u,v) = \\sqrt{\\frac{|v|+|s|}
+                               {T}d(v,s)^2
+                        + \\frac{|v|+|t|}
+                               {T}d(v,t)^2
+                        - \\frac{|v|}
+                               {T}d(s,t)^2}
+
+        where :math:`u` is the newly joined cluster consisting of
+        clusters :math:`s` and :math:`t`, :math:`v` is an unused
+        cluster in the forest, :math:`T=|v|+|s|+|t|`, and
+        :math:`|*|` is the cardinality of its argument. This is also
+        known as the incremental algorithm.
+    """</span>
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="keyword">if</span> <span class="identifier">connectivity</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">hierarchy</span>  <span class="comment"># imports PIL</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_clusters</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'Partial build of the tree is implemented '</span>
+                          <span class="string-literal">'only for structured clustering (i.e. with '</span>
+                          <span class="string-literal">'explicit connectivity). The algorithm '</span>
+                          <span class="string-literal">'will build the full tree and only '</span>
+                          <span class="string-literal">'retain the lower branches required '</span>
+                          <span class="string-literal">'for the specified number of clusters'</span><span class="punctuation">,</span>
+                          <span class="identifier">stacklevel</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">require</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">requirements</span><span class="arithmetic-assignment">=</span><span class="string-literal">"W"</span><span class="grouping">)</span>
+        <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hierarchy</span><span class="punctuation">.</span><span class="identifier">ward</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">children_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+            <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">]</span>
+            <span class="keyword">return</span> <span class="identifier">children_</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">distances</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">children_</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="none-literal">None</span>
+
+    <span class="identifier">connectivity</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_fix_connectivity</span><span class="grouping">(</span>
+                                                <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="punctuation">,</span>
+                                                <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="string-literal">'euclidean'</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">n_clusters</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">n_nodes</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">n_clusters</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Cannot provide more clusters than samples. '</span>
+                             <span class="string-literal">'%i n_clusters was asked, and there are %i '</span>
+                             <span class="string-literal">'samples.'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_clusters</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">n_nodes</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_clusters</span>
+
+    <span class="comment"># create inertia matrix</span>
+    <span class="identifier">coord_row</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="identifier">coord_col</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="identifier">A</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">ind</span><span class="punctuation">,</span> <span class="identifier">row</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">rows</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">row</span><span class="grouping">)</span>
+        <span class="comment"># We keep only the upper triangular for the moments</span>
+        <span class="comment"># Generator expressions are faster than arrays on the following</span>
+        <span class="identifier">row</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">i</span> <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">row</span> <span class="keyword">if</span> <span class="identifier">i</span> <span class="relational-operator">&lt;</span> <span class="identifier">ind</span><span class="grouping">]</span>
+        <span class="identifier">coord_row</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">row</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">[</span><span class="identifier">ind</span><span class="punctuation">,</span> <span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">coord_col</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">row</span><span class="grouping">)</span>
+
+    <span class="identifier">coord_row</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">coord_row</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+    <span class="identifier">coord_col</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">coord_col</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+
+    <span class="comment"># build moments as a list</span>
+    <span class="identifier">moments_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+    <span class="identifier">moments_1</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_samples</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+    <span class="identifier">moments_2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+    <span class="identifier">moments_2</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_samples</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+    <span class="identifier">inertia</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">coord_row</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+    <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">compute_ward_dist</span><span class="grouping">(</span><span class="identifier">moments_1</span><span class="punctuation">,</span> <span class="identifier">moments_2</span><span class="punctuation">,</span> <span class="identifier">coord_row</span><span class="punctuation">,</span> <span class="identifier">coord_col</span><span class="punctuation">,</span>
+                                    <span class="identifier">inertia</span><span class="grouping">)</span>
+    <span class="identifier">inertia</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">inertia</span><span class="punctuation">,</span> <span class="identifier">coord_row</span><span class="punctuation">,</span> <span class="identifier">coord_col</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">heapify</span><span class="grouping">(</span><span class="identifier">inertia</span><span class="grouping">)</span>
+
+    <span class="comment"># prepare the main fields</span>
+    <span class="identifier">parent</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="grouping">)</span>
+    <span class="identifier">used_node</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+    <span class="identifier">children</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_nodes</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+
+    <span class="identifier">not_visited</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int8</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+
+    <span class="comment"># recursive merge loop</span>
+    <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_nodes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># identify the merge</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="identifier">inert</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">j</span> <span class="arithmetic-assignment">=</span> <span class="identifier">heappop</span><span class="grouping">(</span><span class="identifier">inertia</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="logical-operator">and</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+        <span class="identifier">parent</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">k</span>
+        <span class="identifier">children</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>  <span class="comment"># store inertia value</span>
+            <span class="identifier">distances</span><span class="grouping">[</span><span class="identifier">k</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_samples</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inert</span>
+
+        <span class="comment"># update the moments</span>
+        <span class="identifier">moments_1</span><span class="grouping">[</span><span class="identifier">k</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">moments_1</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">moments_1</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span>
+        <span class="identifier">moments_2</span><span class="grouping">[</span><span class="identifier">k</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">moments_2</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">moments_2</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span>
+
+        <span class="comment"># update the structure matrix A and the inertia matrix</span>
+        <span class="identifier">coord_col</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">not_visited</span><span class="punctuation">.</span><span class="identifier">fill</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">not_visited</span><span class="grouping">[</span><span class="identifier">k</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">_get_parents</span><span class="grouping">(</span><span class="identifier">A</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">coord_col</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">not_visited</span><span class="grouping">)</span>
+        <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">_get_parents</span><span class="grouping">(</span><span class="identifier">A</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">coord_col</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">not_visited</span><span class="grouping">)</span>
+        <span class="comment"># List comprehension is faster than a for loop</span>
+        <span class="grouping">[</span><span class="identifier">A</span><span class="grouping">[</span><span class="identifier">col</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">k</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">col</span> <span class="relational-operator">in</span> <span class="identifier">coord_col</span><span class="grouping">]</span>
+        <span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">coord_col</span><span class="grouping">)</span>
+        <span class="identifier">coord_col</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">coord_col</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+        <span class="identifier">coord_row</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">coord_col</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+        <span class="identifier">coord_row</span><span class="punctuation">.</span><span class="identifier">fill</span><span class="grouping">(</span><span class="identifier">k</span><span class="grouping">)</span>
+        <span class="identifier">n_additions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">coord_row</span><span class="grouping">)</span>
+        <span class="identifier">ini</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_additions</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">'C'</span><span class="grouping">)</span>
+
+        <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">compute_ward_dist</span><span class="grouping">(</span><span class="identifier">moments_1</span><span class="punctuation">,</span> <span class="identifier">moments_2</span><span class="punctuation">,</span>
+                                        <span class="identifier">coord_row</span><span class="punctuation">,</span> <span class="identifier">coord_col</span><span class="punctuation">,</span> <span class="identifier">ini</span><span class="grouping">)</span>
+
+        <span class="comment"># List comprehension is faster than a for loop</span>
+        <span class="grouping">[</span><span class="identifier">heappush</span><span class="grouping">(</span><span class="identifier">inertia</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">ini</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">coord_col</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">for</span> <span class="identifier">idx</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_additions</span><span class="grouping">)</span><span class="grouping">]</span>
+
+    <span class="comment"># Separate leaves in children (empty lists up to now)</span>
+    <span class="identifier">n_leaves</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span>
+    <span class="comment"># sort children to get consistent output with unstructured version</span>
+    <span class="identifier">children</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">c</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">c</span> <span class="relational-operator">in</span> <span class="identifier">children</span><span class="grouping">]</span>
+    <span class="identifier">children</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">children</span><span class="grouping">)</span>  <span class="comment"># return numpy array for efficient caching</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="comment"># 2 is scaling factor to compare w/ unstructured version</span>
+        <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">distances</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">children</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="identifier">n_leaves</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">distances</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">children</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="identifier">n_leaves</span><span class="punctuation">,</span> <span class="identifier">parent</span>
+
+
+<span class="comment"># single average and complete linkage</span>
+<span class="keyword">def</span> <span class="identifier">linkage_tree</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">linkage</span><span class="arithmetic-assignment">=</span><span class="string-literal">'complete'</span><span class="punctuation">,</span>
+                 <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="string-literal">"euclidean"</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Linkage agglomerative clustering based on a Feature matrix.
+
+    The inertia matrix uses a Heapq-based representation.
+
+    This is the structured version, that takes into account some topological
+    structure between samples.
+
+    Read more in the :ref:`User Guide &lt;hierarchical_clustering&gt;`.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        feature matrix representing n_samples samples to be clustered
+
+    connectivity : sparse matrix, default=None
+        connectivity matrix. Defines for each sample the neighboring samples
+        following a given structure of the data. The matrix is assumed to
+        be symmetric and only the upper triangular half is used.
+        Default is None, i.e, the Ward algorithm is unstructured.
+
+    n_clusters : int, default=None
+        Stop early the construction of the tree at n_clusters. This is
+        useful to decrease computation time if the number of clusters is
+        not small compared to the number of samples. In this case, the
+        complete tree is not computed, thus the 'children' output is of
+        limited use, and the 'parents' output should rather be used.
+        This option is valid only when specifying a connectivity matrix.
+
+    linkage : {"average", "complete", "single"}, default="complete"
+        Which linkage criteria to use. The linkage criterion determines which
+        distance to use between sets of observation.
+            - average uses the average of the distances of each observation of
+              the two sets
+            - complete or maximum linkage uses the maximum distances between
+              all observations of the two sets.
+            - single uses the minimum of the distances between all observations
+              of the two sets.
+
+    affinity : str or callable, default="euclidean".
+        which metric to use. Can be "euclidean", "manhattan", or any
+        distance know to paired distance (see metric.pairwise)
+
+    return_distance : bool, default=False
+        whether or not to return the distances between the clusters.
+
+    Returns
+    -------
+    children : ndarray of shape (n_nodes-1, 2)
+        The children of each non-leaf node. Values less than `n_samples`
+        correspond to leaves of the tree which are the original samples.
+        A node `i` greater than or equal to `n_samples` is a non-leaf
+        node and has children `children_[i - n_samples]`. Alternatively
+        at the i-th iteration, children[i][0] and children[i][1]
+        are merged to form node `n_samples + i`
+
+    n_connected_components : int
+        The number of connected components in the graph.
+
+    n_leaves : int
+        The number of leaves in the tree.
+
+    parents : ndarray of shape (n_nodes, ) or None
+        The parent of each node. Only returned when a connectivity matrix
+        is specified, elsewhere 'None' is returned.
+
+    distances : ndarray of shape (n_nodes-1,)
+        Returned when return_distance is set to True.
+
+        distances[i] refers to the distance between children[i][0] and
+        children[i][1] when they are merged.
+
+    See Also
+    --------
+    ward_tree : Hierarchical clustering with ward linkage.
+    """</span>
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="identifier">linkage_choices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="string-literal">'complete'</span><span class="punctuation">:</span> <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">max_merge</span><span class="punctuation">,</span>
+                       <span class="string-literal">'average'</span><span class="punctuation">:</span> <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">average_merge</span><span class="punctuation">,</span>
+                       <span class="string-literal">'single'</span><span class="punctuation">:</span> <span class="none-literal">None</span><span class="grouping">}</span>  <span class="comment"># Single linkage is handled differently</span>
+    <span class="keyword">try</span><span class="punctuation">:</span>
+        <span class="identifier">join_func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linkage_choices</span><span class="grouping">[</span><span class="identifier">linkage</span><span class="grouping">]</span>
+    <span class="keyword">except</span> <span class="identifier">KeyError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">'Unknown linkage option, linkage should be one '</span>
+            <span class="string-literal">'of %s, but %s was given'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">linkage_choices</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">linkage</span><span class="grouping">)</span>
+        <span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+
+    <span class="keyword">if</span> <span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">'cosine'</span> <span class="logical-operator">and</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="bitwise-operator">~</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+            <span class="string-literal">'Cosine affinity cannot be used when X contains zero vectors'</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">connectivity</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">hierarchy</span>  <span class="comment"># imports PIL</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_clusters</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'Partial build of the tree is implemented '</span>
+                          <span class="string-literal">'only for structured clustering (i.e. with '</span>
+                          <span class="string-literal">'explicit connectivity). The algorithm '</span>
+                          <span class="string-literal">'will build the full tree and only '</span>
+                          <span class="string-literal">'retain the lower branches required '</span>
+                          <span class="string-literal">'for the specified number of clusters'</span><span class="punctuation">,</span>
+                          <span class="identifier">stacklevel</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">'precomputed'</span><span class="punctuation">:</span>
+            <span class="comment"># for the linkage function of hierarchy to work on precomputed</span>
+            <span class="comment"># data, provide as first argument an ndarray of the shape returned</span>
+            <span class="comment"># by sklearn.metrics.pairwise_distances.</span>
+            <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">'Distance matrix should be square, '</span>
+                    <span class="string-literal">'Got matrix of shape {X.shape}'</span>
+                <span class="grouping">)</span>
+            <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">j</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">triu_indices</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">'l2'</span><span class="punctuation">:</span>
+            <span class="comment"># Translate to something understood by scipy</span>
+            <span class="identifier">affinity</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'euclidean'</span>
+        <span class="keyword">elif</span> <span class="identifier">affinity</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'l1', 'manhattan'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">affinity</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'cityblock'</span>
+        <span class="keyword">elif</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">affinity</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">affinity</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">j</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">triu_indices</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">linkage</span> <span class="relational-operator">==</span> <span class="string-literal">'single'</span>
+                <span class="logical-operator">and</span> <span class="identifier">affinity</span> <span class="relational-operator">!=</span> <span class="string-literal">'precomputed'</span>
+                <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">affinity</span><span class="grouping">)</span>
+                <span class="logical-operator">and</span> <span class="identifier">affinity</span> <span class="relational-operator">in</span> <span class="identifier">METRIC_MAPPING</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+            <span class="comment"># We need the fast cythonized metric from neighbors</span>
+            <span class="identifier">dist_metric</span> <span class="arithmetic-assignment">=</span> <span class="identifier">DistanceMetric</span><span class="punctuation">.</span><span class="identifier">get_metric</span><span class="grouping">(</span><span class="identifier">affinity</span><span class="grouping">)</span>
+
+            <span class="comment"># The Cython routines used require contiguous arrays</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">c</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">g</span><span class="invalid">u</span><span class="invalid">o</span><span class="invalid">u</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">double</span><span class="grouping">)</span>
+
+            <span class="identifier">mst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">mst_linkage_core</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dist_metric</span><span class="grouping">)</span>
+            <span class="comment"># Sort edges of the min_spanning_tree by weight</span>
+            <span class="identifier">mst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">mst</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">mst</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">[</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">kind</span><span class="arithmetic-assignment">=</span><span class="string-literal">'mergesort'</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+
+            <span class="comment"># Convert edge list into standard hierarchical clustering format</span>
+            <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">single_linkage_label</span><span class="grouping">(</span><span class="identifier">mst</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">hierarchy</span><span class="punctuation">.</span><span class="identifier">linkage</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="identifier">linkage</span><span class="punctuation">,</span> <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">affinity</span><span class="grouping">)</span>
+        <span class="identifier">children_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">2</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">int</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+            <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">]</span>
+            <span class="keyword">return</span> <span class="identifier">children_</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">distances</span>
+        <span class="keyword">return</span> <span class="identifier">children_</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="none-literal">None</span>
+
+    <span class="identifier">connectivity</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_fix_connectivity</span><span class="grouping">(</span>
+                                                <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="punctuation">,</span>
+                                                <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="identifier">affinity</span><span class="grouping">)</span>
+    <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">tocoo</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="comment"># Put the diagonal to zero</span>
+    <span class="identifier">diag_mask</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">row</span> <span class="relational-operator">!=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">col</span><span class="grouping">)</span>
+    <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">row</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">row</span><span class="grouping">[</span><span class="identifier">diag_mask</span><span class="grouping">]</span>
+    <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">col</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">col</span><span class="grouping">[</span><span class="identifier">diag_mask</span><span class="grouping">]</span>
+    <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">diag_mask</span><span class="grouping">]</span>
+    <span class="keyword">del</span> <span class="identifier">diag_mask</span>
+
+    <span class="keyword">if</span> <span class="identifier">affinity</span> <span class="relational-operator">==</span> <span class="string-literal">'precomputed'</span><span class="punctuation">:</span>
+        <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">row</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">col</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span>
+            <span class="string-literal">'float64'</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">_astype_copy_false</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># FIXME We compute all the distances, while we could have only computed</span>
+        <span class="comment"># the "interesting" distances</span>
+        <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">paired_distances</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">row</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                     <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">col</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                     <span class="identifier">metric</span><span class="arithmetic-assignment">=</span><span class="identifier">affinity</span><span class="grouping">)</span>
+    <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">distances</span>
+
+    <span class="keyword">if</span> <span class="identifier">n_clusters</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">n_nodes</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">assert</span> <span class="identifier">n_clusters</span> <span class="relational-operator">&lt;=</span> <span class="identifier">n_samples</span>
+        <span class="identifier">n_nodes</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_clusters</span>
+
+    <span class="keyword">if</span> <span class="identifier">linkage</span> <span class="relational-operator">==</span> <span class="string-literal">'single'</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">_single_linkage_tree</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_nodes</span><span class="punctuation">,</span>
+                                    <span class="identifier">n_clusters</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span>
+                                    <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="identifier">distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_nodes</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+    <span class="comment"># create inertia heap and connection matrix</span>
+    <span class="identifier">A</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+    <span class="identifier">inertia</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="comment"># LIL seems to the best format to access the rows quickly,</span>
+    <span class="comment"># without the numpy overhead of slicing CSR indices and data.</span>
+    <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">tolil</span><span class="grouping">(</span><span class="grouping">)</span>
+    <span class="comment"># We are storing the graph in a list of IntFloatDict</span>
+    <span class="keyword">for</span> <span class="identifier">ind</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">row</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">data</span><span class="punctuation">,</span>
+                                          <span class="identifier">connectivity</span><span class="punctuation">.</span><span class="identifier">rows</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">A</span><span class="grouping">[</span><span class="identifier">ind</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">IntFloatDict</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">row</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="grouping">)</span><span class="punctuation">,</span>
+                              <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="comment"># We keep only the upper triangular for the heap</span>
+        <span class="comment"># Generator expressions are faster than arrays on the following</span>
+        <span class="identifier">inertia</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">WeightedEdge</span><span class="grouping">(</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">ind</span><span class="punctuation">,</span> <span class="identifier">r</span><span class="grouping">)</span>
+                       <span class="keyword">for</span> <span class="identifier">r</span><span class="punctuation">,</span> <span class="identifier">d</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">row</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">r</span> <span class="relational-operator">&lt;</span> <span class="identifier">ind</span><span class="grouping">)</span>
+    <span class="keyword">del</span> <span class="identifier">connectivity</span>
+
+    <span class="identifier">heapify</span><span class="grouping">(</span><span class="identifier">inertia</span><span class="grouping">)</span>
+
+    <span class="comment"># prepare the main fields</span>
+    <span class="identifier">parent</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="grouping">)</span>
+    <span class="identifier">used_node</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_nodes</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="grouping">)</span>
+    <span class="identifier">children</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+    <span class="comment"># recursive merge loop</span>
+    <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_nodes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># identify the merge</span>
+        <span class="keyword">while</span> <span class="bool-literal">True</span><span class="punctuation">:</span>
+            <span class="identifier">edge</span> <span class="arithmetic-assignment">=</span> <span class="identifier">heappop</span><span class="grouping">(</span><span class="identifier">inertia</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">edge</span><span class="punctuation">.</span><span class="identifier">a</span><span class="grouping">]</span> <span class="logical-operator">and</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">edge</span><span class="punctuation">.</span><span class="identifier">b</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+        <span class="identifier">i</span> <span class="arithmetic-assignment">=</span> <span class="identifier">edge</span><span class="punctuation">.</span><span class="identifier">a</span>
+        <span class="identifier">j</span> <span class="arithmetic-assignment">=</span> <span class="identifier">edge</span><span class="punctuation">.</span><span class="identifier">b</span>
+
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+            <span class="comment"># store distances</span>
+            <span class="identifier">distances</span><span class="grouping">[</span><span class="identifier">k</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_samples</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">edge</span><span class="punctuation">.</span><span class="identifier">weight</span>
+
+        <span class="identifier">parent</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">parent</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">k</span>
+        <span class="identifier">children</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="comment"># Keep track of the number of elements per cluster</span>
+        <span class="identifier">n_i</span> <span class="arithmetic-assignment">=</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+        <span class="identifier">n_j</span> <span class="arithmetic-assignment">=</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span>
+        <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">k</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_i</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_j</span>
+        <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">used_node</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+
+        <span class="comment"># update the structure matrix A and the inertia matrix</span>
+        <span class="comment"># a clever 'min', or 'max' operation between A[i] and A[j]</span>
+        <span class="identifier">coord_col</span> <span class="arithmetic-assignment">=</span> <span class="identifier">join_func</span><span class="grouping">(</span><span class="identifier">A</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">A</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">used_node</span><span class="punctuation">,</span> <span class="identifier">n_i</span><span class="punctuation">,</span> <span class="identifier">n_j</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">col</span><span class="punctuation">,</span> <span class="identifier">d</span> <span class="relational-operator">in</span> <span class="identifier">coord_col</span><span class="punctuation">:</span>
+            <span class="identifier">A</span><span class="grouping">[</span><span class="identifier">col</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">d</span><span class="grouping">)</span>
+            <span class="comment"># Here we use the information from coord_col (containing the</span>
+            <span class="comment"># distances) to update the heap</span>
+            <span class="identifier">heappush</span><span class="grouping">(</span><span class="identifier">inertia</span><span class="punctuation">,</span> <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">WeightedEdge</span><span class="grouping">(</span><span class="identifier">d</span><span class="punctuation">,</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">col</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">A</span><span class="grouping">[</span><span class="identifier">k</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">coord_col</span>
+        <span class="comment"># Clear A[i] and A[j] to save memory</span>
+        <span class="identifier">A</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">A</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="comment"># Separate leaves in children (empty lists up to now)</span>
+    <span class="identifier">n_leaves</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span>
+
+    <span class="comment"># # return numpy array for efficient caching</span>
+    <span class="identifier">children</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">children</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+    <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">children</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="identifier">n_leaves</span><span class="punctuation">,</span> <span class="identifier">parent</span><span class="punctuation">,</span> <span class="identifier">distances</span>
+    <span class="keyword">return</span> <span class="identifier">children</span><span class="punctuation">,</span> <span class="identifier">n_connected_components</span><span class="punctuation">,</span> <span class="identifier">n_leaves</span><span class="punctuation">,</span> <span class="identifier">parent</span>
+
+
+<span class="comment"># Matching names to tree-building strategies</span>
+<span class="keyword">def</span> <span class="identifier">_complete_linkage</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">'linkage'] = 'complete'</span>
+    <span class="keyword">return</span> <span class="identifier">linkage_tree</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_average_linkage</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">'linkage'] = 'average'</span>
+    <span class="keyword">return</span> <span class="identifier">linkage_tree</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_single_linkage</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">'linkage'] = 'single'</span>
+    <span class="keyword">return</span> <span class="identifier">linkage_tree</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="identifier">_TREE_BUILDERS</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span>
+    <span class="identifier">ward</span><span class="arithmetic-assignment">=</span><span class="identifier">ward_tree</span><span class="punctuation">,</span>
+    <span class="identifier">complete</span><span class="arithmetic-assignment">=</span><span class="identifier">_complete_linkage</span><span class="punctuation">,</span>
+    <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="identifier">_average_linkage</span><span class="punctuation">,</span>
+    <span class="identifier">single</span><span class="arithmetic-assignment">=</span><span class="identifier">_single_linkage</span><span class="grouping">)</span>
+
+
+<span class="comment">###############################################################################</span>
+<span class="comment"># Functions for cutting hierarchical clustering tree</span>
+
+<span class="keyword">def</span> <span class="identifier">_hc_cut</span><span class="grouping">(</span><span class="identifier">n_clusters</span><span class="punctuation">,</span> <span class="identifier">children</span><span class="punctuation">,</span> <span class="identifier">n_leaves</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Function cutting the ward tree for a given number of clusters.
+
+    Parameters
+    ----------
+    n_clusters : int or ndarray
+        The number of clusters to form.
+
+    children : ndarray of shape (n_nodes-1, 2)
+        The children of each non-leaf node. Values less than `n_samples`
+        correspond to leaves of the tree which are the original samples.
+        A node `i` greater than or equal to `n_samples` is a non-leaf
+        node and has children `children_[i - n_samples]`. Alternatively
+        at the i-th iteration, children[i][0] and children[i][1]
+        are merged to form node `n_samples + i`
+
+    n_leaves : int
+        Number of leaves of the tree.
+
+    Returns
+    -------
+    labels : array [n_samples]
+        cluster labels for each point
+
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">n_clusters</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_leaves</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'Cannot extract more clusters than samples: '</span>
+                         <span class="string-literal">'%s clusters where given for a tree with %s leaves.'</span>
+                         <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_clusters</span><span class="punctuation">,</span> <span class="identifier">n_leaves</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="comment"># In this function, we store nodes as a heap to avoid recomputing</span>
+    <span class="comment"># the max of the nodes: the first element is always the smallest</span>
+    <span class="comment"># We use negated indices as heaps work on smallest elements, and we</span>
+    <span class="comment"># are interested in largest elements</span>
+    <span class="comment"># children[-1] is the root of the tree</span>
+    <span class="identifier">nodes</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">children</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span>
+    <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_clusters</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># As we have a heap, nodes[0] is the smallest element</span>
+        <span class="identifier">these_children</span> <span class="arithmetic-assignment">=</span> <span class="identifier">children</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="identifier">nodes</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_leaves</span><span class="grouping">]</span>
+        <span class="comment"># Insert the 2 children and remove the largest node</span>
+        <span class="identifier">heappush</span><span class="grouping">(</span><span class="identifier">nodes</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">these_children</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">heappushpop</span><span class="grouping">(</span><span class="identifier">nodes</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">these_children</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">label</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_leaves</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">intp</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">node</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">nodes</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">label</span><span class="grouping">[</span><span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">_hc_get_descendent</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="identifier">node</span><span class="punctuation">,</span> <span class="identifier">children</span><span class="punctuation">,</span> <span class="identifier">n_leaves</span><span class="grouping">)</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span>
+    <span class="keyword">return</span> <span class="identifier">label</span>
+
+
+<span class="comment">###############################################################################</span>
+
+<span class="keyword">class</span> <span class="identifier">AgglomerativeClustering</span><span class="grouping">(</span><span class="identifier">ClusterMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Agglomerative Clustering
+
+    Recursively merges the pair of clusters that minimally increases
+    a given linkage distance.
+
+    Read more in the :ref:`User Guide &lt;hierarchical_clustering&gt;`.
+
+    Parameters
+    ----------
+    n_clusters : int or None, default=2
+        The number of clusters to find. It must be ``None`` if
+        ``distance_threshold`` is not ``None``.
+
+    affinity : str or callable, default='euclidean'
+        Metric used to compute the linkage. Can be "euclidean", "l1", "l2",
+        "manhattan", "cosine", or "precomputed".
+        If linkage is "ward", only "euclidean" is accepted.
+        If "precomputed", a distance matrix (instead of a similarity matrix)
+        is needed as input for the fit method.
+
+    memory : str or object with the joblib.Memory interface, default=None
+        Used to cache the output of the computation of the tree.
+        By default, no caching is done. If a string is given, it is the
+        path to the caching directory.
+
+    connectivity : array-like or callable, default=None
+        Connectivity matrix. Defines for each sample the neighboring
+        samples following a given structure of the data.
+        This can be a connectivity matrix itself or a callable that transforms
+        the data into a connectivity matrix, such as derived from
+        kneighbors_graph. Default is ``None``, i.e, the
+        hierarchical clustering algorithm is unstructured.
+
+    compute_full_tree : 'auto' or bool, default='auto'
+        Stop early the construction of the tree at ``n_clusters``. This is
+        useful to decrease computation time if the number of clusters is not
+        small compared to the number of samples. This option is useful only
+        when specifying a connectivity matrix. Note also that when varying the
+        number of clusters and using caching, it may be advantageous to compute
+        the full tree. It must be ``True`` if ``distance_threshold`` is not
+        ``None``. By default `compute_full_tree` is "auto", which is equivalent
+        to `True` when `distance_threshold` is not `None` or that `n_clusters`
+        is inferior to the maximum between 100 or `0.02 * n_samples`.
+        Otherwise, "auto" is equivalent to `False`.
+
+    linkage : {'ward', 'complete', 'average', 'single'}, default='ward'
+        Which linkage criterion to use. The linkage criterion determines which
+        distance to use between sets of observation. The algorithm will merge
+        the pairs of cluster that minimize this criterion.
+
+        - 'ward' minimizes the variance of the clusters being merged.
+        - 'average' uses the average of the distances of each observation of
+          the two sets.
+        - 'complete' or 'maximum' linkage uses the maximum distances between
+          all observations of the two sets.
+        - 'single' uses the minimum of the distances between all observations
+          of the two sets.
+
+        .. versionadded:: 0.20
+            Added the 'single' option
+
+    distance_threshold : float, default=None
+        The linkage distance threshold above which, clusters will not be
+        merged. If not ``None``, ``n_clusters`` must be ``None`` and
+        ``compute_full_tree`` must be ``True``.
+
+        .. versionadded:: 0.21
+
+    compute_distances : bool, default=False
+        Computes distances between clusters even if `distance_threshold` is not
+        used. This can be used to make dendrogram visualization, but introduces
+        a computational and memory overhead.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    n_clusters_ : int
+        The number of clusters found by the algorithm. If
+        ``distance_threshold=None``, it will be equal to the given
+        ``n_clusters``.
+
+    labels_ : ndarray of shape (n_samples)
+        cluster labels for each point
+
+    n_leaves_ : int
+        Number of leaves in the hierarchical tree.
+
+    n_connected_components_ : int
+        The estimated number of connected components in the graph.
+
+        .. versionadded:: 0.21
+            ``n_connected_components_`` was added to replace ``n_components_``.
+
+    children_ : array-like of shape (n_samples-1, 2)
+        The children of each non-leaf node. Values less than `n_samples`
+        correspond to leaves of the tree which are the original samples.
+        A node `i` greater than or equal to `n_samples` is a non-leaf
+        node and has children `children_[i - n_samples]`. Alternatively
+        at the i-th iteration, children[i][0] and children[i][1]
+        are merged to form node `n_samples + i`
+
+    distances_ : array-like of shape (n_nodes-1,)
+        Distances between nodes in the corresponding place in `children_`.
+        Only computed if `distance_threshold` is used or `compute_distances`
+        is set to `True`.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.cluster import AgglomerativeClustering
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; X = np.array([[1, 2], [1, 4], [1, 0],
+    ...               [4, 2], [4, 4], [4, 0]])
+    &gt;&gt;&gt; clustering = AgglomerativeClustering().fit(X)
+    &gt;&gt;&gt; clustering
+    AgglomerativeClustering()
+    &gt;&gt;&gt; clustering.labels_
+    array([1, 1, 1, 0, 0, 0])
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="string-literal">"euclidean"</span><span class="punctuation">,</span>
+                 <span class="identifier">memory</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">connectivity</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">compute_full_tree</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">linkage</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ward'</span><span class="punctuation">,</span> <span class="identifier">distance_threshold</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">compute_distances</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_clusters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distance_threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">distance_threshold</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">memory</span> <span class="arithmetic-assignment">=</span> <span class="identifier">memory</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">connectivity</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_full_tree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">compute_full_tree</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">linkage</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linkage</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">affinity</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_distances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">compute_distances</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the hierarchical clustering from features, or distance matrix.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features) or (n_samples, n_samples)
+            Training instances to cluster, or distances between instances if
+            ``affinity='precomputed'``.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ensure_min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">memory</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_memory</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">memory</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"n_clusters should be an integer greater than 0."</span>
+                             <span class="string-literal">" %s was provided."</span> <span class="arithmetic-operator">%</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="bitwise-operator">^</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distance_threshold</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Exactly one of n_clusters and "</span>
+                             <span class="string-literal">"distance_threshold has to be set, and the other "</span>
+                             <span class="string-literal">"needs to be None."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distance_threshold</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span>
+                <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_full_tree</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"compute_full_tree must be True if "</span>
+                             <span class="string-literal">"distance_threshold is set."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">linkage</span> <span class="relational-operator">==</span> <span class="string-literal">"ward" and self.affinity != "euclidean"</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"%s was provided as affinity. Ward can only "</span>
+                             <span class="string-literal">"work with euclidean distances."</span> <span class="arithmetic-operator">%</span>
+                             <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span><span class="punctuation">,</span> <span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">linkage</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">_TREE_BUILDERS</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unknown linkage type %s. "</span>
+                             <span class="string-literal">"Valid options are %s"</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">linkage</span><span class="punctuation">,</span>
+                                                       <span class="identifier">_TREE_BUILDERS</span><span class="punctuation">.</span><span class="identifier">keys</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">tree_builder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_TREE_BUILDERS</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">linkage</span><span class="grouping">]</span>
+
+        <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">connectivity</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">connectivity</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">connectivity</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">connectivity</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="identifier">connectivity</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span>
+                <span class="identifier">connectivity</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csr', 'coo', 'lil'</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="identifier">compute_full_tree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_full_tree</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">connectivity</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">compute_full_tree</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">if</span> <span class="identifier">compute_full_tree</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distance_threshold</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">compute_full_tree</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="comment"># Early stopping is likely to give a speed up only for</span>
+                <span class="comment"># a large number of clusters. The actual threshold</span>
+                <span class="comment"># implemented here is heuristic</span>
+                <span class="identifier">compute_full_tree</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span> <span class="relational-operator">&lt;</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="float-literal">.02</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">n_clusters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span>
+        <span class="keyword">if</span> <span class="identifier">compute_full_tree</span><span class="punctuation">:</span>
+            <span class="identifier">n_clusters</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="comment"># Construct the tree</span>
+        <span class="identifier">kwargs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">linkage</span> <span class="relational-operator">!=</span> <span class="string-literal">'ward'</span><span class="punctuation">:</span>
+            <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">'linkage'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">linkage</span>
+            <span class="identifier">kwargs</span><span class="grouping">[</span><span class="string-literal">'affinity'</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">affinity</span>
+
+        <span class="identifier">distance_threshold</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distance_threshold</span>
+
+        <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+            <span class="grouping">(</span><span class="identifier">distance_threshold</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">compute_distances</span>
+        <span class="grouping">)</span>
+
+        <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">memory</span><span class="punctuation">.</span><span class="identifier">cache</span><span class="grouping">(</span><span class="identifier">tree_builder</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="arithmetic-assignment">=</span><span class="identifier">connectivity</span><span class="punctuation">,</span>
+                                         <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="identifier">n_clusters</span><span class="punctuation">,</span>
+                                         <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">,</span>
+                                         <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+        <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">children_</span><span class="punctuation">,</span>
+         <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_connected_components_</span><span class="punctuation">,</span>
+         <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_leaves_</span><span class="punctuation">,</span>
+         <span class="identifier">parents</span><span class="grouping">)</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out</span><span class="grouping">[</span><span class="punctuation">:</span><span class="int-literal">4</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distances_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">out</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distance_threshold</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>  <span class="comment"># distance_threshold is used</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">count_nonzero</span><span class="grouping">(</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">distances_</span> <span class="relational-operator">&gt;=</span> <span class="identifier">distance_threshold</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># n_clusters is used</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters</span>
+
+        <span class="comment"># Cut the tree</span>
+        <span class="keyword">if</span> <span class="identifier">compute_full_tree</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_hc_cut</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_clusters_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">children_</span><span class="punctuation">,</span>
+                                   <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_leaves_</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_hierarchical</span><span class="punctuation">.</span><span class="identifier">hc_get_heads</span><span class="grouping">(</span><span class="identifier">parents</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="comment"># copy to avoid holding a reference on the original array</span>
+            <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_samples</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="comment"># Reassign cluster numbers</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">labels_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">searchsorted</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">labels</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the hierarchical clustering from features or distance matrix,
+        and return cluster labels.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features) or \
+                (n_samples, n_samples)
+            Training instances to cluster, or distances between instances if
+            ``affinity='precomputed'``.
+
+        y : Ignored
+            Not used, present here for API consistency by convention.
+
+        Returns
+        -------
+        labels : ndarray of shape (n_samples,)
+            Cluster labels.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit_predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">FeatureAgglomeration</span><span class="grouping">(</span><span class="identifier">AgglomerativeClustering</span><span class="punctuation">,</span> <span class="identifier">AgglomerationTransform</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Agglomerate features.
+
+    Similar to AgglomerativeClustering, but recursively merges features
+    instead of samples.
+
+    Read more in the :ref:`User Guide &lt;hierarchical_clustering&gt;`.
+
+    Parameters
+    ----------
+    n_clusters : int, default=2
+        The number of clusters to find. It must be ``None`` if
+        ``distance_threshold`` is not ``None``.
+
+    affinity : str or callable, default='euclidean'
+        Metric used to compute the linkage. Can be "euclidean", "l1", "l2",
+        "manhattan", "cosine", or 'precomputed'.
+        If linkage is "ward", only "euclidean" is accepted.
+
+    memory : str or object with the joblib.Memory interface, default=None
+        Used to cache the output of the computation of the tree.
+        By default, no caching is done. If a string is given, it is the
+        path to the caching directory.
+
+    connectivity : array-like or callable, default=None
+        Connectivity matrix. Defines for each feature the neighboring
+        features following a given structure of the data.
+        This can be a connectivity matrix itself or a callable that transforms
+        the data into a connectivity matrix, such as derived from
+        kneighbors_graph. Default is None, i.e, the
+        hierarchical clustering algorithm is unstructured.
+
+    compute_full_tree : 'auto' or bool, default='auto'
+        Stop early the construction of the tree at n_clusters. This is useful
+        to decrease computation time if the number of clusters is not small
+        compared to the number of features. This option is useful only when
+        specifying a connectivity matrix. Note also that when varying the
+        number of clusters and using caching, it may be advantageous to compute
+        the full tree. It must be ``True`` if ``distance_threshold`` is not
+        ``None``. By default `compute_full_tree` is "auto", which is equivalent
+        to `True` when `distance_threshold` is not `None` or that `n_clusters`
+        is inferior to the maximum between 100 or `0.02 * n_samples`.
+        Otherwise, "auto" is equivalent to `False`.
+
+    linkage : {'ward', 'complete', 'average', 'single'}, default='ward'
+        Which linkage criterion to use. The linkage criterion determines which
+        distance to use between sets of features. The algorithm will merge
+        the pairs of cluster that minimize this criterion.
+
+        - ward minimizes the variance of the clusters being merged.
+        - average uses the average of the distances of each feature of
+          the two sets.
+        - complete or maximum linkage uses the maximum distances between
+          all features of the two sets.
+        - single uses the minimum of the distances between all features
+          of the two sets.
+
+    pooling_func : callable, default=np.mean
+        This combines the values of agglomerated features into a single
+        value, and should accept an array of shape [M, N] and the keyword
+        argument `axis=1`, and reduce it to an array of size [M].
+
+    distance_threshold : float, default=None
+        The linkage distance threshold above which, clusters will not be
+        merged. If not ``None``, ``n_clusters`` must be ``None`` and
+        ``compute_full_tree`` must be ``True``.
+
+        .. versionadded:: 0.21
+
+    compute_distances : bool, default=False
+        Computes distances between clusters even if `distance_threshold` is not
+        used. This can be used to make dendrogram visualization, but introduces
+        a computational and memory overhead.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    n_clusters_ : int
+        The number of clusters found by the algorithm. If
+        ``distance_threshold=None``, it will be equal to the given
+        ``n_clusters``.
+
+    labels_ : array-like of (n_features,)
+        cluster labels for each feature.
+
+    n_leaves_ : int
+        Number of leaves in the hierarchical tree.
+
+    n_connected_components_ : int
+        The estimated number of connected components in the graph.
+
+        .. versionadded:: 0.21
+            ``n_connected_components_`` was added to replace ``n_components_``.
+
+    children_ : array-like of shape (n_nodes-1, 2)
+        The children of each non-leaf node. Values less than `n_features`
+        correspond to leaves of the tree which are the original samples.
+        A node `i` greater than or equal to `n_features` is a non-leaf
+        node and has children `children_[i - n_features]`. Alternatively
+        at the i-th iteration, children[i][0] and children[i][1]
+        are merged to form node `n_features + i`
+
+    distances_ : array-like of shape (n_nodes-1,)
+        Distances between nodes in the corresponding place in `children_`.
+        Only computed if `distance_threshold` is used or `compute_distances`
+        is set to `True`.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn import datasets, cluster
+    &gt;&gt;&gt; digits = datasets.load_digits()
+    &gt;&gt;&gt; images = digits.images
+    &gt;&gt;&gt; X = np.reshape(images, (len(images), -1))
+    &gt;&gt;&gt; agglo = cluster.FeatureAgglomeration(n_clusters=32)
+    &gt;&gt;&gt; agglo.fit(X)
+    FeatureAgglomeration(n_clusters=32)
+    &gt;&gt;&gt; X_reduced = agglo.transform(X)
+    &gt;&gt;&gt; X_reduced.shape
+    (1797, 32)
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="string-literal">"euclidean"</span><span class="punctuation">,</span>
+                 <span class="identifier">memory</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">connectivity</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">compute_full_tree</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span>
+                 <span class="identifier">linkage</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ward'</span><span class="punctuation">,</span> <span class="identifier">pooling_func</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="punctuation">,</span>
+                 <span class="identifier">distance_threshold</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">compute_distances</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">n_clusters</span><span class="arithmetic-assignment">=</span><span class="identifier">n_clusters</span><span class="punctuation">,</span> <span class="identifier">memory</span><span class="arithmetic-assignment">=</span><span class="identifier">memory</span><span class="punctuation">,</span> <span class="identifier">connectivity</span><span class="arithmetic-assignment">=</span><span class="identifier">connectivity</span><span class="punctuation">,</span>
+            <span class="identifier">compute_full_tree</span><span class="arithmetic-assignment">=</span><span class="identifier">compute_full_tree</span><span class="punctuation">,</span> <span class="identifier">linkage</span><span class="arithmetic-assignment">=</span><span class="identifier">linkage</span><span class="punctuation">,</span>
+            <span class="identifier">affinity</span><span class="arithmetic-assignment">=</span><span class="identifier">affinity</span><span class="punctuation">,</span> <span class="identifier">distance_threshold</span><span class="arithmetic-assignment">=</span><span class="identifier">distance_threshold</span><span class="punctuation">,</span>
+            <span class="identifier">compute_distances</span><span class="arithmetic-assignment">=</span><span class="identifier">compute_distances</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pooling_func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pooling_func</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">params</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the hierarchical clustering on the data
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data
+
+        y : Ignored
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csr', 'csc', 'coo'</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                <span class="identifier">ensure_min_features</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="comment"># save n_features_in_ attribute here to reset it after, because it will</span>
+        <span class="comment"># be overridden in AgglomerativeClustering since we passed it X.T.</span>
+        <span class="identifier">n_features_in_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_in_</span>
+        <span class="identifier">AgglomerativeClustering</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">params</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_features_in_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features_in_</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">fit_predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">AttributeError</span>
+
+    </pre>
+  </body>
+</html>

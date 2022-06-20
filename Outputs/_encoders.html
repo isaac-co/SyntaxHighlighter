@@ -1,0 +1,910 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Andreas Mueller &lt;amueller@ais.uni-bonn.de&gt;</span>
+<span class="comment">#          Joris Van den Bossche &lt;jorisvandenbossche@gmail.com&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">sparse</span>
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_array</span><span class="punctuation">,</span> <span class="identifier">is_scalar_nan</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_mask</span> <span class="keyword">import</span> <span class="identifier">_get_mask</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">_encode</span> <span class="keyword">import</span> <span class="identifier">_encode</span><span class="punctuation">,</span> <span class="identifier">_check_unknown</span><span class="punctuation">,</span> <span class="identifier">_unique</span>
+
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+    <span class="string-literal">'OneHotEncoder'</span><span class="punctuation">,</span>
+    <span class="string-literal">'OrdinalEncoder'</span>
+<span class="grouping">]</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_BaseEncoder</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Base class for encoders that includes the code to categorize and
+    transform the input features.
+
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">_check_X</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Perform custom check_array:
+        - convert list of strings to object dtype
+        - check for missing values for object dtype data (check_array does
+          not do that)
+        - return list of features (arrays): this list of features is
+          constructed feature by feature to preserve the data types
+          of pandas DataFrame columns, as otherwise information is lost
+          and cannot be used, eg for the `categories_` attribute.
+
+        """</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="grouping">(</span><span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">'iloc') and getattr(X, 'ndim'</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># if not a dataframe, do normal check_array validation</span>
+            <span class="identifier">X_temp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                 <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="grouping">(</span><span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">'dtype'</span><span class="grouping">)</span>
+                    <span class="logical-operator">and</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">issubdtype</span><span class="grouping">(</span><span class="identifier">X_temp</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">str_</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="punctuation">,</span>
+                                <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_temp</span>
+            <span class="identifier">needs_validation</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># pandas dataframe, do validation later column by column, in order</span>
+            <span class="comment"># to keep the dtype information to be used in the encoder.</span>
+            <span class="identifier">needs_validation</span> <span class="arithmetic-assignment">=</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">X_columns</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_feature</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">feature_idx</span><span class="arithmetic-assignment">=</span><span class="identifier">i</span><span class="grouping">)</span>
+            <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">Xi</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                             <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="identifier">needs_validation</span><span class="grouping">)</span>
+            <span class="identifier">X_columns</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">Xi</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">X_columns</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_feature</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">feature_idx</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="string-literal">'iloc'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># pandas dataframes</span>
+            <span class="keyword">return</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">iloc</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">feature_idx</span><span class="grouping">]</span>
+        <span class="comment"># numpy arrays, sparse arrays</span>
+        <span class="keyword">return</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">feature_idx</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">handle_unknown</span><span class="arithmetic-assignment">=</span><span class="string-literal">'error'</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X_list</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories</span> <span class="relational-operator">!=</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Shape mismatch: if categories is an array,"</span>
+                                 <span class="string-literal">" it has to be of shape (n_features,)."</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_list</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+                <span class="identifier">cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_unique</span><span class="grouping">(</span><span class="identifier">Xi</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">Xi</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">Xi</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="string-literal">'OUS'</span><span class="punctuation">:</span>
+                    <span class="identifier">sorted_cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sort</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span>
+                    <span class="identifier">error_msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Unsorted categories are not "</span>
+                                 <span class="string-literal">"supported for numerical categories"</span><span class="grouping">)</span>
+                    <span class="comment"># if there are nans, nan should be the last element</span>
+                    <span class="identifier">stop_idx</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">sorted_cats</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+                    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="identifier">sorted_cats</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">stop_idx</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">cats</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">stop_idx</span><span class="grouping">]</span><span class="grouping">)</span> <span class="logical-operator">or</span>
+                        <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">sorted_cats</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span> <span class="logical-operator">and</span>
+                         <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isnan</span><span class="grouping">(</span><span class="identifier">sorted_cats</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">error_msg</span><span class="grouping">)</span>
+
+                <span class="keyword">if</span> <span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">'error'</span><span class="punctuation">:</span>
+                    <span class="identifier">diff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_unknown</span><span class="grouping">(</span><span class="identifier">Xi</span><span class="punctuation">,</span> <span class="identifier">cats</span><span class="grouping">)</span>
+                    <span class="keyword">if</span> <span class="identifier">diff</span><span class="punctuation">:</span>
+                        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Found unknown categories {0} in column {1}"</span>
+                               <span class="string-literal">" during fit"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">diff</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">)</span><span class="grouping">)</span>
+                        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">handle_unknown</span><span class="arithmetic-assignment">=</span><span class="string-literal">'error'</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                   <span class="identifier">warn_on_unknown</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">X_list</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_X</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">)</span>
+
+        <span class="identifier">X_int</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+        <span class="identifier">X_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">n_features</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"The number of features in X is different to the number of "</span>
+                <span class="string-literal">"features of the fitted data. The fitted data had {} features "</span>
+                <span class="string-literal">"and the X has {} features."</span>
+                <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="punctuation">,</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+
+        <span class="identifier">columns_with_unknown</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_list</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="identifier">diff</span><span class="punctuation">,</span> <span class="identifier">valid_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_check_unknown</span><span class="grouping">(</span><span class="identifier">Xi</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                              <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">k</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="identifier">valid_mask</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">'error'</span><span class="punctuation">:</span>
+                    <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Found unknown categories {0} in column {1}"</span>
+                           <span class="string-literal">" during transform"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">diff</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="keyword">if</span> <span class="identifier">warn_on_unknown</span><span class="punctuation">:</span>
+                        <span class="identifier">columns_with_unknown</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">i</span><span class="grouping">)</span>
+                    <span class="comment"># Set the problematic rows to an acceptable value and</span>
+                    <span class="comment"># continue `The rows are marked `X_mask` and will be</span>
+                    <span class="comment"># removed later.</span>
+                    <span class="identifier">X_mask</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">valid_mask</span>
+                    <span class="comment"># cast Xi into the largest string type necessary</span>
+                    <span class="comment"># to handle different lengths of numpy strings</span>
+                    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'U', 'S'</span><span class="grouping">)</span>
+                            <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">itemsize</span> <span class="relational-operator">&gt;</span> <span class="identifier">Xi</span><span class="punctuation">.</span><span class="identifier">itemsize</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xi</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+                    <span class="keyword">elif</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'O'</span> <span class="logical-operator">and</span>
+                            <span class="identifier">Xi</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">==</span> <span class="string-literal">'U'</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="comment"># categories are objects and Xi are numpy strings.</span>
+                        <span class="comment"># Cast Xi to an object dtype to prevent truncation</span>
+                        <span class="comment"># when setting invalid values.</span>
+                        <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xi</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">'O'</span><span class="grouping">)</span>
+                    <span class="keyword">else</span><span class="punctuation">:</span>
+                        <span class="identifier">Xi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Xi</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+
+                    <span class="identifier">Xi</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">valid_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="comment"># We use check_unknown=False, since _check_unknown was</span>
+            <span class="comment"># already called above.</span>
+            <span class="identifier">X_int</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_encode</span><span class="grouping">(</span><span class="identifier">Xi</span><span class="punctuation">,</span> <span class="identifier">uniques</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                  <span class="identifier">check_unknown</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">columns_with_unknown</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Found unknown categories in columns "</span>
+                          <span class="identifier">f</span><span class="string-literal">"{columns_with_unknown} during transform. These "</span>
+                          <span class="string-literal">"unknown categories will be encoded as all zeros"</span><span class="punctuation">,</span>
+                          <span class="identifier">UserWarning</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">X_int</span><span class="punctuation">,</span> <span class="identifier">X_mask</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span><span class="string-literal">'X_types': ['categorical'</span><span class="grouping">]</span><span class="grouping">}</span>
+
+
+<span class="keyword">class</span> <span class="identifier">OneHotEncoder</span><span class="grouping">(</span><span class="identifier">_BaseEncoder</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Encode categorical features as a one-hot numeric array.
+
+    The input to this transformer should be an array-like of integers or
+    strings, denoting the values taken on by categorical (discrete) features.
+    The features are encoded using a one-hot (aka 'one-of-K' or 'dummy')
+    encoding scheme. This creates a binary column for each category and
+    returns a sparse matrix or dense array (depending on the ``sparse``
+    parameter)
+
+    By default, the encoder derives the categories based on the unique values
+    in each feature. Alternatively, you can also specify the `categories`
+    manually.
+
+    This encoding is needed for feeding categorical data to many scikit-learn
+    estimators, notably linear models and SVMs with the standard kernels.
+
+    Note: a one-hot encoding of y labels should use a LabelBinarizer
+    instead.
+
+    Read more in the :ref:`User Guide &lt;preprocessing_categorical_features&gt;`.
+
+    Parameters
+    ----------
+    categories : 'auto' or a list of array-like, default='auto'
+        Categories (unique values) per feature:
+
+        - 'auto' : Determine categories automatically from the training data.
+        - list : ``categories[i]`` holds the categories expected in the ith
+          column. The passed categories should not mix strings and numeric
+          values within a single feature, and should be sorted in case of
+          numeric values.
+
+        The used categories can be found in the ``categories_`` attribute.
+
+        .. versionadded:: 0.20
+
+    drop : {'first', 'if_binary'} or a array-like of shape (n_features,), \
+            default=None
+        Specifies a methodology to use to drop one of the categories per
+        feature. This is useful in situations where perfectly collinear
+        features cause problems, such as when feeding the resulting data
+        into a neural network or an unregularized regression.
+
+        However, dropping one category breaks the symmetry of the original
+        representation and can therefore induce a bias in downstream models,
+        for instance for penalized linear classification or regression models.
+
+        - None : retain all features (the default).
+        - 'first' : drop the first category in each feature. If only one
+          category is present, the feature will be dropped entirely.
+        - 'if_binary' : drop the first category in each feature with two
+          categories. Features with 1 or more than 2 categories are
+          left intact.
+        - array : ``drop[i]`` is the category in feature ``X[:, i]`` that
+          should be dropped.
+
+        .. versionadded:: 0.21
+           The parameter `drop` was added in 0.21.
+
+        .. versionchanged:: 0.23
+           The option `drop='if_binary'` was added in 0.23.
+
+    sparse : bool, default=True
+        Will return sparse matrix if set True else will return an array.
+
+    dtype : number type, default=float
+        Desired dtype of output.
+
+    handle_unknown : {'error', 'ignore'}, default='error'
+        Whether to raise an error or ignore if an unknown categorical feature
+        is present during transform (default is to raise). When this parameter
+        is set to 'ignore' and an unknown category is encountered during
+        transform, the resulting one-hot encoded columns for this feature
+        will be all zeros. In the inverse transform, an unknown category
+        will be denoted as None.
+
+    Attributes
+    ----------
+    categories_ : list of arrays
+        The categories of each feature determined during fitting
+        (in order of the features in X and corresponding with the output
+        of ``transform``). This includes the category specified in ``drop``
+        (if any).
+
+    drop_idx_ : array of shape (n_features,)
+        - ``drop_idx_[i]`` is the index in ``categories_[i]`` of the category
+          to be dropped for each feature.
+        - ``drop_idx_[i] = None`` if no category is to be dropped from the
+          feature with index ``i``, e.g. when `drop='if_binary'` and the
+          feature isn't binary.
+        - ``drop_idx_ = None`` if all the transformed features will be
+          retained.
+
+        .. versionchanged:: 0.23
+           Added the possibility to contain `None` values.
+
+    See Also
+    --------
+    OrdinalEncoder : Performs an ordinal (integer)
+      encoding of the categorical features.
+    sklearn.feature_extraction.DictVectorizer : Performs a one-hot encoding of
+      dictionary items (also handles string-valued features).
+    sklearn.feature_extraction.FeatureHasher : Performs an approximate one-hot
+      encoding of dictionary items or strings.
+    LabelBinarizer : Binarizes labels in a one-vs-all
+      fashion.
+    MultiLabelBinarizer : Transforms between iterable of
+      iterables and a multilabel format, e.g. a (samples x classes) binary
+      matrix indicating the presence of a class label.
+
+    Examples
+    --------
+    Given a dataset with two features, we let the encoder find the unique
+    values per feature and transform the data to a binary one-hot encoding.
+
+    &gt;&gt;&gt; from sklearn.preprocessing import OneHotEncoder
+
+    One can discard categories not seen during `fit`:
+
+    &gt;&gt;&gt; enc = OneHotEncoder(handle_unknown='ignore')
+    &gt;&gt;&gt; X = [['Male', 1], ['Female', 3], ['Female', 2]]
+    &gt;&gt;&gt; enc.fit(X)
+    OneHotEncoder(handle_unknown='ignore')
+    &gt;&gt;&gt; enc.categories_
+    [array(['Female', 'Male'], dtype=object), array([1, 2, 3], dtype=object)]
+    &gt;&gt;&gt; enc.transform([['Female', 1], ['Male', 4]]).toarray()
+    array([[1., 0., 1., 0., 0.],
+           [0., 1., 0., 0., 0.]])
+    &gt;&gt;&gt; enc.inverse_transform([[0, 1, 1, 0, 0], [0, 0, 0, 1, 0]])
+    array([['Male', 1],
+           [None, 2]], dtype=object)
+    &gt;&gt;&gt; enc.get_feature_names(['gender', 'group'])
+    array(['gender_Female', 'gender_Male', 'group_1', 'group_2', 'group_3'],
+      dtype=object)
+
+    One can always drop the first column for each feature:
+
+    &gt;&gt;&gt; drop_enc = OneHotEncoder(drop='first').fit(X)
+    &gt;&gt;&gt; drop_enc.categories_
+    [array(['Female', 'Male'], dtype=object), array([1, 2, 3], dtype=object)]
+    &gt;&gt;&gt; drop_enc.transform([['Female', 1], ['Male', 2]]).toarray()
+    array([[0., 0., 0.],
+           [1., 1., 0.]])
+
+    Or drop a column for feature only having 2 categories:
+
+    &gt;&gt;&gt; drop_binary_enc = OneHotEncoder(drop='if_binary').fit(X)
+    &gt;&gt;&gt; drop_binary_enc.transform([['Female', 1], ['Male', 2]]).toarray()
+    array([[0., 1., 0., 0.],
+           [1., 0., 1., 0.]])
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">categories</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span> <span class="identifier">drop</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">sparse</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span> <span class="identifier">handle_unknown</span><span class="arithmetic-assignment">=</span><span class="string-literal">'error'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories</span> <span class="arithmetic-assignment">=</span> <span class="identifier">categories</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sparse</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dtype</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="arithmetic-assignment">=</span> <span class="identifier">handle_unknown</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span> <span class="arithmetic-assignment">=</span> <span class="identifier">drop</span>
+
+    <span class="keyword">def</span> <span class="identifier">_validate_keywords</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">'error', 'ignore'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"handle_unknown should be either 'error' or 'ignore', "</span>
+                   <span class="string-literal">"got {0}."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_compute_drop_idx</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span> <span class="relational-operator">==</span> <span class="string-literal">'first'</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span> <span class="relational-operator">==</span> <span class="string-literal">'if_binary'</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span> <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">2</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+                                <span class="keyword">for</span> <span class="identifier">cats</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+                    <span class="string-literal">"Wrong input for parameter `drop`. Expected "</span>
+                    <span class="string-literal">"'first', 'if_binary', None or array of objects, got {}"</span>
+                    <span class="grouping">)</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">type</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">drop_array</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+                <span class="identifier">droplen</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">drop_array</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="grouping">(</span><span class="identifier">ValueError</span><span class="punctuation">,</span> <span class="identifier">TypeError</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+                    <span class="string-literal">"Wrong input for parameter `drop`. Expected "</span>
+                    <span class="string-literal">"'first', 'if_binary', None or array of objects, got {}"</span>
+                    <span class="grouping">)</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">type</span><span class="grouping">(</span><span class="identifier">drop_array</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">droplen</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"`drop` should have length equal to the number "</span>
+                       <span class="string-literal">"of features ({}), got {}"</span><span class="grouping">)</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">droplen</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">missing_drops</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+            <span class="identifier">drop_indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+            <span class="keyword">for</span> <span class="identifier">col_idx</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">val</span><span class="punctuation">,</span> <span class="identifier">cat_list</span><span class="grouping">)</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">drop_array</span><span class="punctuation">,</span>
+                                                          <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">val</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">drop_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">cat_list</span> <span class="relational-operator">==</span> <span class="identifier">val</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+                    <span class="keyword">if</span> <span class="identifier">drop_idx</span><span class="punctuation">.</span><span class="identifier">size</span><span class="punctuation">:</span>  <span class="comment"># found drop idx</span>
+                        <span class="identifier">drop_indices</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">drop_idx</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+                    <span class="keyword">else</span><span class="punctuation">:</span>
+                        <span class="identifier">missing_drops</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">col_idx</span><span class="punctuation">,</span> <span class="identifier">val</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="keyword">continue</span>
+
+                <span class="comment"># val is nan, find nan in categories manually</span>
+                <span class="keyword">for</span> <span class="identifier">cat_idx</span><span class="punctuation">,</span> <span class="identifier">cat</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">cat_list</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">if</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">cat</span><span class="grouping">)</span><span class="punctuation">:</span>
+                        <span class="identifier">drop_indices</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">cat_idx</span><span class="grouping">)</span>
+                        <span class="keyword">break</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># loop did not break thus drop is missing</span>
+                    <span class="identifier">missing_drops</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">col_idx</span><span class="punctuation">,</span> <span class="identifier">val</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">any</span><span class="grouping">(</span><span class="identifier">missing_drops</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"The following categories were supposed to be "</span>
+                       <span class="string-literal">"dropped, but were not found in the training "</span>
+                       <span class="string-literal">"data.\n{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span>
+                           <span class="string-literal">"\n"</span><span class="punctuation">.</span><span class="identifier">join</span><span class="grouping">(</span>
+                                <span class="grouping">[</span><span class="string-literal">"Category: {}, Feature: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">c</span><span class="punctuation">,</span> <span class="identifier">v</span><span class="grouping">)</span>
+                                    <span class="keyword">for</span> <span class="identifier">c</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">missing_drops</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">drop_indices</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Fit OneHotEncoder to X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to determine the categories of each feature.
+
+        y : None
+            Ignored. This parameter exists only for compatibility with
+            :class:`~sklearn.pipeline.Pipeline`.
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_keywords</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">handle_unknown</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span><span class="punctuation">,</span>
+                  <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_compute_drop_idx</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Fit OneHotEncoder to X, then transform X.
+
+        Equivalent to fit(X).transform(X) but more convenient.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to encode.
+
+        y : None
+            Ignored. This parameter exists only for compatibility with
+            :class:`~sklearn.pipeline.Pipeline`.
+
+        Returns
+        -------
+        X_out : {ndarray, sparse matrix} of shape \
+                (n_samples, n_encoded_features)
+            Transformed input. If `sparse=True`, a sparse matrix will be
+            returned.
+        """</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_keywords</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Transform X using one-hot encoding.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to encode.
+
+        Returns
+        -------
+        X_out : {ndarray, sparse matrix} of shape \
+                (n_samples, n_encoded_features)
+            Transformed input. If `sparse=True`, a sparse matrix will be
+            returned.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="comment"># validation of X happens in _check_X called by _transform</span>
+        <span class="identifier">warn_on_unknown</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">"ignore"</span>
+                           <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="identifier">X_int</span><span class="punctuation">,</span> <span class="identifier">X_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">handle_unknown</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span><span class="punctuation">,</span>
+                                        <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="punctuation">,</span>
+                                        <span class="identifier">warn_on_unknown</span><span class="arithmetic-assignment">=</span><span class="identifier">warn_on_unknown</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_int</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">to_drop</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="comment"># We remove all the dropped categories from mask, and decrement all</span>
+            <span class="comment"># categories that occur after them to avoid an empty column.</span>
+            <span class="identifier">keep_cells</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_int</span> <span class="relational-operator">!=</span> <span class="identifier">to_drop</span>
+            <span class="identifier">n_values</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+            <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">cats</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">n_cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span>
+
+                <span class="comment"># drop='if_binary' but feature isn't binary</span>
+                <span class="keyword">if</span> <span class="identifier">to_drop</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                    <span class="comment"># set to cardinality to not drop from X_int</span>
+                    <span class="identifier">to_drop</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_cats</span>
+                    <span class="identifier">n_values</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">n_cats</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># dropped</span>
+                    <span class="identifier">n_values</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">n_cats</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span>
+
+            <span class="identifier">to_drop</span> <span class="arithmetic-assignment">=</span> <span class="identifier">to_drop</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+            <span class="identifier">X_int</span><span class="grouping">[</span><span class="identifier">X_int</span> <span class="relational-operator">&gt;</span> <span class="identifier">to_drop</span><span class="grouping">]</span> <span class="arithmetic-assignment">-=</span> <span class="int-literal">1</span>
+            <span class="identifier">X_mask</span> <span class="bitwise-assignment">&=</span> <span class="identifier">keep_cells</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_values</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">cats</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">]</span>
+
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_mask</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">feature_indices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cumsum</span><span class="grouping">(</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_values</span><span class="grouping">)</span>
+        <span class="identifier">indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">X_int</span> <span class="arithmetic-operator">+</span> <span class="identifier">feature_indices</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span>
+
+        <span class="identifier">indptr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+        <span class="identifier">indptr</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">X_mask</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">cumsum</span><span class="grouping">(</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">data</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">indptr</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">out</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">csr_matrix</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">,</span> <span class="identifier">indices</span><span class="punctuation">,</span> <span class="identifier">indptr</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">feature_indices</span><span class="grouping">[</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">out</span><span class="punctuation">.</span><span class="identifier">toarray</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">out</span>
+
+    <span class="keyword">def</span> <span class="identifier">inverse_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Convert the data back to the original representation.
+
+        When unknown categories are encountered (all zeros in the
+        one-hot encoding), ``None`` is used to represent this category. If the
+        feature with the unknown category has a dropped caregory, the dropped
+        category will be its inverse.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape \
+                (n_samples, n_encoded_features)
+            The transformed data.
+
+        Returns
+        -------
+        X_tr : ndarray of shape (n_samples, n_features)
+            Inverse transformed array.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_transformed_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span>
+                                         <span class="keyword">for</span> <span class="identifier">cats</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_transformed_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sum</span><span class="grouping">(</span>
+                <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">to_drop</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span>
+                <span class="keyword">for</span> <span class="identifier">cats</span><span class="punctuation">,</span> <span class="identifier">to_drop</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">)</span>
+            <span class="grouping">)</span>
+
+        <span class="comment"># validate shape of passed X</span>
+        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Shape of the passed X data is not correct. Expected {0} "</span>
+               <span class="string-literal">"columns, got {1}."</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">n_transformed_features</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">n_transformed_features</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># create resulting array of appropriate dtype</span>
+        <span class="identifier">dt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">find_common_type</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">cat</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="keyword">for</span> <span class="identifier">cat</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">X_tr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dt</span><span class="grouping">)</span>
+
+        <span class="identifier">j</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">found_unknown</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">n_categories</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span>
+
+            <span class="comment"># Only happens if there was a column with a unique</span>
+            <span class="comment"># category. In this case we just fill the column with this</span>
+            <span class="comment"># unique category value.</span>
+            <span class="keyword">if</span> <span class="identifier">n_categories</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="identifier">X_tr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">]</span>
+                <span class="identifier">j</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">n_categories</span>
+                <span class="keyword">continue</span>
+            <span class="identifier">sub</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="punctuation">:</span><span class="identifier">j</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_categories</span><span class="grouping">]</span>
+            <span class="comment"># for sparse X argmax returns 2D matrix, ensure 1D array</span>
+            <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">sub</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">X_tr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cats</span><span class="grouping">[</span><span class="identifier">labels</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">'ignore'</span><span class="punctuation">:</span>
+                <span class="identifier">unknown</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">sub</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="comment"># ignored unknown categories: we have a row of all zero</span>
+                <span class="keyword">if</span> <span class="identifier">unknown</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="comment"># if categories were dropped then unknown categories will</span>
+                    <span class="comment"># be mapped to the dropped category</span>
+                    <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                        <span class="identifier">found_unknown</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">unknown</span>
+                    <span class="keyword">else</span><span class="punctuation">:</span>
+                        <span class="identifier">X_tr</span><span class="grouping">[</span><span class="identifier">unknown</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span>
+                            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+                        <span class="grouping">]</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">dropped</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">sub</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">flatten</span><span class="grouping">(</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="identifier">dropped</span><span class="punctuation">.</span><span class="identifier">any</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                        <span class="identifier">all_zero_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="identifier">dropped</span><span class="grouping">)</span>
+                        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                            <span class="identifier">f</span><span class="string-literal">"Samples {all_zero_samples} can not be inverted "</span>
+                            <span class="string-literal">"when drop=None and handle_unknown='error' "</span>
+                            <span class="string-literal">"because they contain all zeros"</span><span class="grouping">)</span>
+                    <span class="comment"># we can safely assume that all of the nulls in each column</span>
+                    <span class="comment"># are the dropped value</span>
+                    <span class="identifier">X_tr</span><span class="grouping">[</span><span class="identifier">dropped</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span>
+                        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+                    <span class="grouping">]</span>
+
+            <span class="identifier">j</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">n_categories</span>
+
+        <span class="comment"># if ignored are found: potentially need to upcast result to</span>
+        <span class="comment"># insert None values</span>
+        <span class="keyword">if</span> <span class="identifier">found_unknown</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">X_tr</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="relational-operator">!=</span> <span class="identifier">object</span><span class="punctuation">:</span>
+                <span class="identifier">X_tr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_tr</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">object</span><span class="grouping">)</span>
+
+            <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">mask</span> <span class="relational-operator">in</span> <span class="identifier">found_unknown</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">X_tr</span><span class="grouping">[</span><span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="keyword">return</span> <span class="identifier">X_tr</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_feature_names</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">input_features</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Return feature names for output features.
+
+        Parameters
+        ----------
+        input_features : list of str of shape (n_features,)
+            String names for input features if available. By default,
+            "x0", "x1", ... "xn_features" is used.
+
+        Returns
+        -------
+        output_feature_names : ndarray of shape (n_output_features,)
+            Array of feature names.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">cats</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span>
+        <span class="keyword">if</span> <span class="identifier">input_features</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">input_features</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'x%d'</span> <span class="arithmetic-operator">%</span> <span class="identifier">i</span> <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">input_features</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"input_features should have length equal to number of "</span>
+                <span class="string-literal">"features ({}), got {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                               <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">input_features</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">feature_names</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cats</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">names</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span>
+                <span class="identifier">input_features</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span> <span class="string-literal">'_'</span> <span class="arithmetic-operator">+</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">t</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">t</span> <span class="relational-operator">in</span> <span class="identifier">cats</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">names</span><span class="punctuation">.</span><span class="identifier">pop</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">drop_idx_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">feature_names</span><span class="punctuation">.</span><span class="identifier">extend</span><span class="grouping">(</span><span class="identifier">names</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">feature_names</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">object</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">OrdinalEncoder</span><span class="grouping">(</span><span class="identifier">_BaseEncoder</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Encode categorical features as an integer array.
+
+    The input to this transformer should be an array-like of integers or
+    strings, denoting the values taken on by categorical (discrete) features.
+    The features are converted to ordinal integers. This results in
+    a single column of integers (0 to n_categories - 1) per feature.
+
+    Read more in the :ref:`User Guide &lt;preprocessing_categorical_features&gt;`.
+
+    .. versionadded:: 0.20
+
+    Parameters
+    ----------
+    categories : 'auto' or a list of array-like, default='auto'
+        Categories (unique values) per feature:
+
+        - 'auto' : Determine categories automatically from the training data.
+        - list : ``categories[i]`` holds the categories expected in the ith
+          column. The passed categories should not mix strings and numeric
+          values, and should be sorted in case of numeric values.
+
+        The used categories can be found in the ``categories_`` attribute.
+
+    dtype : number type, default np.float64
+        Desired dtype of output.
+
+    handle_unknown : {'error', 'use_encoded_value'}, default='error'
+        When set to 'error' an error will be raised in case an unknown
+        categorical feature is present during transform. When set to
+        'use_encoded_value', the encoded value of unknown categories will be
+        set to the value given for the parameter `unknown_value`. In
+        :meth:`inverse_transform`, an unknown category will be denoted as None.
+
+        .. versionadded:: 0.24
+
+    unknown_value : int or np.nan, default=None
+        When the parameter handle_unknown is set to 'use_encoded_value', this
+        parameter is required and will set the encoded value of unknown
+        categories. It has to be distinct from the values used to encode any of
+        the categories in `fit`. If set to np.nan, the `dtype` parameter must
+        be a float dtype.
+
+        .. versionadded:: 0.24
+
+    Attributes
+    ----------
+    categories_ : list of arrays
+        The categories of each feature determined during ``fit`` (in order of
+        the features in X and corresponding with the output of ``transform``).
+        This does not include categories that weren't seen during ``fit``.
+
+    See Also
+    --------
+    OneHotEncoder : Performs a one-hot encoding of categorical features.
+    LabelEncoder : Encodes target labels with values between 0 and
+        ``n_classes-1``.
+
+    Examples
+    --------
+    Given a dataset with two features, we let the encoder find the unique
+    values per feature and transform the data to an ordinal encoding.
+
+    &gt;&gt;&gt; from sklearn.preprocessing import OrdinalEncoder
+    &gt;&gt;&gt; enc = OrdinalEncoder()
+    &gt;&gt;&gt; X = [['Male', 1], ['Female', 3], ['Female', 2]]
+    &gt;&gt;&gt; enc.fit(X)
+    OrdinalEncoder()
+    &gt;&gt;&gt; enc.categories_
+    [array(['Female', 'Male'], dtype=object), array([1, 2, 3], dtype=object)]
+    &gt;&gt;&gt; enc.transform([['Female', 3], ['Male', 1]])
+    array([[0., 2.],
+           [1., 0.]])
+
+    &gt;&gt;&gt; enc.inverse_transform([[1, 0], [0, 1]])
+    array([['Male', 1],
+           ['Female', 2]], dtype=object)
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">categories</span><span class="arithmetic-assignment">=</span><span class="string-literal">'auto'</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="punctuation">,</span>
+                 <span class="identifier">handle_unknown</span><span class="arithmetic-assignment">=</span><span class="string-literal">'error'</span><span class="punctuation">,</span> <span class="identifier">unknown_value</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories</span> <span class="arithmetic-assignment">=</span> <span class="identifier">categories</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dtype</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="arithmetic-assignment">=</span> <span class="identifier">handle_unknown</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unknown_value</span> <span class="arithmetic-assignment">=</span> <span class="identifier">unknown_value</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Fit the OrdinalEncoder to X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to determine the categories of each feature.
+
+        y : None
+            Ignored. This parameter exists only for compatibility with
+            :class:`~sklearn.pipeline.Pipeline`.
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">handle_unknown_strategies</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"error", "use_encoded_value"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">handle_unknown_strategies</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"handle_unknown should be either 'error' or "</span>
+                <span class="identifier">f</span><span class="string-literal">"'use_encoded_value', got {self.handle_unknown}."</span>
+            <span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">'use_encoded_value'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unknown_value</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">!=</span> <span class="string-literal">'f'</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                        <span class="identifier">f</span><span class="string-literal">"When unknown_value is np.nan, the dtype "</span>
+                        <span class="identifier">f</span><span class="string-literal">"parameter should be "</span>
+                        <span class="identifier">f</span><span class="string-literal">"a float dtype. Got {self.dtype}."</span>
+                    <span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unknown_value</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"unknown_value should be an integer or "</span>
+                                <span class="identifier">f</span><span class="string-literal">"np.nan when "</span>
+                                <span class="identifier">f</span><span class="string-literal">"handle_unknown is 'use_encoded_value', "</span>
+                                <span class="identifier">f</span><span class="string-literal">"got {self.unknown_value}."</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unknown_value</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"unknown_value should only be set when "</span>
+                            <span class="identifier">f</span><span class="string-literal">"handle_unknown is 'use_encoded_value', "</span>
+                            <span class="identifier">f</span><span class="string-literal">"got {self.unknown_value}."</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">'use_encoded_value'</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">feature_cats</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="int-literal">0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unknown_value</span> <span class="relational-operator">&lt;</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">feature_cats</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"The used value for unknown_value "</span>
+                                     <span class="identifier">f</span><span class="string-literal">"{self.unknown_value} is one of the "</span>
+                                     <span class="identifier">f</span><span class="string-literal">"values already used for encoding the "</span>
+                                     <span class="identifier">f</span><span class="string-literal">"seen categories."</span><span class="grouping">)</span>
+
+        <span class="comment"># stores the missing indices per category</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_missing_indices</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+        <span class="keyword">for</span> <span class="identifier">cat_idx</span><span class="punctuation">,</span> <span class="identifier">categories_for_idx</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">cat</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">categories_for_idx</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">is_scalar_nan</span><span class="grouping">(</span><span class="identifier">cat</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_missing_indices</span><span class="grouping">[</span><span class="identifier">cat_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span>
+                    <span class="keyword">continue</span>
+
+        <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">kind</span> <span class="relational-operator">!=</span> <span class="string-literal">'f'</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_missing_indices</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="string-literal">"There are missing values in features "</span>
+                <span class="identifier">f</span><span class="string-literal">"{list(self._missing_indices)}. For OrdinalEncoder to "</span>
+                <span class="string-literal">"passthrough missing values, the dtype parameter must be a "</span>
+                <span class="string-literal">"float"</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Transform X to ordinal codes.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data to encode.
+
+        Returns
+        -------
+        X_out : ndarray of shape (n_samples, n_features)
+            Transformed input.
+        """</span>
+        <span class="identifier">X_int</span><span class="punctuation">,</span> <span class="identifier">X_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_transform</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">handle_unknown</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span><span class="punctuation">,</span>
+                                        <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="grouping">)</span>
+        <span class="identifier">X_trans</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_int</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">cat_idx</span><span class="punctuation">,</span> <span class="identifier">missing_idx</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_missing_indices</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">X_missing_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_int</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">cat_idx</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">missing_idx</span>
+            <span class="identifier">X_trans</span><span class="grouping">[</span><span class="identifier">X_missing_mask</span><span class="punctuation">,</span> <span class="identifier">cat_idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nan</span>
+
+        <span class="comment"># create separate category for unknown values</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">'use_encoded_value'</span><span class="punctuation">:</span>
+            <span class="identifier">X_trans</span><span class="grouping">[</span><span class="bitwise-operator">~</span><span class="identifier">X_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unknown_value</span>
+        <span class="keyword">return</span> <span class="identifier">X_trans</span>
+
+    <span class="keyword">def</span> <span class="identifier">inverse_transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Convert the data back to the original representation.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_encoded_features)
+            The transformed data.
+
+        Returns
+        -------
+        X_tr : ndarray of shape (n_samples, n_features)
+            Inverse transformed array.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">a</span><span class="invalid">l</span><span class="invalid">l</span><span class="invalid">_</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="string-literal">'allow-nan'</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">)</span>
+
+        <span class="comment"># validate shape of passed X</span>
+        <span class="identifier">msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"Shape of the passed X data is not correct. Expected {0} "</span>
+               <span class="string-literal">"columns, got {1}."</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">!=</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">msg</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># create resulting array of appropriate dtype</span>
+        <span class="identifier">dt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">find_common_type</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">cat</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="keyword">for</span> <span class="identifier">cat</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="grouping">[</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">X_tr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dt</span><span class="grouping">)</span>
+
+        <span class="identifier">found_unknown</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="string-literal">'int64'</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+            <span class="comment"># replace values of X[:, i] that were nan with actual indices</span>
+            <span class="keyword">if</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_missing_indices</span><span class="punctuation">:</span>
+                <span class="identifier">X_i_mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_mask</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">nan</span><span class="grouping">)</span>
+                <span class="identifier">labels</span><span class="grouping">[</span><span class="identifier">X_i_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_missing_indices</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span>
+
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">handle_unknown</span> <span class="relational-operator">==</span> <span class="string-literal">'use_encoded_value'</span><span class="punctuation">:</span>
+                <span class="identifier">unknown_labels</span> <span class="arithmetic-assignment">=</span> <span class="identifier">labels</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">unknown_value</span>
+                <span class="identifier">X_tr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span>
+                    <span class="identifier">unknown_labels</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">labels</span><span class="grouping">)</span><span class="grouping">]</span>
+                <span class="identifier">found_unknown</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">unknown_labels</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">X_tr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">categories_</span><span class="grouping">[</span><span class="identifier">i</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">labels</span><span class="grouping">]</span>
+
+        <span class="comment"># insert None values for unknown values</span>
+        <span class="keyword">if</span> <span class="identifier">found_unknown</span><span class="punctuation">:</span>
+            <span class="identifier">X_tr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_tr</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">y</span><span class="invalid">p</span><span class="invalid">e</span><span class="grouping">(</span><span class="identifier">object</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+            <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">mask</span> <span class="relational-operator">in</span> <span class="identifier">found_unknown</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">X_tr</span><span class="grouping">[</span><span class="identifier">mask</span><span class="punctuation">,</span> <span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+        <span class="keyword">return</span> <span class="identifier">X_tr</span>
+
+    </pre>
+  </body>
+</html>

@@ -1,0 +1,394 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" Normalization methods for faceswap.py. """</span>
+
+<span class="keyword">import</span> <span class="identifier">sys</span>
+<span class="keyword">import</span> <span class="identifier">inspect</span>
+
+<span class="keyword">from</span> <span class="identifier">plaidml</span><span class="punctuation">.</span><span class="identifier">op</span> <span class="keyword">import</span> <span class="identifier">slice_tensor</span>
+<span class="keyword">from</span> <span class="identifier">keras</span><span class="punctuation">.</span><span class="identifier">layers</span> <span class="keyword">import</span> <span class="identifier">Layer</span>
+<span class="keyword">from</span> <span class="identifier">keras</span> <span class="keyword">import</span> <span class="identifier">initializers</span><span class="punctuation">,</span> <span class="identifier">regularizers</span><span class="punctuation">,</span> <span class="identifier">constraints</span>
+<span class="keyword">from</span> <span class="identifier">keras</span> <span class="keyword">import</span> <span class="identifier">backend</span> <span class="keyword">as</span> <span class="identifier">K</span>
+<span class="keyword">from</span> <span class="identifier">keras</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">get_custom_objects</span>
+
+
+<span class="keyword">class</span> <span class="identifier">LayerNormalization</span><span class="grouping">(</span><span class="identifier">Layer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Instance normalization layer (Lei Ba et al, 2016). Implementation adapted from
+    tensorflow.keras implementation and https://github.com/CyberZHG/keras-layer-normalization
+
+    Normalize the activations of the previous layer for each given example in a batch
+    independently, rather than across a batch like Batch Normalization. i.e. applies a
+    transformation that maintains the mean activation within each example close to 0 and the
+    activation standard deviation close to 1.
+
+    Parameters
+    ----------
+    axis: int or list/tuple
+        The axis or axes to normalize across. Typically this is the features axis/axes.
+        The left-out axes are typically the batch axis/axes. This argument defaults to `-1`, the
+        last dimension in the input.
+    epsilon: float, optional
+        Small float added to variance to avoid dividing by zero. Default: `1e-3`
+    center: bool, optional
+        If ``True``, add offset of `beta` to normalized tensor. If ``False``, `beta` is ignored.
+        Default: ``True``
+    scale: bool, optional
+        If ``True``, multiply by `gamma`. If ``False``, `gamma` is not used. When the next layer
+        is linear (also e.g. `relu`), this can be disabled since the scaling will be done by
+        the next layer. Default: ``True``
+    beta_initializer: str, optional
+        Initializer for the beta weight. Default: `"zeros"`
+    gamma_initializer: str, optional
+        Initializer for the gamma weight. Default: `"ones"`
+    beta_regularizer: str, optional
+        Optional regularizer for the beta weight. Default: ``None``
+    gamma_regularizer: str, optional
+        Optional regularizer for the gamma weight. Default: ``None``
+    beta_constraint: float, optional
+        Optional constraint for the beta weight. Default: ``None``
+    gamma_constraint: float, optional
+        Optional constraint for the gamma weight. Default: ``None``
+    kwargs: dict
+        Standard keras layer kwargs
+
+    References
+    ----------
+        - Layer Normalization - https://arxiv.org/abs/1607.06450
+        - Keras implementation - https://github.com/CyberZHG/keras-layer-normalization
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span>
+                 <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                 <span class="identifier">epsilon</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-3</span><span class="punctuation">,</span>
+                 <span class="identifier">center</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">scale</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">beta_initializer</span><span class="arithmetic-assignment">=</span><span class="string-literal">"zeros"</span><span class="punctuation">,</span>
+                 <span class="identifier">gamma_initializer</span><span class="arithmetic-assignment">=</span><span class="string-literal">"ones"</span><span class="punctuation">,</span>
+                 <span class="identifier">beta_regularizer</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">gamma_regularizer</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">beta_constraint</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">gamma_constraint</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">list</span><span class="punctuation">,</span> <span class="identifier">tuple</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="arithmetic-assignment">=</span> <span class="identifier">axis</span><span class="grouping">[</span><span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="arithmetic-assignment">=</span> <span class="identifier">axis</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">"Expected an int or a list/tuple of ints for the argument 'axis', "</span>
+                            <span class="identifier">f</span><span class="string-literal">"but received: {axis}"</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span> <span class="arithmetic-assignment">=</span> <span class="identifier">epsilon</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">center</span> <span class="arithmetic-assignment">=</span> <span class="identifier">center</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_initializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initializers</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">beta_initializer</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_initializer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initializers</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">gamma_initializer</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_regularizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">regularizers</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">beta_regularizer</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_regularizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">regularizers</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">gamma_regularizer</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_constraint</span> <span class="arithmetic-assignment">=</span> <span class="identifier">constraints</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">beta_constraint</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_constraint</span> <span class="arithmetic-assignment">=</span> <span class="identifier">constraints</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="identifier">gamma_constraint</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">supports_masking</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+    <span class="keyword">def</span> <span class="identifier">build</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">input_shape</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Creates the layer weights.
+
+        Parameters
+        ----------
+        input_shape: tensor
+            Keras tensor (future input to layer) or ``list``/``tuple`` of Keras tensors to
+            reference for weight shape computations.
+        """</span>
+        <span class="identifier">ndims</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">input_shape</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">ndims</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"Input shape {input_shape} has undefined rank."</span><span class="grouping">)</span>
+
+        <span class="comment"># Convert axis to list and resolve negatives</span>
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">]</span>
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">tuple</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">idx</span><span class="punctuation">,</span> <span class="identifier">axs</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">axs</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">[</span><span class="identifier">idx</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ndims</span> <span class="arithmetic-operator">+</span> <span class="identifier">axs</span>
+
+        <span class="comment"># Validate axes</span>
+        <span class="keyword">for</span> <span class="identifier">axs</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">axs</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">axs</span> <span class="relational-operator">&gt;=</span> <span class="identifier">ndims</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"Invalid axis: {axs}"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">set</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Duplicate axis: {}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">tuple</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">param_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">input_shape</span><span class="grouping">[</span><span class="identifier">dim</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">dim</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">add_weight</span><span class="grouping">(</span>
+                <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"gamma"</span><span class="punctuation">,</span>
+                <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">param_shape</span><span class="punctuation">,</span>
+                <span class="identifier">initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_initializer</span><span class="punctuation">,</span>
+                <span class="identifier">regularizer</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_regularizer</span><span class="punctuation">,</span>
+                <span class="identifier">constraint</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_constraint</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">center</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">add_weight</span><span class="grouping">(</span>
+                <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">'beta'</span><span class="punctuation">,</span>
+                <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">param_shape</span><span class="punctuation">,</span>
+                <span class="identifier">initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_initializer</span><span class="punctuation">,</span>
+                <span class="identifier">regularizer</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_regularizer</span><span class="punctuation">,</span>
+                <span class="identifier">constraint</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_constraint</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">built</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>  <span class="comment"># pylint:disable=attribute-defined-outside-init</span>
+
+    <span class="keyword">def</span> <span class="identifier">call</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=unused-argument</span>
+        <span class="comment">"""This is where the layer's logic lives.
+
+        Parameters
+        ----------
+        inputs: tensor
+            Input tensor, or list/tuple of input tensors
+
+        Returns
+        -------
+        tensor
+            A tensor or list/tuple of tensors
+        """</span>
+        <span class="comment"># Compute the axes along which to reduce the mean / variance</span>
+        <span class="identifier">input_shape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">int_shape</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="identifier">ndims</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">input_shape</span><span class="grouping">)</span>
+
+        <span class="comment"># Broadcasting only necessary for norm when the axis is not just the last dimension</span>
+        <span class="identifier">broadcast_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">ndims</span>
+        <span class="keyword">for</span> <span class="identifier">dim</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">:</span>
+            <span class="identifier">broadcast_shape</span><span class="grouping">[</span><span class="identifier">dim</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_shape</span><span class="grouping">[</span><span class="identifier">dim</span><span class="grouping">]</span>
+
+        <span class="keyword">def</span> <span class="identifier">_broadcast</span><span class="grouping">(</span><span class="identifier">var</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">var</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">var</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">ndims</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="relational-operator">!=</span> <span class="grouping">[</span><span class="identifier">ndims</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">var</span><span class="punctuation">,</span> <span class="identifier">broadcast_shape</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">var</span>
+
+        <span class="comment"># Calculate the moments on the last axis (layer activations).</span>
+        <span class="identifier">mean</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">keepdims</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">variance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">square</span><span class="grouping">(</span><span class="identifier">inputs</span> <span class="arithmetic-operator">-</span> <span class="identifier">mean</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">keepdims</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">std</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">variance</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span><span class="grouping">)</span>
+        <span class="identifier">outputs</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">inputs</span> <span class="arithmetic-operator">-</span> <span class="identifier">mean</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">std</span>
+
+        <span class="identifier">scale</span><span class="punctuation">,</span> <span class="identifier">offset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_broadcast</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">_broadcast</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale</span><span class="punctuation">:</span>
+            <span class="identifier">outputs</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">scale</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">center</span><span class="punctuation">:</span>
+            <span class="identifier">outputs</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">offset</span>
+
+        <span class="keyword">return</span> <span class="identifier">outputs</span>
+
+    <span class="keyword">def</span> <span class="identifier">compute_output_shape</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">input_shape</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=no-self-use</span>
+        <span class="comment">""" The output shape of the layer is the same as the input shape.
+
+        Parameters
+        ----------
+        input_shape: tuple
+            The input shape to the layer
+
+        Returns
+        -------
+        tuple
+            The output shape to the layer
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">input_shape</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_config</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Returns the config of the layer.
+
+        A layer config is a Python dictionary (serializable) containing the configuration of a
+        layer. The same layer can be reinstated later (without its trained weights) from this
+        configuration.
+
+        The configuration of a layer does not include connectivity information, nor the layer
+        class name. These are handled by `Network` (one layer of abstraction above).
+
+        Returns
+        --------
+        dict
+            A python dictionary containing the layer configuration
+        """</span>
+        <span class="identifier">base_config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">get_config</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span>
+                      <span class="identifier">epsilon</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span><span class="punctuation">,</span>
+                      <span class="identifier">center</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">center</span><span class="punctuation">,</span>
+                      <span class="identifier">scale</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale</span><span class="punctuation">,</span>
+                      <span class="identifier">beta_initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">initializers</span><span class="punctuation">.</span><span class="identifier">serialize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_initializer</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="identifier">gamma_initializer</span><span class="arithmetic-assignment">=</span><span class="identifier">initializers</span><span class="punctuation">.</span><span class="identifier">serialize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_initializer</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="identifier">beta_regularizer</span><span class="arithmetic-assignment">=</span><span class="identifier">regularizers</span><span class="punctuation">.</span><span class="identifier">serialize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_regularizer</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="identifier">gamma_regularizer</span><span class="arithmetic-assignment">=</span><span class="identifier">regularizers</span><span class="punctuation">.</span><span class="identifier">serialize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_regularizer</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="identifier">beta_constraint</span><span class="arithmetic-assignment">=</span><span class="identifier">constraints</span><span class="punctuation">.</span><span class="identifier">serialize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">beta_constraint</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="identifier">gamma_constraint</span><span class="arithmetic-assignment">=</span><span class="identifier">constraints</span><span class="punctuation">.</span><span class="identifier">serialize</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma_constraint</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">list</span><span class="grouping">(</span><span class="identifier">base_config</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">config</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">RMSNormalization</span><span class="grouping">(</span><span class="identifier">Layer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Root Mean Square Layer Normalization (Biao Zhang, Rico Sennrich, 2019)
+
+    RMSNorm is a simplification of the original layer normalization (LayerNorm). LayerNorm is a
+    regularization technique that might handle the internal covariate shift issue so as to
+    stabilize the layer activations and improve model convergence. It has been proved quite
+    successful in NLP-based model. In some cases, LayerNorm has become an essential component
+    to enable model optimization, such as in the SOTA NMT model Transformer.
+
+    RMSNorm simplifies LayerNorm by removing the mean-centering operation, or normalizing layer
+    activations with RMS statistic.
+
+    Parameters
+    ----------
+    axis: int
+        The axis to normalize across. Typically this is the features axis. The left-out axes are
+        typically the batch axis/axes. This argument defaults to `-1`, the last dimension in the
+        input.
+    epsilon: float, optional
+        Small float added to variance to avoid dividing by zero. Default: `1e-8`
+    partial: float, optional
+        Partial multiplier for calculating pRMSNorm. Valid values are between `0.0` and `1.0`.
+        Setting to `0.0` or `1.0` disables. Default: `0.0`
+    bias: bool, optional
+        Whether to use a bias term for RMSNorm. Disabled by default because RMSNorm does not
+        enforce re-centering invariance. Default ``False``
+    kwargs: dict
+        Standard keras layer kwargs
+
+    References
+    ----------
+        - RMS Normalization - https://arxiv.org/abs/1910.07467
+        - Official implementation - https://github.com/bzhangGo/rmsnorm
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">epsilon</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-8</span><span class="punctuation">,</span> <span class="identifier">partial</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.0</span><span class="punctuation">,</span> <span class="identifier">bias</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">offset</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+        <span class="comment"># Checks</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">int</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"Expected an int for the argument 'axis', but received: {axis}"</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="float-literal">0.0</span> <span class="relational-operator">&lt;=</span> <span class="identifier">partial</span> <span class="relational-operator">&lt;=</span> <span class="float-literal">1.0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"partial must be between 0.0 and 1.0, but received {partial}"</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="arithmetic-assignment">=</span> <span class="identifier">axis</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span> <span class="arithmetic-assignment">=</span> <span class="identifier">epsilon</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">partial</span> <span class="arithmetic-assignment">=</span> <span class="identifier">partial</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bias</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bias</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">offset</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+
+    <span class="keyword">def</span> <span class="identifier">build</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">input_shape</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Validate and populate :attr:`axis`
+
+        Parameters
+        ----------
+        input_shape: tensor
+            Keras tensor (future input to layer) or ``list``/``tuple`` of Keras tensors to
+            reference for weight shape computations.
+        """</span>
+        <span class="identifier">ndims</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">input_shape</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">ndims</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"Input shape {input_shape} has undefined rank."</span><span class="grouping">)</span>
+
+        <span class="comment"># Resolve negative axis</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">ndims</span>
+
+        <span class="comment"># Validate axes</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span> <span class="relational-operator">&gt;=</span> <span class="identifier">ndims</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"Invalid axis: {self.axis}"</span><span class="grouping">)</span>
+
+        <span class="identifier">param_shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">input_shape</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">add_weight</span><span class="grouping">(</span>
+            <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"scale"</span><span class="punctuation">,</span>
+            <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">param_shape</span><span class="punctuation">,</span>
+            <span class="identifier">initializer</span><span class="arithmetic-assignment">=</span><span class="string-literal">"ones"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bias</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">offset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">add_weight</span><span class="grouping">(</span>
+                <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"offset"</span><span class="punctuation">,</span>
+                <span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="identifier">param_shape</span><span class="punctuation">,</span>
+                <span class="identifier">initializer</span><span class="arithmetic-assignment">=</span><span class="string-literal">"zeros"</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">built</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>  <span class="comment"># pylint:disable=attribute-defined-outside-init</span>
+
+    <span class="keyword">def</span> <span class="identifier">call</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=unused-argument</span>
+        <span class="comment">""" Call Root Mean Square Layer Normalization
+
+        Parameters
+        ----------
+        inputs: tensor
+            Input tensor, or list/tuple of input tensors
+
+        Returns
+        -------
+        tensor
+            A tensor or list/tuple of tensors
+        """</span>
+        <span class="comment"># Compute the axes along which to reduce the mean / variance</span>
+        <span class="identifier">input_shape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">int_shape</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="identifier">layer_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_shape</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">partial</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="float-literal">0.0</span><span class="punctuation">,</span> <span class="float-literal">1.0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">mean_square</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">square</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">keepdims</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">partial_size</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">layer_size</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">partial</span><span class="grouping">)</span>
+            <span class="identifier">partial_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">slice_tensor</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="punctuation">,</span>
+                                     <span class="identifier">axes</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                     <span class="identifier">starts</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                     <span class="identifier">ends</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="identifier">partial_size</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">mean_square</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">square</span><span class="grouping">(</span><span class="identifier">partial_x</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span> <span class="identifier">keepdims</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="identifier">recip_square_root</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">mean_square</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span><span class="grouping">)</span>
+        <span class="identifier">output</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">scale</span> <span class="arithmetic-operator">*</span> <span class="identifier">inputs</span> <span class="arithmetic-operator">*</span> <span class="identifier">recip_square_root</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">offset</span>
+        <span class="keyword">return</span> <span class="identifier">output</span>
+
+    <span class="keyword">def</span> <span class="identifier">compute_output_shape</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">input_shape</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=no-self-use</span>
+        <span class="comment">""" The output shape of the layer is the same as the input shape.
+
+        Parameters
+        ----------
+        input_shape: tuple
+            The input shape to the layer
+
+        Returns
+        -------
+        tuple
+            The output shape to the layer
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">input_shape</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_config</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Returns the config of the layer.
+
+        A layer config is a Python dictionary (serializable) containing the configuration of a
+        layer. The same layer can be reinstated later (without its trained weights) from this
+        configuration.
+
+        The configuration of a layer does not include connectivity information, nor the layer
+        class name. These are handled by `Network` (one layer of abstraction above).
+
+        Returns
+        --------
+        dict
+            A python dictionary containing the layer configuration
+        """</span>
+        <span class="identifier">base_config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">get_config</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">config</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">axis</span><span class="punctuation">,</span>
+                      <span class="identifier">epsilon</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">epsilon</span><span class="punctuation">,</span>
+                      <span class="identifier">partial</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">partial</span><span class="punctuation">,</span>
+                      <span class="identifier">bias</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">bias</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">list</span><span class="grouping">(</span><span class="identifier">base_config</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">config</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="comment"># Update normalization into Keras custom objects</span>
+<span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">obj</span> <span class="relational-operator">in</span> <span class="identifier">inspect</span><span class="punctuation">.</span><span class="identifier">getmembers</span><span class="grouping">(</span><span class="identifier">sys</span><span class="punctuation">.</span><span class="identifier">modules</span><span class="grouping">[</span><span class="identifier">__name__</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">if</span> <span class="identifier">inspect</span><span class="punctuation">.</span><span class="identifier">isclass</span><span class="grouping">(</span><span class="identifier">obj</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">obj</span><span class="punctuation">.</span><span class="identifier">__module__</span> <span class="relational-operator">==</span> <span class="identifier">__name__</span><span class="punctuation">:</span>
+        <span class="identifier">get_custom_objects</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">update</span><span class="grouping">(</span><span class="grouping">{</span><span class="identifier">name</span><span class="punctuation">:</span> <span class="identifier">obj</span><span class="grouping">}</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

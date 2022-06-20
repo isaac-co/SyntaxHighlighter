@@ -1,0 +1,818 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Gaussian processes classification."""</span>
+
+<span class="comment"># Authors: Jan Hendrik Metzen &lt;jhm@informatik.uni-bremen.de&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">operator</span> <span class="keyword">import</span> <span class="identifier">itemgetter</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">cholesky</span><span class="punctuation">,</span> <span class="identifier">cho_solve</span><span class="punctuation">,</span> <span class="identifier">solve</span>
+<span class="keyword">import</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">optimize</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">special</span> <span class="keyword">import</span> <span class="identifier">erf</span><span class="punctuation">,</span> <span class="identifier">expit</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span><span class="punctuation">,</span> <span class="identifier">clone</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">kernels</span> <span class="invalid">\</span>
+    <span class="keyword">import</span> <span class="identifier">RBF</span><span class="punctuation">,</span> <span class="identifier">CompoundKernel</span><span class="punctuation">,</span> <span class="identifier">ConstantKernel</span> <span class="keyword">as</span> <span class="identifier">C</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">optimize</span> <span class="keyword">import</span> <span class="identifier">_check_optimize_result</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">preprocessing</span> <span class="keyword">import</span> <span class="identifier">LabelEncoder</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">multiclass</span> <span class="keyword">import</span> <span class="identifier">OneVsRestClassifier</span><span class="punctuation">,</span> <span class="identifier">OneVsOneClassifier</span>
+
+
+<span class="comment"># Values required for approximating the logistic sigmoid by</span>
+<span class="comment"># error functions. coefs are obtained via:</span>
+<span class="comment"># x = np.array([0, 0.6, 2, 3.5, 4.5, np.inf])</span>
+<span class="comment"># b = logistic(x)</span>
+<span class="comment"># A = (erf(np.dot(x, self.lambdas)) + 1) / 2</span>
+<span class="comment"># coefs = lstsq(A, b)[0]</span>
+<span class="invalid">L</span><span class="invalid">A</span><span class="invalid">M</span><span class="invalid">B</span><span class="invalid">D</span><span class="invalid">A</span><span class="invalid">S</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="float-literal">0.41</span><span class="punctuation">,</span> <span class="float-literal">0.4</span><span class="punctuation">,</span> <span class="float-literal">0.37</span><span class="punctuation">,</span> <span class="float-literal">0.44</span><span class="punctuation">,</span> <span class="float-literal">0.39</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+<span class="identifier">COEFS</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="float-literal">-1854.8214151</span><span class="punctuation">,</span> <span class="float-literal">3516.89893646</span><span class="punctuation">,</span> <span class="float-literal">221.29346712</span><span class="punctuation">,</span>
+                  <span class="float-literal">128.12323805</span><span class="punctuation">,</span> <span class="float-literal">-2010.49422654</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_BinaryGaussianProcessClassifierLaplace</span><span class="grouping">(</span><span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Binary Gaussian process classification based on Laplace approximation.
+
+    The implementation is based on Algorithm 3.1, 3.2, and 5.1 of
+    ``Gaussian Processes for Machine Learning'' (GPML) by Rasmussen and
+    Williams.
+
+    Internally, the Laplace approximation is used for approximating the
+    non-Gaussian posterior by a Gaussian.
+
+    Currently, the implementation is restricted to using the logistic link
+    function.
+
+    .. versionadded:: 0.18
+
+    Parameters
+    ----------
+    kernel : kernel instance, default=None
+        The kernel specifying the covariance function of the GP. If None is
+        passed, the kernel "1.0 * RBF(1.0)" is used as default. Note that
+        the kernel's hyperparameters are optimized during fitting.
+
+    optimizer : 'fmin_l_bfgs_b' or callable, default='fmin_l_bfgs_b'
+        Can either be one of the internally supported optimizers for optimizing
+        the kernel's parameters, specified by a string, or an externally
+        defined optimizer passed as a callable. If a callable is passed, it
+        must have the  signature::
+
+            def optimizer(obj_func, initial_theta, bounds):
+                # * 'obj_func' is the objective function to be maximized, which
+                #   takes the hyperparameters theta as parameter and an
+                #   optional flag eval_gradient, which determines if the
+                #   gradient is returned additionally to the function value
+                # * 'initial_theta': the initial value for theta, which can be
+                #   used by local optimizers
+                # * 'bounds': the bounds on the values of theta
+                ....
+                # Returned are the best found hyperparameters theta and
+                # the corresponding value of the target function.
+                return theta_opt, func_min
+
+        Per default, the 'L-BFGS-B' algorithm from scipy.optimize.minimize
+        is used. If None is passed, the kernel's parameters are kept fixed.
+        Available internal optimizers are::
+
+            'fmin_l_bfgs_b'
+
+    n_restarts_optimizer : int, default=0
+        The number of restarts of the optimizer for finding the kernel's
+        parameters which maximize the log-marginal likelihood. The first run
+        of the optimizer is performed from the kernel's initial parameters,
+        the remaining ones (if any) from thetas sampled log-uniform randomly
+        from the space of allowed theta-values. If greater than 0, all bounds
+        must be finite. Note that n_restarts_optimizer=0 implies that one
+        run is performed.
+
+    max_iter_predict : int, default=100
+        The maximum number of iterations in Newton's method for approximating
+        the posterior during predict. Smaller values will reduce computation
+        time at the cost of worse results.
+
+    warm_start : bool, default=False
+        If warm-starts are enabled, the solution of the last Newton iteration
+        on the Laplace approximation of the posterior mode is used as
+        initialization for the next call of _posterior_mode(). This can speed
+        up convergence when _posterior_mode is called several times on similar
+        problems as in hyperparameter optimization. See :term:`the Glossary
+        &lt;warm_start&gt;`.
+
+    copy_X_train : bool, default=True
+        If True, a persistent copy of the training data is stored in the
+        object. Otherwise, just a reference to the training data is stored,
+        which might cause predictions to change if the data is modified
+        externally.
+
+    random_state : int, RandomState instance or None, default=None
+        Determines random number generation used to initialize the centers.
+        Pass an int for reproducible results across multiple function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    X_train_ : array-like of shape (n_samples, n_features) or list of object
+        Feature vectors or other representations of training data (also
+        required for prediction).
+
+    y_train_ : array-like of shape (n_samples,)
+        Target values in training data (also required for prediction)
+
+    classes_ : array-like of shape (n_classes,)
+        Unique class labels.
+
+    kernel_ : kernl instance
+        The kernel used for prediction. The structure of the kernel is the
+        same as the one passed as parameter but with optimized hyperparameters
+
+    L_ : array-like of shape (n_samples, n_samples)
+        Lower-triangular Cholesky decomposition of the kernel in X_train_
+
+    pi_ : array-like of shape (n_samples,)
+        The probabilities of the positive class for the training points
+        X_train_
+
+    W_sr_ : array-like of shape (n_samples,)
+        Square root of W, the Hessian of log-likelihood of the latent function
+        values for the observed labels. Since W is diagonal, only the diagonal
+        of sqrt(W) is stored.
+
+    log_marginal_likelihood_value_ : float
+        The log-marginal-likelihood of ``self.kernel_.theta``
+
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">optimizer</span><span class="arithmetic-assignment">=</span><span class="string-literal">"fmin_l_bfgs_b"</span><span class="punctuation">,</span>
+                 <span class="identifier">n_restarts_optimizer</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">max_iter_predict</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                 <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">copy_X_train</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">optimizer</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_restarts_optimizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_restarts_optimizer</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter_predict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter_predict</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy_X_train</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit Gaussian process classification model
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features) or list of object
+            Feature vectors or other representations of training data.
+
+        y : array-like of shape (n_samples,)
+            Target values, must be binary
+
+        Returns
+        -------
+        self : returns an instance of self.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>  <span class="comment"># Use an RBF kernel as default</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">C</span><span class="grouping">(</span><span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="identifier">constant_value_bounds</span><span class="arithmetic-assignment">=</span><span class="string-literal">"fixed"</span><span class="grouping">)</span> <span class="invalid">\</span>
+                <span class="arithmetic-operator">*</span> <span class="identifier">RBF</span><span class="grouping">(</span><span class="float-literal">1.0</span><span class="punctuation">,</span> <span class="identifier">length_scale_bounds</span><span class="arithmetic-assignment">=</span><span class="string-literal">"fixed"</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">clone</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rng</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_train_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X_train</span> <span class="keyword">else</span> <span class="identifier">X</span>
+
+        <span class="comment"># Encode class labels and check that it is a binary classification</span>
+        <span class="comment"># problem</span>
+        <span class="identifier">label_encoder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">LabelEncoder</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">label_encoder</span><span class="punctuation">.</span><span class="identifier">fit_transform</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">label_encoder</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"%s supports only binary classification. "</span>
+                             <span class="string-literal">"y contains classes %s"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">size</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"{0:s} requires 2 classes; got {1:d} class"</span>
+                             <span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">__class__</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span>
+                                     <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">size</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">n_dims</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="comment"># Choose hyperparameters based on maximizing the log-marginal</span>
+            <span class="comment"># likelihood (potentially starting from several initial values)</span>
+            <span class="keyword">def</span> <span class="identifier">obj_func</span><span class="grouping">(</span><span class="identifier">theta</span><span class="punctuation">,</span> <span class="identifier">eval_gradient</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">eval_gradient</span><span class="punctuation">:</span>
+                    <span class="identifier">lml</span><span class="punctuation">,</span> <span class="identifier">grad</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span>
+                        <span class="identifier">theta</span><span class="punctuation">,</span> <span class="identifier">eval_gradient</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">clone_kernel</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+                    <span class="keyword">return</span> <span class="arithmetic-operator">-</span><span class="identifier">lml</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="identifier">grad</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="keyword">return</span> <span class="arithmetic-operator">-</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span><span class="identifier">theta</span><span class="punctuation">,</span>
+                                                         <span class="identifier">clone_kernel</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+            <span class="comment"># First optimize starting from theta specified in kernel</span>
+            <span class="identifier">optima</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_constrained_optimization</span><span class="grouping">(</span><span class="identifier">obj_func</span><span class="punctuation">,</span>
+                                                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">theta</span><span class="punctuation">,</span>
+                                                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">bounds</span><span class="grouping">)</span><span class="grouping">]</span>
+
+            <span class="comment"># Additional runs are performed from log-uniform chosen initial</span>
+            <span class="comment"># theta</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_restarts_optimizer</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isfinite</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">bounds</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">all</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                        <span class="string-literal">"Multiple optimizer restarts (n_restarts_optimizer&gt;0) "</span>
+                        <span class="string-literal">"requires that all bounds are finite."</span><span class="grouping">)</span>
+                <span class="identifier">bounds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">bounds</span>
+                <span class="keyword">for</span> <span class="identifier">iteration</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_restarts_optimizer</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">theta_initial</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rng</span><span class="punctuation">.</span><span class="identifier">uniform</span><span class="grouping">(</span><span class="identifier">bounds</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                            <span class="identifier">bounds</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+                    <span class="identifier">optima</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span>
+                        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_constrained_optimization</span><span class="grouping">(</span><span class="identifier">obj_func</span><span class="punctuation">,</span> <span class="identifier">theta_initial</span><span class="punctuation">,</span>
+                                                       <span class="identifier">bounds</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="comment"># Select result from run with minimal (negative) log-marginal</span>
+            <span class="comment"># likelihood</span>
+            <span class="identifier">lml_values</span> <span class="arithmetic-assignment">=</span> <span class="identifier">list</span><span class="grouping">(</span><span class="identifier">map</span><span class="grouping">(</span><span class="identifier">itemgetter</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">optima</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">theta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">optima</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmin</span><span class="grouping">(</span><span class="identifier">lml_values</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">_check_bounds_params</span><span class="grouping">(</span><span class="grouping">)</span>
+
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood_value_</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">lml_values</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood_value_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">theta</span><span class="grouping">)</span>
+
+        <span class="comment"># Precompute quantities required for predictions which are independent</span>
+        <span class="comment"># of actual query points</span>
+        <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_train_</span><span class="grouping">)</span>
+
+        <span class="identifier">_</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pi_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">W_sr_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">L_</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="grouping">)</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_posterior_mode</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform classification on an array of test vectors X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features) or list of object
+            Query points where the GP is evaluated for classification.
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples,)
+            Predicted target values for X, values are from ``classes_``
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="comment"># As discussed on Section 3.4.2 of GPML, for making hard binary</span>
+        <span class="comment"># decisions, it is enough to compute the MAP of the posterior and</span>
+        <span class="comment"># pass it through the link function</span>
+        <span class="identifier">K_star</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_train_</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>  <span class="comment"># K_star =k(x_star)</span>
+        <span class="identifier">f_star</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K_star</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pi_</span><span class="grouping">)</span>  <span class="comment"># Algorithm 3.2,Line 4</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">f_star</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return probability estimates for the test vector X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features) or list of object
+            Query points where the GP is evaluated for classification.
+
+        Returns
+        -------
+        C : array-like of shape (n_samples, n_classes)
+            Returns the probability of the samples for each class in
+            the model. The columns correspond to the classes in sorted
+            order, as they appear in the attribute ``classes_``.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="comment"># Based on Algorithm 3.2 of GPML</span>
+        <span class="identifier">K_star</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_train_</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>  <span class="comment"># K_star =k(x_star)</span>
+        <span class="identifier">f_star</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K_star</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">pi_</span><span class="grouping">)</span>  <span class="comment"># Line 4</span>
+        <span class="identifier">v</span> <span class="arithmetic-assignment">=</span> <span class="identifier">solve</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">L_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">W_sr_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">K_star</span><span class="grouping">)</span>  <span class="comment"># Line 5</span>
+        <span class="comment"># Line 6 (compute np.diag(v.T.dot(v)) via einsum)</span>
+        <span class="identifier">var_f_star</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">einsum</span><span class="grouping">(</span><span class="string-literal">"ij,ij-&gt;j"</span><span class="punctuation">,</span> <span class="identifier">v</span><span class="punctuation">,</span> <span class="identifier">v</span><span class="grouping">)</span>
+
+        <span class="comment"># Line 7:</span>
+        <span class="comment"># Approximate \int log(z) * N(z | f_star, var_f_star)</span>
+        <span class="comment"># Approximation is due to Williams & Barber, "Bayesian Classification</span>
+        <span class="comment"># with Gaussian Processes", Appendix A: Approximate the logistic</span>
+        <span class="comment"># sigmoid by a linear combination of 5 error functions.</span>
+        <span class="comment"># For information on how this integral can be computed see</span>
+        <span class="comment"># blitiri.blogspot.de/2012/11/gaussian-integral-of-error-function.html</span>
+        <span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">var_f_star</span><span class="grouping">)</span>
+        <span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="invalid">L</span><span class="invalid">A</span><span class="invalid">M</span><span class="invalid">B</span><span class="invalid">D</span><span class="invalid">A</span><span class="invalid">S</span> <span class="arithmetic-operator">*</span> <span class="identifier">f_star</span>
+        <span class="identifier">integrals</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span> <span class="arithmetic-operator">/</span> <span class="identifier">alpha</span><span class="grouping">)</span> <span class="invalid">\</span>
+            <span class="arithmetic-operator">*</span> <span class="identifier">erf</span><span class="grouping">(</span><span class="identifier">gamma</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">alpha</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">alpha</span> <span class="arithmetic-operator">+</span> <span class="invalid">L</span><span class="invalid">A</span><span class="invalid">M</span><span class="invalid">B</span><span class="invalid">D</span><span class="invalid">A</span><span class="invalid">S</span><span class="arithmetic-operator">**</span><span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span> <span class="invalid">\</span>
+            <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">var_f_star</span> <span class="arithmetic-operator">*</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">pi_star</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">COEFS</span> <span class="arithmetic-operator">*</span> <span class="identifier">integrals</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="float-literal">.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">COEFS</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">pi_star</span><span class="punctuation">,</span> <span class="identifier">pi_star</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+    <span class="keyword">def</span> <span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">theta</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">eval_gradient</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                <span class="identifier">clone_kernel</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Returns log-marginal likelihood of theta for training data.
+
+        Parameters
+        ----------
+        theta : array-like of shape (n_kernel_params,), default=None
+            Kernel hyperparameters for which the log-marginal likelihood is
+            evaluated. If None, the precomputed log_marginal_likelihood
+            of ``self.kernel_.theta`` is returned.
+
+        eval_gradient : bool, default=False
+            If True, the gradient of the log-marginal likelihood with respect
+            to the kernel hyperparameters at position theta is returned
+            additionally. If True, theta must not be None.
+
+        clone_kernel : bool, default=True
+            If True, the kernel attribute is copied. If False, the kernel
+            attribute is modified, but may result in a performance improvement.
+
+        Returns
+        -------
+        log_likelihood : float
+            Log-marginal likelihood of theta for training data.
+
+        log_likelihood_gradient : ndarray of shape (n_kernel_params,), \
+                optional
+            Gradient of the log-marginal likelihood with respect to the kernel
+            hyperparameters at position theta.
+            Only returned when `eval_gradient` is True.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">theta</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">eval_gradient</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">"Gradient can only be evaluated for theta!=None"</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood_value_</span>
+
+        <span class="keyword">if</span> <span class="identifier">clone_kernel</span><span class="punctuation">:</span>
+            <span class="identifier">kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">clone_with_theta</span><span class="grouping">(</span><span class="identifier">theta</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel_</span>
+            <span class="identifier">kernel</span><span class="punctuation">.</span><span class="identifier">theta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">theta</span>
+
+        <span class="keyword">if</span> <span class="identifier">eval_gradient</span><span class="punctuation">:</span>
+            <span class="identifier">K</span><span class="punctuation">,</span> <span class="identifier">K_gradient</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_train_</span><span class="punctuation">,</span> <span class="identifier">eval_gradient</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_train_</span><span class="grouping">)</span>
+
+        <span class="comment"># Compute log-marginal-likelihood Z and also store some temporaries</span>
+        <span class="comment"># which can be reused for computing Z's gradient</span>
+        <span class="identifier">Z</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">pi</span><span class="punctuation">,</span> <span class="identifier">W_sr</span><span class="punctuation">,</span> <span class="identifier">L</span><span class="punctuation">,</span> <span class="identifier">b</span><span class="punctuation">,</span> <span class="identifier">a</span><span class="grouping">)</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_posterior_mode</span><span class="grouping">(</span><span class="identifier">K</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">eval_gradient</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">Z</span>
+
+        <span class="comment"># Compute gradient based on Algorithm 5.1 of GPML</span>
+        <span class="identifier">d_Z</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">empty</span><span class="grouping">(</span><span class="identifier">theta</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="comment"># XXX: Get rid of the np.diag() in the next line</span>
+        <span class="identifier">R</span> <span class="arithmetic-assignment">=</span> <span class="identifier">W_sr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">cho_solve</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">L</span><span class="punctuation">,</span> <span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">W_sr</span><span class="grouping">)</span><span class="grouping">)</span>  <span class="comment"># Line 7</span>
+        <span class="identifier">C</span> <span class="arithmetic-assignment">=</span> <span class="identifier">solve</span><span class="grouping">(</span><span class="identifier">L</span><span class="punctuation">,</span> <span class="identifier">W_sr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">K</span><span class="grouping">)</span>  <span class="comment"># Line 8</span>
+        <span class="comment"># Line 9: (use einsum to compute np.diag(C.T.dot(C))))</span>
+        <span class="identifier">s_2</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">-0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">K</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">einsum</span><span class="grouping">(</span><span class="string-literal">'ij, ij -&gt; j'</span><span class="punctuation">,</span> <span class="identifier">C</span><span class="punctuation">,</span> <span class="identifier">C</span><span class="grouping">)</span><span class="grouping">)</span> <span class="invalid">\</span>
+            <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">pi</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">pi</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="int-literal">2</span> <span class="arithmetic-operator">*</span> <span class="identifier">pi</span><span class="grouping">)</span><span class="grouping">)</span>  <span class="comment"># third derivative</span>
+
+        <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">d_Z</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">C</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K_gradient</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">j</span><span class="grouping">]</span>   <span class="comment"># Line 11</span>
+            <span class="comment"># Line 12: (R.T.ravel().dot(C.ravel()) = np.trace(R.dot(C)))</span>
+            <span class="identifier">s_1</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">a</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">C</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">a</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="float-literal">.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">R</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">C</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+            <span class="identifier">b</span> <span class="arithmetic-assignment">=</span> <span class="identifier">C</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span> <span class="arithmetic-operator">-</span> <span class="identifier">pi</span><span class="grouping">)</span>  <span class="comment"># Line 13</span>
+            <span class="identifier">s_3</span> <span class="arithmetic-assignment">=</span> <span class="identifier">b</span> <span class="arithmetic-operator">-</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">R</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">b</span><span class="grouping">)</span><span class="grouping">)</span>  <span class="comment"># Line 14</span>
+
+            <span class="identifier">d_Z</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">s_1</span> <span class="arithmetic-operator">+</span> <span class="identifier">s_2</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">s_3</span><span class="grouping">)</span>  <span class="comment"># Line 15</span>
+
+        <span class="keyword">return</span> <span class="identifier">Z</span><span class="punctuation">,</span> <span class="identifier">d_Z</span>
+
+    <span class="keyword">def</span> <span class="identifier">_posterior_mode</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">K</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">s</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Mode-finding for binary Laplace GPC and fixed kernel.
+
+        This approximates the posterior of the latent function values for given
+        inputs and target observations with a Gaussian approximation and uses
+        Newton's iteration to find the mode of this approximation.
+        """</span>
+        <span class="comment"># Based on Algorithm 3.1 of GPML</span>
+
+        <span class="comment"># If warm_start are enabled, we reuse the last solution for the</span>
+        <span class="comment"># posterior mode as initialization; otherwise, we initialize with 0</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span> <span class="logical-operator">and</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="string-literal">"f_cached"</span><span class="grouping">)</span> <span class="invalid">\</span>
+           <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">f_cached</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="relational-operator">==</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="punctuation">:</span>
+            <span class="identifier">f</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">f_cached</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">f</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros_like</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+
+        <span class="comment"># Use Newton's iteration method to find mode of Laplace approximation</span>
+        <span class="identifier">log_marginal_likelihood</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+        <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter_predict</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># Line 4</span>
+            <span class="identifier">pi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">expit</span><span class="grouping">(</span><span class="identifier">f</span><span class="grouping">)</span>
+            <span class="identifier">W</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pi</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">pi</span><span class="grouping">)</span>
+            <span class="comment"># Line 5</span>
+            <span class="identifier">W_sr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">W</span><span class="grouping">)</span>
+            <span class="identifier">W_sr_K</span> <span class="arithmetic-assignment">=</span> <span class="identifier">W_sr</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">K</span>
+            <span class="identifier">B</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">W</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">W_sr_K</span> <span class="arithmetic-operator">*</span> <span class="identifier">W_sr</span>
+            <span class="identifier">L</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cholesky</span><span class="grouping">(</span><span class="identifier">B</span><span class="punctuation">,</span> <span class="identifier">lower</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+            <span class="comment"># Line 6</span>
+            <span class="identifier">b</span> <span class="arithmetic-assignment">=</span> <span class="identifier">W</span> <span class="arithmetic-operator">*</span> <span class="identifier">f</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span> <span class="arithmetic-operator">-</span> <span class="identifier">pi</span><span class="grouping">)</span>
+            <span class="comment"># Line 7</span>
+            <span class="identifier">a</span> <span class="arithmetic-assignment">=</span> <span class="identifier">b</span> <span class="arithmetic-operator">-</span> <span class="identifier">W_sr</span> <span class="arithmetic-operator">*</span> <span class="identifier">cho_solve</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">L</span><span class="punctuation">,</span> <span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">W_sr_K</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">b</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="comment"># Line 8</span>
+            <span class="identifier">f</span> <span class="arithmetic-assignment">=</span> <span class="identifier">K</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">a</span><span class="grouping">)</span>
+
+            <span class="comment"># Line 10: Compute log marginal likelihood in loop and use as</span>
+            <span class="comment">#          convergence criterion</span>
+            <span class="identifier">lml</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">-0.5</span> <span class="arithmetic-operator">*</span> <span class="identifier">a</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">f</span><span class="grouping">)</span> <span class="invalid">\</span>
+                <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log1p</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">exp</span><span class="grouping">(</span><span class="arithmetic-operator">-</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">y_train_</span> <span class="arithmetic-operator">*</span> <span class="int-literal">2</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">f</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span> <span class="invalid">\</span>
+                <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">L</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="comment"># Check if we have converged (log marginal likelihood does</span>
+            <span class="comment"># not decrease)</span>
+            <span class="comment"># XXX: more complex convergence criterion</span>
+            <span class="keyword">if</span> <span class="identifier">lml</span> <span class="arithmetic-operator">-</span> <span class="identifier">log_marginal_likelihood</span> <span class="relational-operator">&lt;</span> <span class="float-literal">1e-10</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+            <span class="identifier">log_marginal_likelihood</span> <span class="arithmetic-assignment">=</span> <span class="identifier">lml</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">f_cached</span> <span class="arithmetic-assignment">=</span> <span class="identifier">f</span>  <span class="comment"># Remember solution for later warm-starts</span>
+        <span class="keyword">if</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">m</span><span class="invalid">p</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">log_marginal_likelihood</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">pi</span><span class="punctuation">,</span> <span class="identifier">W_sr</span><span class="punctuation">,</span> <span class="identifier">L</span><span class="punctuation">,</span> <span class="identifier">b</span><span class="punctuation">,</span> <span class="identifier">a</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">log_marginal_likelihood</span>
+
+    <span class="keyword">def</span> <span class="identifier">_constrained_optimization</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">obj_func</span><span class="punctuation">,</span> <span class="identifier">initial_theta</span><span class="punctuation">,</span> <span class="identifier">bounds</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span> <span class="relational-operator">==</span> <span class="string-literal">"fmin_l_bfgs_b"</span><span class="punctuation">:</span>
+            <span class="identifier">opt_res</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">optimize</span><span class="punctuation">.</span><span class="identifier">minimize</span><span class="grouping">(</span>
+                <span class="identifier">obj_func</span><span class="punctuation">,</span> <span class="identifier">initial_theta</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">"L-BFGS-B"</span><span class="punctuation">,</span> <span class="identifier">jac</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                <span class="identifier">bounds</span><span class="arithmetic-assignment">=</span><span class="identifier">bounds</span><span class="grouping">)</span>
+            <span class="identifier">_check_optimize_result</span><span class="grouping">(</span><span class="string-literal">"lbfgs"</span><span class="punctuation">,</span> <span class="identifier">opt_res</span><span class="grouping">)</span>
+            <span class="identifier">theta_opt</span><span class="punctuation">,</span> <span class="identifier">func_min</span> <span class="arithmetic-assignment">=</span> <span class="identifier">opt_res</span><span class="punctuation">.</span><span class="identifier">x</span><span class="punctuation">,</span> <span class="identifier">opt_res</span><span class="punctuation">.</span><span class="identifier">fun</span>
+        <span class="keyword">elif</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">theta_opt</span><span class="punctuation">,</span> <span class="identifier">func_min</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span><span class="grouping">(</span><span class="identifier">obj_func</span><span class="punctuation">,</span> <span class="identifier">initial_theta</span><span class="punctuation">,</span> <span class="identifier">bounds</span><span class="arithmetic-assignment">=</span><span class="identifier">bounds</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unknown optimizer %s."</span> <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">theta_opt</span><span class="punctuation">,</span> <span class="identifier">func_min</span>
+
+
+<span class="keyword">class</span> <span class="identifier">GaussianProcessClassifier</span><span class="grouping">(</span><span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Gaussian process classification (GPC) based on Laplace approximation.
+
+    The implementation is based on Algorithm 3.1, 3.2, and 5.1 of
+    Gaussian Processes for Machine Learning (GPML) by Rasmussen and
+    Williams.
+
+    Internally, the Laplace approximation is used for approximating the
+    non-Gaussian posterior by a Gaussian.
+
+    Currently, the implementation is restricted to using the logistic link
+    function. For multi-class classification, several binary one-versus rest
+    classifiers are fitted. Note that this class thus does not implement
+    a true multi-class Laplace approximation.
+
+    Read more in the :ref:`User Guide &lt;gaussian_process&gt;`.
+
+    Parameters
+    ----------
+    kernel : kernel instance, default=None
+        The kernel specifying the covariance function of the GP. If None is
+        passed, the kernel "1.0 * RBF(1.0)" is used as default. Note that
+        the kernel's hyperparameters are optimized during fitting.
+
+    optimizer : 'fmin_l_bfgs_b' or callable, default='fmin_l_bfgs_b'
+        Can either be one of the internally supported optimizers for optimizing
+        the kernel's parameters, specified by a string, or an externally
+        defined optimizer passed as a callable. If a callable is passed, it
+        must have the  signature::
+
+            def optimizer(obj_func, initial_theta, bounds):
+                # * 'obj_func' is the objective function to be maximized, which
+                #   takes the hyperparameters theta as parameter and an
+                #   optional flag eval_gradient, which determines if the
+                #   gradient is returned additionally to the function value
+                # * 'initial_theta': the initial value for theta, which can be
+                #   used by local optimizers
+                # * 'bounds': the bounds on the values of theta
+                ....
+                # Returned are the best found hyperparameters theta and
+                # the corresponding value of the target function.
+                return theta_opt, func_min
+
+        Per default, the 'L-BFGS-B' algorithm from scipy.optimize.minimize
+        is used. If None is passed, the kernel's parameters are kept fixed.
+        Available internal optimizers are::
+
+            'fmin_l_bfgs_b'
+
+    n_restarts_optimizer : int, default=0
+        The number of restarts of the optimizer for finding the kernel's
+        parameters which maximize the log-marginal likelihood. The first run
+        of the optimizer is performed from the kernel's initial parameters,
+        the remaining ones (if any) from thetas sampled log-uniform randomly
+        from the space of allowed theta-values. If greater than 0, all bounds
+        must be finite. Note that n_restarts_optimizer=0 implies that one
+        run is performed.
+
+    max_iter_predict : int, default=100
+        The maximum number of iterations in Newton's method for approximating
+        the posterior during predict. Smaller values will reduce computation
+        time at the cost of worse results.
+
+    warm_start : bool, default=False
+        If warm-starts are enabled, the solution of the last Newton iteration
+        on the Laplace approximation of the posterior mode is used as
+        initialization for the next call of _posterior_mode(). This can speed
+        up convergence when _posterior_mode is called several times on similar
+        problems as in hyperparameter optimization. See :term:`the Glossary
+        &lt;warm_start&gt;`.
+
+    copy_X_train : bool, default=True
+        If True, a persistent copy of the training data is stored in the
+        object. Otherwise, just a reference to the training data is stored,
+        which might cause predictions to change if the data is modified
+        externally.
+
+    random_state : int, RandomState instance or None, default=None
+        Determines random number generation used to initialize the centers.
+        Pass an int for reproducible results across multiple function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    multi_class : {'one_vs_rest', 'one_vs_one'}, default='one_vs_rest'
+        Specifies how multi-class classification problems are handled.
+        Supported are 'one_vs_rest' and 'one_vs_one'. In 'one_vs_rest',
+        one binary Gaussian process classifier is fitted for each class, which
+        is trained to separate this class from the rest. In 'one_vs_one', one
+        binary Gaussian process classifier is fitted for each pair of classes,
+        which is trained to separate these two classes. The predictions of
+        these binary predictors are combined into multi-class predictions.
+        Note that 'one_vs_one' does not support predicting probability
+        estimates.
+
+    n_jobs : int, default=None
+        The number of jobs to use for the computation: the specified
+        multiclass problems are computed in parallel.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Attributes
+    ----------
+    base_estimator_ : ``Estimator`` instance
+        The estimator instance that defines the likelihood function
+        using the observed data.
+
+    kernel_ : kernel instance
+        The kernel used for prediction. In case of binary classification,
+        the structure of the kernel is the same as the one passed as parameter
+        but with optimized hyperparameters. In case of multi-class
+        classification, a CompoundKernel is returned which consists of the
+        different kernels used in the one-versus-rest classifiers.
+
+    log_marginal_likelihood_value_ : float
+        The log-marginal-likelihood of ``self.kernel_.theta``
+
+    classes_ : array-like of shape (n_classes,)
+        Unique class labels.
+
+    n_classes_ : int
+        The number of classes in the training data
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.datasets import load_iris
+    &gt;&gt;&gt; from sklearn.gaussian_process import GaussianProcessClassifier
+    &gt;&gt;&gt; from sklearn.gaussian_process.kernels import RBF
+    &gt;&gt;&gt; X, y = load_iris(return_X_y=True)
+    &gt;&gt;&gt; kernel = 1.0 * RBF(1.0)
+    &gt;&gt;&gt; gpc = GaussianProcessClassifier(kernel=kernel,
+    ...         random_state=0).fit(X, y)
+    &gt;&gt;&gt; gpc.score(X, y)
+    0.9866...
+    &gt;&gt;&gt; gpc.predict_proba(X[:2,:])
+    array([[0.83548752, 0.03228706, 0.13222543],
+           [0.79064206, 0.06525643, 0.14410151]])
+
+    .. versionadded:: 0.18
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">optimizer</span><span class="arithmetic-assignment">=</span><span class="string-literal">"fmin_l_bfgs_b"</span><span class="punctuation">,</span>
+                 <span class="identifier">n_restarts_optimizer</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">max_iter_predict</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                 <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">copy_X_train</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">multi_class</span><span class="arithmetic-assignment">=</span><span class="string-literal">"one_vs_rest"</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">optimizer</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_restarts_optimizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_restarts_optimizer</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter_predict</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter_predict</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">warm_start</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X_train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy_X_train</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">multi_class</span> <span class="arithmetic-assignment">=</span> <span class="identifier">multi_class</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit Gaussian process classification model
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features) or list of object
+            Feature vectors or other representations of training data.
+
+        y : array-like of shape (n_samples,)
+            Target values, must be binary
+
+        Returns
+        -------
+        self : returns an instance of self.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="punctuation">.</span><span class="identifier">requires_vector_input</span><span class="punctuation">:</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">multi_output</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                       <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"numeric"</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">multi_output</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                       <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_BinaryGaussianProcessClassifierLaplace</span><span class="grouping">(</span>
+            <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="punctuation">,</span>
+            <span class="identifier">optimizer</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">optimizer</span><span class="punctuation">,</span>
+            <span class="identifier">n_restarts_optimizer</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_restarts_optimizer</span><span class="punctuation">,</span>
+            <span class="identifier">max_iter_predict</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter_predict</span><span class="punctuation">,</span>
+            <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">warm_start</span><span class="punctuation">,</span>
+            <span class="identifier">copy_X_train</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy_X_train</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">size</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"GaussianProcessClassifier requires 2 or more "</span>
+                             <span class="string-literal">"distinct classes; got %d class (only class %s "</span>
+                             <span class="string-literal">"is present)"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">multi_class</span> <span class="relational-operator">==</span> <span class="string-literal">"one_vs_rest"</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                    <span class="identifier">OneVsRestClassifier</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">,</span>
+                                        <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">multi_class</span> <span class="relational-operator">==</span> <span class="string-literal">"one_vs_one"</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                    <span class="identifier">OneVsOneClassifier</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">,</span>
+                                       <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Unknown multi-class mode %s"</span>
+                                 <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">multi_class</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood_value_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span>
+                <span class="grouping">[</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span><span class="grouping">)</span>
+                 <span class="keyword">for</span> <span class="identifier">estimator</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood_value_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Perform classification on an array of test vectors X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features) or list of object
+            Query points where the GP is evaluated for classification.
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples,)
+            Predicted target values for X, values are from ``classes_``
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="punctuation">.</span><span class="identifier">requires_vector_input</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"numeric"</span><span class="punctuation">,</span>
+                                    <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                    <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return probability estimates for the test vector X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features) or list of object
+            Query points where the GP is evaluated for classification.
+
+        Returns
+        -------
+        C : array-like of shape (n_samples, n_classes)
+            Returns the probability of the samples for each class in
+            the model. The columns correspond to the classes in sorted
+            order, as they appear in the attribute :term:`classes_`.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span> <span class="logical-operator">and</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">multi_class</span> <span class="relational-operator">==</span> <span class="string-literal">"one_vs_one"</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"one_vs_one multi-class mode does not support "</span>
+                             <span class="string-literal">"predicting probability estimates. Use "</span>
+                             <span class="string-literal">"one_vs_rest mode instead."</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="punctuation">.</span><span class="identifier">requires_vector_input</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"numeric"</span><span class="punctuation">,</span>
+                                    <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                    <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">property</span>
+    <span class="keyword">def</span> <span class="identifier">kernel_</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">kernel_</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">CompoundKernel</span><span class="grouping">(</span>
+                <span class="grouping">[</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">kernel_</span>
+                 <span class="keyword">for</span> <span class="identifier">estimator</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">theta</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">eval_gradient</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                <span class="identifier">clone_kernel</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Returns log-marginal likelihood of theta for training data.
+
+        In the case of multi-class classification, the mean log-marginal
+        likelihood of the one-versus-rest classifiers are returned.
+
+        Parameters
+        ----------
+        theta : array-like of shape (n_kernel_params,), default=None
+            Kernel hyperparameters for which the log-marginal likelihood is
+            evaluated. In the case of multi-class classification, theta may
+            be the  hyperparameters of the compound kernel or of an individual
+            kernel. In the latter case, all individual kernel get assigned the
+            same theta values. If None, the precomputed log_marginal_likelihood
+            of ``self.kernel_.theta`` is returned.
+
+        eval_gradient : bool, default=False
+            If True, the gradient of the log-marginal likelihood with respect
+            to the kernel hyperparameters at position theta is returned
+            additionally. Note that gradient computation is not supported
+            for non-binary classification. If True, theta must not be None.
+
+        clone_kernel : bool, default=True
+            If True, the kernel attribute is copied. If False, the kernel
+            attribute is modified, but may result in a performance improvement.
+
+        Returns
+        -------
+        log_likelihood : float
+            Log-marginal likelihood of theta for training data.
+
+        log_likelihood_gradient : ndarray of shape (n_kernel_params,), optional
+            Gradient of the log-marginal likelihood with respect to the kernel
+            hyperparameters at position theta.
+            Only returned when `eval_gradient` is True.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">theta</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">eval_gradient</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                    <span class="string-literal">"Gradient can only be evaluated for theta!=None"</span><span class="grouping">)</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood_value_</span>
+
+        <span class="identifier">theta</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">theta</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_classes_</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span>
+                <span class="identifier">theta</span><span class="punctuation">,</span> <span class="identifier">eval_gradient</span><span class="punctuation">,</span> <span class="identifier">clone_kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">clone_kernel</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">eval_gradient</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span>
+                    <span class="string-literal">"Gradient of log-marginal-likelihood not implemented for "</span>
+                    <span class="string-literal">"multi-class GPC."</span><span class="grouping">)</span>
+            <span class="identifier">estimators</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">base_estimator_</span><span class="punctuation">.</span><span class="identifier">estimators_</span>
+            <span class="identifier">n_dims</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimators</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">kernel_</span><span class="punctuation">.</span><span class="identifier">n_dims</span>
+            <span class="keyword">if</span> <span class="identifier">theta</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">n_dims</span><span class="punctuation">:</span>  <span class="comment"># use same theta for all sub-kernels</span>
+                <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span>
+                    <span class="grouping">[</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span>
+                        <span class="identifier">theta</span><span class="punctuation">,</span> <span class="identifier">clone_kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">clone_kernel</span><span class="grouping">)</span>
+                     <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">estimator</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">estimators</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">elif</span> <span class="identifier">theta</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">n_dims</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="comment"># theta for compound kernel</span>
+                <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span>
+                    <span class="grouping">[</span><span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">log_marginal_likelihood</span><span class="grouping">(</span>
+                        <span class="identifier">theta</span><span class="grouping">[</span><span class="identifier">n_dims</span> <span class="arithmetic-operator">*</span> <span class="identifier">i</span><span class="punctuation">:</span><span class="identifier">n_dims</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">,</span>
+                        <span class="identifier">clone_kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">clone_kernel</span><span class="grouping">)</span>
+                     <span class="keyword">for</span> <span class="identifier">i</span><span class="punctuation">,</span> <span class="identifier">estimator</span> <span class="relational-operator">in</span> <span class="identifier">enumerate</span><span class="grouping">(</span><span class="identifier">estimators</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Shape of theta must be either %d or %d. "</span>
+                                 <span class="string-literal">"Obtained theta with shape %d."</span>
+                                 <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_dims</span><span class="punctuation">,</span> <span class="identifier">n_dims</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                    <span class="identifier">theta</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

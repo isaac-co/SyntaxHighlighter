@@ -1,0 +1,737 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+scikit-learn copy of scipy/sparse/linalg/eigen/lobpcg/lobpcg.py v1.3.0
+to be deleted after scipy 1.3.0 becomes a dependency in scikit-lean
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Locally Optimal Block Preconditioned Conjugate Gradient Method (LOBPCG).
+
+References
+----------
+.. [1] A. V. Knyazev (2001),
+       Toward the Optimal Preconditioned Eigensolver: Locally Optimal
+       Block Preconditioned Conjugate Gradient Method.
+       SIAM Journal on Scientific Computing 23, no. 2,
+       pp. 517-541. http://dx.doi.org/10.1137/S1064827500366124
+
+.. [2] A. V. Knyazev, I. Lashuk, M. E. Argentati, and E. Ovchinnikov (2007),
+       Block Locally Optimal Preconditioned Eigenvalue Xolvers (BLOPEX)
+       in hypre and PETSc.  https://arxiv.org/abs/0705.2626
+
+.. [3] A. V. Knyazev's C and MATLAB implementations:
+       https://bitbucket.org/joseroman/blopex
+"""</span>
+
+<span class="keyword">from</span> <span class="identifier">__future__</span> <span class="keyword">import</span> <span class="identifier">division</span><span class="punctuation">,</span> <span class="identifier">print_function</span><span class="punctuation">,</span> <span class="identifier">absolute_import</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">inv</span><span class="punctuation">,</span> <span class="identifier">eigh</span><span class="punctuation">,</span> <span class="identifier">cho_factor</span><span class="punctuation">,</span> <span class="identifier">cho_solve</span><span class="punctuation">,</span> <span class="identifier">cholesky</span><span class="punctuation">,</span> <span class="identifier">orth</span><span class="punctuation">,</span>
+                          <span class="identifier">LinAlgError</span><span class="grouping">)</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">p</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span>
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">'lobpcg'</span><span class="grouping">]</span>
+
+
+<span class="keyword">def</span> <span class="identifier">bmat</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">import</span> <span class="identifier">warnings</span>
+    <span class="keyword">with</span> <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">catch_warnings</span><span class="grouping">(</span><span class="identifier">record</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">filterwarnings</span><span class="grouping">(</span>
+            <span class="string-literal">'ignore', '.*the matrix subclass is not the recommended way.*'</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">bmat</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_save</span><span class="grouping">(</span><span class="identifier">ar</span><span class="punctuation">,</span> <span class="identifier">fileName</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment"># Used only when verbosity level &gt; 10.</span>
+    <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">savetxt</span><span class="grouping">(</span><span class="identifier">fileName</span><span class="punctuation">,</span> <span class="identifier">ar</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_report_nonhermitian</span><span class="grouping">(</span><span class="identifier">M</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Report if `M` is not a hermitian matrix given its type.
+    """</span>
+    <span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">linalg</span> <span class="keyword">import</span> <span class="identifier">norm</span>
+
+    <span class="identifier">md</span> <span class="arithmetic-assignment">=</span> <span class="identifier">M</span> <span class="arithmetic-operator">-</span> <span class="identifier">M</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="identifier">nmd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">md</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">10</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">M</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+    <span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">tol</span> <span class="arithmetic-operator">*</span> <span class="identifier">norm</span><span class="grouping">(</span><span class="identifier">M</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">nmd</span> <span class="relational-operator">&gt;</span> <span class="identifier">tol</span><span class="punctuation">:</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'matrix %s of the type %s is not sufficiently Hermitian:'</span>
+              <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">M</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'condition: %.e &lt; %e'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">nmd</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_as2d</span><span class="grouping">(</span><span class="identifier">ar</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    If the input array is 2D return it, if it is 1D, append a dimension,
+    making it a column vector.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">ar</span><span class="punctuation">.</span><span class="identifier">ndim</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">ar</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># Assume 1!</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">ar</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">aux</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">ar</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">aux</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_makeOperator</span><span class="grouping">(</span><span class="identifier">operatorInput</span><span class="punctuation">,</span> <span class="identifier">expectedShape</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Takes a dense numpy array or a sparse matrix or
+    a function and makes an operator performing matrix * blockvector
+    products."""</span>
+    <span class="keyword">if</span> <span class="identifier">operatorInput</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="none-literal">None</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">operator</span> <span class="arithmetic-assignment">=</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">e</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">o</span><span class="invalid">p</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="grouping">(</span><span class="identifier">operatorInput</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">operator</span><span class="punctuation">.</span><span class="identifier">shape</span> <span class="relational-operator">!=</span> <span class="identifier">expectedShape</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'operator has invalid shape'</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">operator</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_applyConstraints</span><span class="grouping">(</span><span class="identifier">blockVectorV</span><span class="punctuation">,</span> <span class="identifier">factYBY</span><span class="punctuation">,</span> <span class="identifier">blockVectorBY</span><span class="punctuation">,</span> <span class="identifier">blockVectorY</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Changes blockVectorV in place."""</span>
+    <span class="identifier">YBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorBY</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">blockVectorV</span><span class="grouping">)</span>
+    <span class="identifier">tmp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cho_solve</span><span class="grouping">(</span><span class="identifier">factYBY</span><span class="punctuation">,</span> <span class="identifier">YBV</span><span class="grouping">)</span>
+    <span class="identifier">blockVectorV</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorY</span><span class="punctuation">,</span> <span class="identifier">tmp</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_b_orthonormalize</span><span class="grouping">(</span><span class="identifier">B</span><span class="punctuation">,</span> <span class="identifier">blockVectorV</span><span class="punctuation">,</span> <span class="identifier">blockVectorBV</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">retInvR</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""B-orthonormalize the given block vector using Cholesky."""</span>
+    <span class="identifier">normalization</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorV</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="arithmetic-operator">+</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">finfo</span><span class="grouping">(</span><span class="identifier">blockVectorV</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">eps</span>
+    <span class="identifier">blockVectorV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorV</span> <span class="arithmetic-operator">/</span> <span class="identifier">normalization</span>
+    <span class="keyword">if</span> <span class="identifier">blockVectorBV</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">blockVectorBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">B</span><span class="grouping">(</span><span class="identifier">blockVectorV</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">blockVectorBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorV</span>  <span class="comment"># Shared data!!!</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">blockVectorBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorBV</span> <span class="arithmetic-operator">/</span> <span class="identifier">normalization</span>
+    <span class="identifier">VBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">matmul</span><span class="grouping">(</span><span class="identifier">blockVectorV</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">blockVectorBV</span><span class="grouping">)</span>
+    <span class="keyword">try</span><span class="punctuation">:</span>
+        <span class="comment"># VBV is a Cholesky factor from now on...</span>
+        <span class="identifier">VBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cholesky</span><span class="grouping">(</span><span class="identifier">VBV</span><span class="punctuation">,</span> <span class="identifier">overwrite_a</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">VBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inv</span><span class="grouping">(</span><span class="identifier">VBV</span><span class="punctuation">,</span> <span class="identifier">overwrite_a</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">blockVectorV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">matmul</span><span class="grouping">(</span><span class="identifier">blockVectorV</span><span class="punctuation">,</span> <span class="identifier">VBV</span><span class="grouping">)</span>
+        <span class="comment"># blockVectorV = (cho_solve((VBV.T, True), blockVectorV.T)).T</span>
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">blockVectorBV</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">matmul</span><span class="grouping">(</span><span class="identifier">blockVectorBV</span><span class="punctuation">,</span> <span class="identifier">VBV</span><span class="grouping">)</span>
+            <span class="comment"># blockVectorBV = (cho_solve((VBV.T, True), blockVectorBV.T)).T</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">blockVectorBV</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+    <span class="keyword">except</span> <span class="identifier">LinAlgError</span><span class="punctuation">:</span>
+        <span class="comment"># raise ValueError('Cholesky has failed')</span>
+        <span class="identifier">blockVectorV</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">blockVectorBV</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">VBV</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="keyword">if</span> <span class="identifier">retInvR</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">blockVectorV</span><span class="punctuation">,</span> <span class="identifier">blockVectorBV</span><span class="punctuation">,</span> <span class="identifier">VBV</span><span class="punctuation">,</span> <span class="identifier">normalization</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">blockVectorV</span><span class="punctuation">,</span> <span class="identifier">blockVectorBV</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_get_indx</span><span class="grouping">(</span><span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">num</span><span class="punctuation">,</span> <span class="identifier">largest</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Get `num` indices into `_lambda` depending on `largest` option."""</span>
+    <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">_lambda</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">largest</span><span class="punctuation">:</span>
+        <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ii</span><span class="grouping">[</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="identifier">num</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ii</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">num</span><span class="grouping">]</span>
+
+    <span class="keyword">return</span> <span class="identifier">ii</span>
+
+
+<span class="keyword">def</span> <span class="identifier">lobpcg</span><span class="grouping">(</span><span class="identifier">A</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span>
+           <span class="identifier">B</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">M</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">Y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+           <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">maxiter</span><span class="arithmetic-assignment">=</span><span class="int-literal">20</span><span class="punctuation">,</span>
+           <span class="identifier">largest</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">verbosityLevel</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+           <span class="identifier">retLambdaHistory</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">retResidualNormsHistory</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Locally Optimal Block Preconditioned Conjugate Gradient Method (LOBPCG)
+
+    LOBPCG is a preconditioned eigensolver for large symmetric positive
+    definite (SPD) generalized eigenproblems.
+
+    Parameters
+    ----------
+    A : {sparse matrix, dense matrix, LinearOperator}
+        The symmetric linear operator of the problem, usually a
+        sparse matrix.  Often called the "stiffness matrix".
+    X : ndarray, float32 or float64
+        Initial approximation to the ``k`` eigenvectors (non-sparse). If `A`
+        has ``shape=(n,n)`` then `X` should have shape ``shape=(n,k)``.
+    B : {dense matrix, sparse matrix, LinearOperator}, optional
+        The right hand side operator in a generalized eigenproblem.
+        By default, ``B = Identity``.  Often called the "mass matrix".
+    M : {dense matrix, sparse matrix, LinearOperator}, optional
+        Preconditioner to `A`; by default ``M = Identity``.
+        `M` should approximate the inverse of `A`.
+    Y : ndarray, float32 or float64, optional
+        n-by-sizeY matrix of constraints (non-sparse), sizeY &lt; n
+        The iterations will be performed in the B-orthogonal complement
+        of the column-space of Y. Y must be full rank.
+    tol : scalar, optional
+        Solver tolerance (stopping criterion).
+        The default is ``tol=n*sqrt(eps)``.
+    maxiter : int, optional
+        Maximum number of iterations.  The default is ``maxiter=min(n, 20)``.
+    largest : bool, optional
+        When True, solve for the largest eigenvalues, otherwise the smallest.
+    verbosityLevel : int, optional
+        Controls solver output.  The default is ``verbosityLevel=0``.
+    retLambdaHistory : bool, optional
+        Whether to return eigenvalue history.  Default is False.
+    retResidualNormsHistory : bool, optional
+        Whether to return history of residual norms.  Default is False.
+
+    Returns
+    -------
+    w : ndarray
+        Array of ``k`` eigenvalues
+    v : ndarray
+        An array of ``k`` eigenvectors.  `v` has the same shape as `X`.
+    lambdas : list of ndarray, optional
+        The eigenvalue history, if `retLambdaHistory` is True.
+    rnorms : list of ndarray, optional
+        The history of residual norms, if `retResidualNormsHistory` is True.
+
+    Notes
+    -----
+    If both ``retLambdaHistory`` and ``retResidualNormsHistory`` are True,
+    the return tuple has the following format
+    ``(lambda, V, lambda history, residual norms history)``.
+
+    In the following ``n`` denotes the matrix size and ``m`` the number
+    of required eigenvalues (smallest or largest).
+
+    The LOBPCG code internally solves eigenproblems of the size ``3m`` on every
+    iteration by calling the "standard" dense eigensolver, so if ``m`` is not
+    small enough compared to ``n``, it does not make sense to call the LOBPCG
+    code, but rather one should use the "standard" eigensolver, e.g. numpy or
+    scipy function in this case.
+    If one calls the LOBPCG algorithm for ``5m &gt; n``, it will most likely break
+    internally, so the code tries to call the standard function instead.
+
+    It is not that ``n`` should be large for the LOBPCG to work, but rather the
+    ratio ``n / m`` should be large. It you call LOBPCG with ``m=1``
+    and ``n=10``, it works though ``n`` is small. The method is intended
+    for extremely large ``n / m``, see e.g., reference [28] in
+    https://arxiv.org/abs/0705.2626
+
+    The convergence speed depends basically on two factors:
+
+    1. How well relatively separated the seeking eigenvalues are from the rest
+       of the eigenvalues. One can try to vary ``m`` to make this better.
+
+    2. How well conditioned the problem is. This can be changed by using proper
+       preconditioning. For example, a rod vibration test problem (under tests
+       directory) is ill-conditioned for large ``n``, so convergence will be
+       slow, unless efficient preconditioning is used. For this specific
+       problem, a good simple preconditioner function would be a linear solve
+       for `A`, which is easy to code since A is tridiagonal.
+
+    References
+    ----------
+    .. [1] A. V. Knyazev (2001),
+           Toward the Optimal Preconditioned Eigensolver: Locally Optimal
+           Block Preconditioned Conjugate Gradient Method.
+           SIAM Journal on Scientific Computing 23, no. 2,
+           pp. 517-541. http://dx.doi.org/10.1137/S1064827500366124
+
+    .. [2] A. V. Knyazev, I. Lashuk, M. E. Argentati, and E. Ovchinnikov
+           (2007), Block Locally Optimal Preconditioned Eigenvalue Xolvers
+           (BLOPEX) in hypre and PETSc. https://arxiv.org/abs/0705.2626
+
+    .. [3] A. V. Knyazev's C and MATLAB implementations:
+           https://bitbucket.org/joseroman/blopex
+
+    Examples
+    --------
+
+    Solve ``A x = lambda x`` with constraints and preconditioning.
+
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from scipy.sparse import spdiags, issparse
+    &gt;&gt;&gt; from scipy.sparse.linalg import lobpcg, LinearOperator
+    &gt;&gt;&gt; n = 100
+    &gt;&gt;&gt; vals = np.arange(1, n + 1)
+    &gt;&gt;&gt; A = spdiags(vals, 0, n, n)
+    &gt;&gt;&gt; A.toarray()
+    array([[  1.,   0.,   0., ...,   0.,   0.,   0.],
+           [  0.,   2.,   0., ...,   0.,   0.,   0.],
+           [  0.,   0.,   3., ...,   0.,   0.,   0.],
+           ...,
+           [  0.,   0.,   0., ...,  98.,   0.,   0.],
+           [  0.,   0.,   0., ...,   0.,  99.,   0.],
+           [  0.,   0.,   0., ...,   0.,   0., 100.]])
+
+    Constraints:
+
+    &gt;&gt;&gt; Y = np.eye(n, 3)
+
+    Initial guess for eigenvectors, should have linearly independent
+    columns. Column dimension = number of requested eigenvalues.
+
+    &gt;&gt;&gt; X = np.random.rand(n, 3)
+
+    Preconditioner in the inverse of A in this example:
+
+    &gt;&gt;&gt; invA = spdiags([1./vals], 0, n, n)
+
+    The preconditiner must be defined by a function:
+
+    &gt;&gt;&gt; def precond( x ):
+    ...     return invA @ x
+
+    The argument x of the preconditioner function is a matrix inside `lobpcg`,
+    thus the use of matrix-matrix product ``@``.
+
+    The preconditioner function is passed to lobpcg as a `LinearOperator`:
+
+    &gt;&gt;&gt; M = LinearOperator(matvec=precond, matmat=precond,
+    ...                    shape=(n, n), dtype=float)
+
+    Let us now solve the eigenvalue problem for the matrix A:
+
+    &gt;&gt;&gt; eigenvalues, _ = lobpcg(A, X, Y=Y, M=M, largest=False)
+    &gt;&gt;&gt; eigenvalues
+    array([4., 5., 6.])
+
+    Note that the vectors passed in Y are the eigenvectors of the 3 smallest
+    eigenvalues. The results returned are orthogonal to those.
+
+    """</span>
+    <span class="identifier">blockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+    <span class="identifier">blockVectorY</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Y</span>
+    <span class="identifier">residualTolerance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+    <span class="identifier">maxIterations</span> <span class="arithmetic-assignment">=</span> <span class="identifier">maxiter</span>
+
+    <span class="keyword">if</span> <span class="identifier">blockVectorY</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">sizeY</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorY</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">sizeY</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="comment"># Block size.</span>
+    <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'expected rank-2 array for argument X'</span><span class="grouping">)</span>
+
+    <span class="identifier">n</span><span class="punctuation">,</span> <span class="identifier">sizeX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="keyword">if</span> <span class="identifier">verbosityLevel</span><span class="punctuation">:</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Solving "</span>
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"standard"</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"generalized"</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">" eigenvalue problem with"</span>
+        <span class="keyword">if</span> <span class="identifier">M</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"out"</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">" preconditioning\n\n"</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"matrix size %d\n"</span> <span class="arithmetic-operator">%</span> <span class="identifier">n</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"block size %d\n\n"</span> <span class="arithmetic-operator">%</span> <span class="identifier">sizeX</span>
+        <span class="keyword">if</span> <span class="identifier">blockVectorY</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"No constraints\n\n"</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">sizeY</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+                <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"%d constraints\n\n"</span> <span class="arithmetic-operator">%</span> <span class="identifier">sizeY</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">aux</span> <span class="arithmetic-assignment">+=</span> <span class="string-literal">"%d constraint\n\n"</span> <span class="arithmetic-operator">%</span> <span class="identifier">sizeY</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">aux</span><span class="grouping">)</span>
+
+    <span class="identifier">A</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_makeOperator</span><span class="grouping">(</span><span class="identifier">A</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">n</span><span class="punctuation">,</span> <span class="identifier">n</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">B</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_makeOperator</span><span class="grouping">(</span><span class="identifier">B</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">n</span><span class="punctuation">,</span> <span class="identifier">n</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">M</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_makeOperator</span><span class="grouping">(</span><span class="identifier">M</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">n</span><span class="punctuation">,</span> <span class="identifier">n</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">n</span> <span class="arithmetic-operator">-</span> <span class="identifier">sizeY</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="grouping">(</span><span class="int-literal">5</span> <span class="arithmetic-operator">*</span> <span class="identifier">sizeX</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># warn('The problem size is small compared to the block size.' \</span>
+        <span class="comment">#        ' Using dense eigensolver instead of LOBPCG.')</span>
+
+        <span class="identifier">sizeX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="identifier">sizeX</span><span class="punctuation">,</span> <span class="identifier">n</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">blockVectorY</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span><span class="string-literal">'The dense eigensolver '</span>
+                                      <span class="string-literal">'does not support constraints.'</span><span class="grouping">)</span>
+
+        <span class="comment"># Define the closed range of indices of eigenvalues to return.</span>
+        <span class="keyword">if</span> <span class="identifier">largest</span><span class="punctuation">:</span>
+            <span class="identifier">eigvals</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">n</span> <span class="arithmetic-operator">-</span> <span class="identifier">sizeX</span><span class="punctuation">,</span> <span class="identifier">n</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">eigvals</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="identifier">sizeX</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+
+        <span class="identifier">A_dense</span> <span class="arithmetic-assignment">=</span> <span class="identifier">A</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">n</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">B_dense</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span> <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="keyword">else</span> <span class="identifier">B</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">n</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">B</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">vals</span><span class="punctuation">,</span> <span class="identifier">vecs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigh</span><span class="grouping">(</span><span class="identifier">A_dense</span><span class="punctuation">,</span> <span class="identifier">B_dense</span><span class="punctuation">,</span> <span class="identifier">eigvals</span><span class="arithmetic-assignment">=</span><span class="identifier">eigvals</span><span class="punctuation">,</span>
+                          <span class="identifier">check_finite</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">largest</span><span class="punctuation">:</span>
+            <span class="comment"># Reverse order to be compatible with eigs() in 'LM' mode.</span>
+            <span class="identifier">vals</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vals</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+            <span class="identifier">vecs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">vecs</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="punctuation">:</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="keyword">return</span> <span class="identifier">vals</span><span class="punctuation">,</span> <span class="identifier">vecs</span>
+
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">residualTolerance</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="grouping">)</span> <span class="logical-operator">or</span> <span class="grouping">(</span><span class="identifier">residualTolerance</span> <span class="relational-operator">&lt;=</span> <span class="float-literal">0.0</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">residualTolerance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="float-literal">1e-15</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">n</span>
+
+    <span class="comment"># Apply constraints to X.</span>
+    <span class="keyword">if</span> <span class="identifier">blockVectorY</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">blockVectorBY</span> <span class="arithmetic-assignment">=</span> <span class="identifier">B</span><span class="grouping">(</span><span class="identifier">blockVectorY</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">blockVectorBY</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorY</span>
+
+        <span class="comment"># gramYBY is a dense array.</span>
+        <span class="identifier">gramYBY</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorY</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">blockVectorBY</span><span class="grouping">)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="comment"># gramYBY is a Cholesky factor from now on...</span>
+            <span class="identifier">gramYBY</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cho_factor</span><span class="grouping">(</span><span class="identifier">gramYBY</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">LinAlgError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'cannot handle linearly dependent constraints'</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+
+        <span class="identifier">_applyConstraints</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="identifier">gramYBY</span><span class="punctuation">,</span> <span class="identifier">blockVectorBY</span><span class="punctuation">,</span> <span class="identifier">blockVectorY</span><span class="grouping">)</span>
+
+    <span class="comment">##</span>
+    <span class="comment"># B-orthonormalize X.</span>
+    <span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="identifier">blockVectorBX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_b_orthonormalize</span><span class="grouping">(</span><span class="identifier">B</span><span class="punctuation">,</span> <span class="identifier">blockVectorX</span><span class="grouping">)</span>
+
+    <span class="comment">##</span>
+    <span class="comment"># Compute the initial Ritz vectors: solve the eigenproblem.</span>
+    <span class="identifier">blockVectorAX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">A</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="grouping">)</span>
+    <span class="identifier">gramXAX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">blockVectorAX</span><span class="grouping">)</span>
+
+    <span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">eigBlockVector</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigh</span><span class="grouping">(</span><span class="identifier">gramXAX</span><span class="punctuation">,</span> <span class="identifier">check_finite</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+    <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_indx</span><span class="grouping">(</span><span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">sizeX</span><span class="punctuation">,</span> <span class="identifier">largest</span><span class="grouping">)</span>
+    <span class="identifier">_lambda</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_lambda</span><span class="grouping">[</span><span class="identifier">ii</span><span class="grouping">]</span>
+
+    <span class="identifier">eigBlockVector</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">ii</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="identifier">blockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVector</span><span class="grouping">)</span>
+    <span class="identifier">blockVectorAX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorAX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVector</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">blockVectorBX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorBX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVector</span><span class="grouping">)</span>
+
+    <span class="comment">##</span>
+    <span class="comment"># Active index set.</span>
+    <span class="identifier">activeMask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">sizeX</span><span class="punctuation">,</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+
+    <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">H</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">y</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">_lambda</span><span class="grouping">]</span>
+    <span class="identifier">residualNormsHistory</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+
+    <span class="identifier">previousBlockSize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sizeX</span>
+    <span class="identifier">ident</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">sizeX</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">ident0</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">sizeX</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+    <span class="comment">##</span>
+    <span class="comment"># Main iteration loop.</span>
+
+    <span class="identifier">blockVectorP</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>  <span class="comment"># set during iteration</span>
+    <span class="identifier">blockVectorAP</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+    <span class="identifier">blockVectorBP</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+
+    <span class="identifier">iterationNumber</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+    <span class="identifier">restart</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+    <span class="identifier">explicitGramFlag</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+    <span class="keyword">while</span> <span class="identifier">iterationNumber</span> <span class="relational-operator">&lt;</span> <span class="identifier">maxIterations</span><span class="punctuation">:</span>
+        <span class="identifier">iterationNumber</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+        <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'iteration %d'</span> <span class="arithmetic-operator">%</span> <span class="identifier">iterationNumber</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorBX</span> <span class="arithmetic-operator">*</span> <span class="identifier">_lambda</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorX</span> <span class="arithmetic-operator">*</span> <span class="identifier">_lambda</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+
+        <span class="identifier">blockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorAX</span> <span class="arithmetic-operator">-</span> <span class="identifier">aux</span>
+
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">blockVectorR</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">blockVectorR</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">residualNorms</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">aux</span><span class="grouping">)</span>
+
+        <span class="identifier">residualNormsHistory</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">residualNorms</span><span class="grouping">)</span>
+
+        <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">residualNorms</span> <span class="relational-operator">&gt;</span> <span class="identifier">residualTolerance</span><span class="punctuation">,</span> <span class="bool-literal">True</span><span class="punctuation">,</span> <span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">activeMask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activeMask</span> <span class="bitwise-operator">&</span> <span class="identifier">ii</span>
+        <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">activeMask</span><span class="grouping">)</span>
+
+        <span class="identifier">currentBlockSize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activeMask</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">currentBlockSize</span> <span class="relational-operator">!=</span> <span class="identifier">previousBlockSize</span><span class="punctuation">:</span>
+            <span class="identifier">previousBlockSize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">currentBlockSize</span>
+            <span class="identifier">ident</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">currentBlockSize</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">currentBlockSize</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+
+        <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'current block size:'</span><span class="punctuation">,</span> <span class="identifier">currentBlockSize</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'eigenvalue:'</span><span class="punctuation">,</span> <span class="identifier">_lambda</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'residual norms:'</span><span class="punctuation">,</span> <span class="identifier">residualNorms</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">eigBlockVector</span><span class="grouping">)</span>
+
+        <span class="identifier">activeBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_as2d</span><span class="grouping">(</span><span class="identifier">blockVectorR</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">activeMask</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">iterationNumber</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="identifier">activeBlockVectorP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_as2d</span><span class="grouping">(</span><span class="identifier">blockVectorP</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">activeMask</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">activeBlockVectorAP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_as2d</span><span class="grouping">(</span><span class="identifier">blockVectorAP</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">activeMask</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">activeBlockVectorBP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_as2d</span><span class="grouping">(</span><span class="identifier">blockVectorBP</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">activeMask</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">M</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="comment"># Apply preconditioner T to the active residuals.</span>
+            <span class="identifier">activeBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">M</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="grouping">)</span>
+
+        <span class="comment">##</span>
+        <span class="comment"># Apply constraints to the preconditioned residuals.</span>
+        <span class="keyword">if</span> <span class="identifier">blockVectorY</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">_applyConstraints</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">,</span>
+                              <span class="identifier">gramYBY</span><span class="punctuation">,</span> <span class="identifier">blockVectorBY</span><span class="punctuation">,</span> <span class="identifier">blockVectorY</span><span class="grouping">)</span>
+
+        <span class="comment">##</span>
+        <span class="comment"># B-orthogonalize the preconditioned residuals to X.</span>
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">activeBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activeBlockVectorR</span> <span class="arithmetic-operator">-</span> <span class="invalid">\</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">matmul</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">,</span>
+                          <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">matmul</span><span class="grouping">(</span><span class="identifier">blockVectorBX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                    <span class="identifier">activeBlockVectorR</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">activeBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activeBlockVectorR</span> <span class="arithmetic-operator">-</span> <span class="invalid">\</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">matmul</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">,</span>
+                          <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">matmul</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                    <span class="identifier">activeBlockVectorR</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment">##</span>
+        <span class="comment"># B-orthonormalize the preconditioned residuals.</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_b_orthonormalize</span><span class="grouping">(</span><span class="identifier">B</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorR</span><span class="grouping">)</span>
+        <span class="identifier">activeBlockVectorR</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorBR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">aux</span>
+
+        <span class="identifier">activeBlockVectorAR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">A</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">iterationNumber</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_b_orthonormalize</span><span class="grouping">(</span><span class="identifier">B</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorP</span><span class="punctuation">,</span>
+                                        <span class="identifier">activeBlockVectorBP</span><span class="punctuation">,</span> <span class="identifier">retInvR</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+                <span class="identifier">activeBlockVectorP</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorBP</span><span class="punctuation">,</span> <span class="identifier">invR</span><span class="punctuation">,</span> <span class="identifier">normal</span> <span class="arithmetic-assignment">=</span> <span class="identifier">aux</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_b_orthonormalize</span><span class="grouping">(</span><span class="identifier">B</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorP</span><span class="punctuation">,</span> <span class="identifier">retInvR</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+                <span class="identifier">activeBlockVectorP</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">invR</span><span class="punctuation">,</span> <span class="identifier">normal</span> <span class="arithmetic-assignment">=</span> <span class="identifier">aux</span>
+            <span class="comment"># Function _b_orthonormalize returns None if Cholesky fails</span>
+            <span class="keyword">if</span> <span class="identifier">activeBlockVectorP</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">activeBlockVectorAP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activeBlockVectorAP</span> <span class="arithmetic-operator">/</span> <span class="identifier">normal</span>
+                <span class="identifier">activeBlockVectorAP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorAP</span><span class="punctuation">,</span> <span class="identifier">invR</span><span class="grouping">)</span>
+                <span class="identifier">restart</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">restart</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+        <span class="comment">##</span>
+        <span class="comment"># Perform the Rayleigh Ritz Procedure:</span>
+        <span class="comment"># Compute symmetric Gram matrices:</span>
+
+        <span class="keyword">if</span> <span class="identifier">activeBlockVectorAR</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="relational-operator">==</span> <span class="string-literal">'float32'</span><span class="punctuation">:</span>
+            <span class="identifier">myeps</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="keyword">elif</span> <span class="identifier">activeBlockVectorR</span><span class="punctuation">.</span><span class="identifier">dtype</span> <span class="relational-operator">==</span> <span class="string-literal">'float32'</span><span class="punctuation">:</span>
+            <span class="identifier">myeps</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">1e-4</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">myeps</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">1e-8</span>
+
+        <span class="keyword">if</span> <span class="identifier">residualNorms</span><span class="punctuation">.</span><span class="identifier">max</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="identifier">myeps</span> <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">explicitGramFlag</span><span class="punctuation">:</span>
+            <span class="identifier">explicitGramFlag</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># Once explicitGramFlag, forever explicitGramFlag.</span>
+            <span class="identifier">explicitGramFlag</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+        <span class="comment"># Shared memory assingments to simplify the code</span>
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">blockVectorBX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorX</span>
+            <span class="identifier">activeBlockVectorBR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activeBlockVectorR</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">restart</span><span class="punctuation">:</span>
+                <span class="identifier">activeBlockVectorBP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">activeBlockVectorP</span>
+
+        <span class="comment"># Common submatrices:</span>
+        <span class="identifier">gramXAR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorAR</span><span class="grouping">)</span>
+        <span class="identifier">gramRAR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorAR</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">explicitGramFlag</span><span class="punctuation">:</span>
+            <span class="identifier">gramRAR</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">gramRAR</span> <span class="arithmetic-operator">+</span> <span class="identifier">gramRAR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="arithmetic-operator">/</span><span class="int-literal">2</span>
+            <span class="identifier">gramXAX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">blockVectorAX</span><span class="grouping">)</span>
+            <span class="identifier">gramXAX</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">gramXAX</span> <span class="arithmetic-operator">+</span> <span class="identifier">gramXAX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="arithmetic-operator">/</span><span class="int-literal">2</span>
+            <span class="identifier">gramXBX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">blockVectorBX</span><span class="grouping">)</span>
+            <span class="identifier">gramRBR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorBR</span><span class="grouping">)</span>
+            <span class="identifier">gramXBR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorBR</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">gramXAX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">_lambda</span><span class="grouping">)</span>
+            <span class="identifier">gramXBX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ident0</span>
+            <span class="identifier">gramRBR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ident</span>
+            <span class="identifier">gramXBR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">sizeX</span><span class="punctuation">,</span> <span class="identifier">currentBlockSize</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">A</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+
+        <span class="keyword">def</span> <span class="identifier">_handle_gramA_gramB_verbosity</span><span class="grouping">(</span><span class="identifier">gramA</span><span class="punctuation">,</span> <span class="identifier">gramB</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+                <span class="identifier">_report_nonhermitian</span><span class="grouping">(</span><span class="identifier">gramA</span><span class="punctuation">,</span> <span class="string-literal">'gramA'</span><span class="grouping">)</span>
+                <span class="identifier">_report_nonhermitian</span><span class="grouping">(</span><span class="identifier">gramB</span><span class="punctuation">,</span> <span class="string-literal">'gramB'</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+                <span class="comment"># Note: not documented, but leave it in here for now</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">savetxt</span><span class="grouping">(</span><span class="string-literal">'gramA.txt'</span><span class="punctuation">,</span> <span class="identifier">gramA</span><span class="grouping">)</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">savetxt</span><span class="grouping">(</span><span class="string-literal">'gramB.txt'</span><span class="punctuation">,</span> <span class="identifier">gramB</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">restart</span><span class="punctuation">:</span>
+            <span class="identifier">gramXAP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorAP</span><span class="grouping">)</span>
+            <span class="identifier">gramRAP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorAP</span><span class="grouping">)</span>
+            <span class="identifier">gramPAP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorP</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorAP</span><span class="grouping">)</span>
+            <span class="identifier">gramXBP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorBP</span><span class="grouping">)</span>
+            <span class="identifier">gramRBP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">activeBlockVectorBP</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">explicitGramFlag</span><span class="punctuation">:</span>
+                <span class="identifier">gramPAP</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">gramPAP</span> <span class="arithmetic-operator">+</span> <span class="identifier">gramPAP</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span><span class="arithmetic-operator">/</span><span class="int-literal">2</span>
+                <span class="identifier">gramPBP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorP</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                 <span class="identifier">activeBlockVectorBP</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">gramPBP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ident</span>
+
+            <span class="identifier">gramA</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bmat</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">gramXAX</span><span class="punctuation">,</span> <span class="identifier">gramXAR</span><span class="punctuation">,</span> <span class="identifier">gramXAP</span><span class="grouping">]</span><span class="punctuation">,</span>
+                          <span class="grouping">[</span><span class="identifier">gramXAR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramRAR</span><span class="punctuation">,</span> <span class="identifier">gramRAP</span><span class="grouping">]</span><span class="punctuation">,</span>
+                          <span class="grouping">[</span><span class="identifier">gramXAP</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramRAP</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramPAP</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">gramB</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bmat</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">gramXBX</span><span class="punctuation">,</span> <span class="identifier">gramXBR</span><span class="punctuation">,</span> <span class="identifier">gramXBP</span><span class="grouping">]</span><span class="punctuation">,</span>
+                          <span class="grouping">[</span><span class="identifier">gramXBR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramRBR</span><span class="punctuation">,</span> <span class="identifier">gramRBP</span><span class="grouping">]</span><span class="punctuation">,</span>
+                          <span class="grouping">[</span><span class="identifier">gramXBP</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramRBP</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramPBP</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+
+            <span class="identifier">_handle_gramA_gramB_verbosity</span><span class="grouping">(</span><span class="identifier">gramA</span><span class="punctuation">,</span> <span class="identifier">gramB</span><span class="grouping">)</span>
+
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">eigBlockVector</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigh</span><span class="grouping">(</span><span class="identifier">gramA</span><span class="punctuation">,</span> <span class="identifier">gramB</span><span class="punctuation">,</span>
+                                               <span class="identifier">check_finite</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="identifier">LinAlgError</span><span class="punctuation">:</span>
+                <span class="comment"># try again after dropping the direction vectors P from RR</span>
+                <span class="identifier">restart</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+        <span class="keyword">if</span> <span class="identifier">restart</span><span class="punctuation">:</span>
+            <span class="identifier">gramA</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bmat</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">gramXAX</span><span class="punctuation">,</span> <span class="identifier">gramXAR</span><span class="grouping">]</span><span class="punctuation">,</span>
+                          <span class="grouping">[</span><span class="identifier">gramXAR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramRAR</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">gramB</span> <span class="arithmetic-assignment">=</span> <span class="identifier">bmat</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">gramXBX</span><span class="punctuation">,</span> <span class="identifier">gramXBR</span><span class="grouping">]</span><span class="punctuation">,</span>
+                          <span class="grouping">[</span><span class="identifier">gramXBR</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">gramRBR</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+
+            <span class="identifier">_handle_gramA_gramB_verbosity</span><span class="grouping">(</span><span class="identifier">gramA</span><span class="punctuation">,</span> <span class="identifier">gramB</span><span class="grouping">)</span>
+
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">eigBlockVector</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigh</span><span class="grouping">(</span><span class="identifier">gramA</span><span class="punctuation">,</span> <span class="identifier">gramB</span><span class="punctuation">,</span>
+                                               <span class="identifier">check_finite</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+            <span class="keyword">except</span> <span class="identifier">LinAlgError</span> <span class="keyword">as</span> <span class="identifier">e</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'eigh has failed in lobpcg iterations'</span><span class="grouping">)</span> <span class="keyword">from</span> <span class="identifier">e</span>
+
+        <span class="identifier">ii</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_get_indx</span><span class="grouping">(</span><span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">sizeX</span><span class="punctuation">,</span> <span class="identifier">largest</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">ii</span><span class="grouping">)</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">_lambda</span><span class="grouping">)</span>
+
+        <span class="identifier">_lambda</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_lambda</span><span class="grouping">[</span><span class="identifier">ii</span><span class="grouping">]</span>
+        <span class="identifier">eigBlockVector</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">ii</span><span class="grouping">]</span>
+
+        <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">H</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">y</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">_lambda</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'lambda:'</span><span class="punctuation">,</span> <span class="identifier">_lambda</span><span class="grouping">)</span>
+<span class="comment">#         # Normalize eigenvectors!</span>
+<span class="comment">#         aux = np.sum( eigBlockVector.conj() * eigBlockVector, 0 )</span>
+<span class="comment">#         eigVecNorms = np.sqrt( aux )</span>
+<span class="comment">#         eigBlockVector = eigBlockVector / eigVecNorms[np.newaxis, :]</span>
+<span class="comment">#         eigBlockVector, aux = _b_orthonormalize( B, eigBlockVector )</span>
+
+        <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">eigBlockVector</span><span class="grouping">)</span>
+
+        <span class="comment"># Compute Ritz vectors.</span>
+        <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">restart</span><span class="punctuation">:</span>
+                <span class="identifier">eigBlockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">sizeX</span><span class="grouping">]</span>
+                <span class="identifier">eigBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="identifier">sizeX</span><span class="punctuation">:</span><span class="identifier">sizeX</span><span class="arithmetic-operator">+</span><span class="identifier">currentBlockSize</span><span class="grouping">]</span>
+                <span class="identifier">eigBlockVectorP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="identifier">sizeX</span><span class="arithmetic-operator">+</span><span class="identifier">currentBlockSize</span><span class="punctuation">:</span><span class="grouping">]</span>
+
+                <span class="identifier">pp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">pp</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorP</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorP</span><span class="grouping">)</span>
+
+                <span class="identifier">app</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorAR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">app</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorAP</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorP</span><span class="grouping">)</span>
+
+                <span class="identifier">bpp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorBR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">bpp</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorBP</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorP</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">eigBlockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">sizeX</span><span class="grouping">]</span>
+                <span class="identifier">eigBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="identifier">sizeX</span><span class="punctuation">:</span><span class="grouping">]</span>
+
+                <span class="identifier">pp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">app</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorAR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">bpp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorBR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">pp</span><span class="grouping">)</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">app</span><span class="grouping">)</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">bpp</span><span class="grouping">)</span>
+
+            <span class="identifier">blockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorX</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">pp</span>
+            <span class="identifier">blockVectorAX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorAX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorX</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">app</span>
+            <span class="identifier">blockVectorBX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorBX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorX</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">bpp</span>
+
+            <span class="identifier">blockVectorP</span><span class="punctuation">,</span> <span class="identifier">blockVectorAP</span><span class="punctuation">,</span> <span class="identifier">blockVectorBP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pp</span><span class="punctuation">,</span> <span class="identifier">app</span><span class="punctuation">,</span> <span class="identifier">bpp</span>
+
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">restart</span><span class="punctuation">:</span>
+                <span class="identifier">eigBlockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">sizeX</span><span class="grouping">]</span>
+                <span class="identifier">eigBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="identifier">sizeX</span><span class="punctuation">:</span><span class="identifier">sizeX</span><span class="arithmetic-operator">+</span><span class="identifier">currentBlockSize</span><span class="grouping">]</span>
+                <span class="identifier">eigBlockVectorP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="identifier">sizeX</span><span class="arithmetic-operator">+</span><span class="identifier">currentBlockSize</span><span class="punctuation">:</span><span class="grouping">]</span>
+
+                <span class="identifier">pp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">pp</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorP</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorP</span><span class="grouping">)</span>
+
+                <span class="identifier">app</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorAR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">app</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorAP</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorP</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">eigBlockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">sizeX</span><span class="grouping">]</span>
+                <span class="identifier">eigBlockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">eigBlockVector</span><span class="grouping">[</span><span class="identifier">sizeX</span><span class="punctuation">:</span><span class="grouping">]</span>
+
+                <span class="identifier">pp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+                <span class="identifier">app</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">activeBlockVectorAR</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorR</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">10</span><span class="punctuation">:</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">pp</span><span class="grouping">)</span>
+                <span class="identifier">print</span><span class="grouping">(</span><span class="identifier">app</span><span class="grouping">)</span>
+
+            <span class="identifier">blockVectorX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorX</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">pp</span>
+            <span class="identifier">blockVectorAX</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">blockVectorAX</span><span class="punctuation">,</span> <span class="identifier">eigBlockVectorX</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">app</span>
+
+            <span class="identifier">blockVectorP</span><span class="punctuation">,</span> <span class="identifier">blockVectorAP</span> <span class="arithmetic-assignment">=</span> <span class="identifier">pp</span><span class="punctuation">,</span> <span class="identifier">app</span>
+
+    <span class="keyword">if</span> <span class="identifier">B</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorBX</span> <span class="arithmetic-operator">*</span> <span class="identifier">_lambda</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorX</span> <span class="arithmetic-operator">*</span> <span class="identifier">_lambda</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+
+    <span class="identifier">blockVectorR</span> <span class="arithmetic-assignment">=</span> <span class="identifier">blockVectorAX</span> <span class="arithmetic-operator">-</span> <span class="identifier">aux</span>
+
+    <span class="identifier">aux</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">blockVectorR</span><span class="punctuation">.</span><span class="identifier">conj</span><span class="grouping">(</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">blockVectorR</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="identifier">residualNorms</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">aux</span><span class="grouping">)</span>
+
+    <span class="comment"># Future work: Need to add Postprocessing here:</span>
+    <span class="comment"># Making sure eigenvectors "exactly" satisfy the blockVectorY constrains?</span>
+    <span class="comment"># Making sure eigenvecotrs are "exactly" othonormalized by final "exact" RR</span>
+    <span class="comment"># Computing the actual true residuals</span>
+
+    <span class="keyword">if</span> <span class="identifier">verbosityLevel</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'final eigenvalue:'</span><span class="punctuation">,</span> <span class="identifier">_lambda</span><span class="grouping">)</span>
+        <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'final residual norms:'</span><span class="punctuation">,</span> <span class="identifier">residualNorms</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">retLambdaHistory</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">retResidualNormsHistory</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">H</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">y</span><span class="punctuation">,</span> <span class="identifier">residualNormsHistory</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="invalid">l</span><span class="invalid">a</span><span class="invalid">m</span><span class="invalid">b</span><span class="invalid">d</span><span class="invalid">a</span><span class="invalid">H</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">y</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">retResidualNormsHistory</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">blockVectorX</span><span class="punctuation">,</span> <span class="identifier">residualNormsHistory</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">_lambda</span><span class="punctuation">,</span> <span class="identifier">blockVectorX</span>
+
+    </pre>
+  </body>
+</html>

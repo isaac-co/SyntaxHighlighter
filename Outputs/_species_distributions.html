@@ -1,0 +1,271 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+=============================
+Species distribution dataset
+=============================
+
+This dataset represents the geographic distribution of species.
+The dataset is provided by Phillips et. al. (2006).
+
+The two species are:
+
+ - `"Bradypus variegatus"
+   &lt;http://www.iucnredlist.org/details/3038/0&gt;`_ ,
+   the Brown-throated Sloth.
+
+ - `"Microryzomys minutus"
+   &lt;http://www.iucnredlist.org/details/13408/0&gt;`_ ,
+   also known as the Forest Small Rice Rat, a rodent that lives in Peru,
+   Colombia, Ecuador, Peru, and Venezuela.
+
+References
+----------
+
+`"Maximum entropy modeling of species geographic distributions"
+&lt;http://rob.schapire.net/papers/ecolmod.pdf&gt;`_ S. J. Phillips,
+R. P. Anderson, R. E. Schapire - Ecological Modelling, 190:231-259, 2006.
+
+Notes
+-----
+
+For an example of using this dataset, see
+:ref:`examples/applications/plot_species_distribution_modeling.py
+&lt;sphx_glr_auto_examples_applications_plot_species_distribution_modeling.py&gt;`.
+"""</span>
+
+<span class="comment"># Authors: Peter Prettenhofer &lt;peter.prettenhofer@gmail.com&gt;</span>
+<span class="comment">#          Jake Vanderplas &lt;vanderplas@astro.washington.edu&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">from</span> <span class="identifier">io</span> <span class="keyword">import</span> <span class="identifier">BytesIO</span>
+<span class="keyword">from</span> <span class="identifier">os</span> <span class="keyword">import</span> <span class="identifier">makedirs</span><span class="punctuation">,</span> <span class="identifier">remove</span>
+<span class="keyword">from</span> <span class="identifier">os</span><span class="punctuation">.</span><span class="identifier">path</span> <span class="keyword">import</span> <span class="identifier">exists</span>
+
+<span class="keyword">import</span> <span class="identifier">logging</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">import</span> <span class="identifier">joblib</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">get_data_home</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_fetch_remote</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">RemoteFileMetadata</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">Bunch</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">_pkl_filepath</span>
+
+<span class="comment"># The original data can be found at:</span>
+<span class="comment"># https://biodiversityinformatics.amnh.org/open_source/maxent/samples.zip</span>
+<span class="identifier">SAMPLES</span> <span class="arithmetic-assignment">=</span> <span class="identifier">RemoteFileMetadata</span><span class="grouping">(</span>
+    <span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="string-literal">'samples.zip'</span><span class="punctuation">,</span>
+    <span class="identifier">url</span><span class="arithmetic-assignment">=</span><span class="string-literal">'https://ndownloader.figshare.com/files/5976075'</span><span class="punctuation">,</span>
+    <span class="identifier">checksum</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="string-literal">'abb07ad284ac50d9e6d20f1c4211e0fd'</span>
+              <span class="string-literal">'3c098f7f85955e89d321ee8efe37ac28'</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="comment"># The original data can be found at:</span>
+<span class="comment"># https://biodiversityinformatics.amnh.org/open_source/maxent/coverages.zip</span>
+<span class="identifier">COVERAGES</span> <span class="arithmetic-assignment">=</span> <span class="identifier">RemoteFileMetadata</span><span class="grouping">(</span>
+    <span class="identifier">filename</span><span class="arithmetic-assignment">=</span><span class="string-literal">'coverages.zip'</span><span class="punctuation">,</span>
+    <span class="identifier">url</span><span class="arithmetic-assignment">=</span><span class="string-literal">'https://ndownloader.figshare.com/files/5976078'</span><span class="punctuation">,</span>
+    <span class="identifier">checksum</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="string-literal">'4d862674d72e79d6cee77e63b98651ec'</span>
+              <span class="string-literal">'7926043ba7d39dcb31329cf3f6073807'</span><span class="grouping">)</span><span class="grouping">)</span>
+
+<span class="identifier">DATA_ARCHIVE_NAME</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"species_coverage.pkz"</span>
+
+
+<span class="identifier">logger</span> <span class="arithmetic-assignment">=</span> <span class="identifier">logging</span><span class="punctuation">.</span><span class="identifier">getLogger</span><span class="grouping">(</span><span class="identifier">__name__</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_load_coverage</span><span class="grouping">(</span><span class="identifier">F</span><span class="punctuation">,</span> <span class="identifier">header_length</span><span class="arithmetic-assignment">=</span><span class="int-literal">6</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int16</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Load a coverage file from an open file object.
+
+    This will return a numpy array of the given dtype
+    """</span>
+    <span class="identifier">header</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">F</span><span class="punctuation">.</span><span class="identifier">readline</span><span class="grouping">(</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">header_length</span><span class="grouping">)</span><span class="grouping">]</span>
+    <span class="identifier">make_tuple</span> <span class="arithmetic-assignment">=</span> <span class="keyword">lambda</span> <span class="identifier">t</span><span class="punctuation">:</span> <span class="grouping">(</span><span class="identifier">t</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">t</span><span class="punctuation">.</span><span class="identifier">split</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">header</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">make_tuple</span><span class="grouping">(</span><span class="identifier">line</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">line</span> <span class="relational-operator">in</span> <span class="identifier">header</span><span class="grouping">]</span><span class="grouping">)</span>
+
+    <span class="identifier">M</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">loadtxt</span><span class="grouping">(</span><span class="identifier">F</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="grouping">)</span>
+    <span class="identifier">nodata</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">header</span><span class="grouping">[</span><span class="identifier">b</span><span class="string-literal">'NODATA_value'</span><span class="grouping">]</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">nodata</span> <span class="relational-operator">!=</span> <span class="arithmetic-operator">-</span><span class="int-literal">9999</span><span class="punctuation">:</span>
+        <span class="identifier">M</span><span class="grouping">[</span><span class="identifier">nodata</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">9999</span>
+    <span class="keyword">return</span> <span class="identifier">M</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_load_csv</span><span class="grouping">(</span><span class="identifier">F</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Load csv file.
+
+    Parameters
+    ----------
+    F : file object
+        CSV file open in byte mode.
+
+    Returns
+    -------
+    rec : np.ndarray
+        record array representing the data
+    """</span>
+    <span class="identifier">names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">F</span><span class="punctuation">.</span><span class="identifier">readline</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">decode</span><span class="grouping">(</span><span class="string-literal">'ascii').strip().split(','</span><span class="grouping">)</span>
+
+    <span class="identifier">rec</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">loadtxt</span><span class="grouping">(</span><span class="identifier">F</span><span class="punctuation">,</span> <span class="identifier">skiprows</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span> <span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="invalid">i</span><span class="invalid">m</span><span class="invalid">i</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="arithmetic-assignment">=</span><span class="string-literal">',', dtype='a22,f4,f4'</span><span class="grouping">)</span>
+    <span class="identifier">rec</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="punctuation">.</span><span class="identifier">names</span> <span class="arithmetic-assignment">=</span> <span class="identifier">names</span>
+    <span class="keyword">return</span> <span class="identifier">rec</span>
+
+
+<span class="keyword">def</span> <span class="identifier">construct_grids</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Construct the map grid from the batch object
+
+    Parameters
+    ----------
+    batch : Batch object
+        The object returned by :func:`fetch_species_distributions`
+
+    Returns
+    -------
+    (xgrid, ygrid) : 1-D arrays
+        The grid corresponding to the values in batch.coverages
+    """</span>
+    <span class="comment"># x,y coordinates for corner cells</span>
+    <span class="identifier">xmin</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">x_left_lower_corner</span> <span class="arithmetic-operator">+</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span>
+    <span class="identifier">xmax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">xmin</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">Nx</span> <span class="arithmetic-operator">*</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+    <span class="identifier">ymin</span> <span class="arithmetic-assignment">=</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">y_left_lower_corner</span> <span class="arithmetic-operator">+</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span>
+    <span class="identifier">ymax</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ymin</span> <span class="arithmetic-operator">+</span> <span class="grouping">(</span><span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">Ny</span> <span class="arithmetic-operator">*</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+
+    <span class="comment"># x coordinates of the grid cells</span>
+    <span class="identifier">xgrid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">xmin</span><span class="punctuation">,</span> <span class="identifier">xmax</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+    <span class="comment"># y coordinates of the grid cells</span>
+    <span class="identifier">ygrid</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">ymin</span><span class="punctuation">,</span> <span class="identifier">ymax</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="punctuation">.</span><span class="identifier">grid_size</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">xgrid</span><span class="punctuation">,</span> <span class="identifier">ygrid</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">fetch_species_distributions</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                <span class="identifier">download_if_missing</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Loader for species distribution dataset from Phillips et. al. (2006)
+
+    Read more in the :ref:`User Guide &lt;datasets&gt;`.
+
+    Parameters
+    ----------
+    data_home : str, default=None
+        Specify another download and cache folder for the datasets. By default
+        all scikit-learn data is stored in '~/scikit_learn_data' subfolders.
+
+    download_if_missing : bool, default=True
+        If False, raise a IOError if the data is not locally available
+        instead of trying to download the data from the source site.
+
+    Returns
+    -------
+    data : :class:`~sklearn.utils.Bunch`
+        Dictionary-like object, with the following attributes.
+
+        coverages : array, shape = [14, 1592, 1212]
+            These represent the 14 features measured
+            at each point of the map grid.
+            The latitude/longitude values for the grid are discussed below.
+            Missing data is represented by the value -9999.
+        train : record array, shape = (1624,)
+            The training points for the data.  Each point has three fields:
+
+            - train['species'] is the species name
+            - train['dd long'] is the longitude, in degrees
+            - train['dd lat'] is the latitude, in degrees
+        test : record array, shape = (620,)
+            The test points for the data.  Same format as the training data.
+        Nx, Ny : integers
+            The number of longitudes (x) and latitudes (y) in the grid
+        x_left_lower_corner, y_left_lower_corner : floats
+            The (x,y) position of the lower-left corner, in degrees
+        grid_size : float
+            The spacing between points of the grid, in degrees
+
+    References
+    ----------
+
+    * `"Maximum entropy modeling of species geographic distributions"
+      &lt;http://rob.schapire.net/papers/ecolmod.pdf&gt;`_
+      S. J. Phillips, R. P. Anderson, R. E. Schapire - Ecological Modelling,
+      190:231-259, 2006.
+
+    Notes
+    -----
+
+    This dataset represents the geographic distribution of species.
+    The dataset is provided by Phillips et. al. (2006).
+
+    The two species are:
+
+    - `"Bradypus variegatus"
+      &lt;http://www.iucnredlist.org/details/3038/0&gt;`_ ,
+      the Brown-throated Sloth.
+
+    - `"Microryzomys minutus"
+      &lt;http://www.iucnredlist.org/details/13408/0&gt;`_ ,
+      also known as the Forest Small Rice Rat, a rodent that lives in Peru,
+      Colombia, Ecuador, Peru, and Venezuela.
+
+    - For an example of using this dataset with scikit-learn, see
+      :ref:`examples/applications/plot_species_distribution_modeling.py
+      &lt;sphx_glr_auto_examples_applications_plot_species_distribution_modeling.py&gt;`.
+    """</span>
+    <span class="identifier">data_home</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_data_home</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">makedirs</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="grouping">)</span>
+
+    <span class="comment"># Define parameters for the data files.  These should not be changed</span>
+    <span class="comment"># unless the data model changes.  They will be saved in the npz file</span>
+    <span class="comment"># with the downloaded data.</span>
+    <span class="identifier">extra_params</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">x_left_lower_corner</span><span class="arithmetic-assignment">=</span><span class="float-literal">-94.8</span><span class="punctuation">,</span>
+                        <span class="identifier">Nx</span><span class="arithmetic-assignment">=</span><span class="int-literal">1212</span><span class="punctuation">,</span>
+                        <span class="identifier">y_left_lower_corner</span><span class="arithmetic-assignment">=</span><span class="float-literal">-56.05</span><span class="punctuation">,</span>
+                        <span class="identifier">Ny</span><span class="arithmetic-assignment">=</span><span class="int-literal">1592</span><span class="punctuation">,</span>
+                        <span class="identifier">grid_size</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.05</span><span class="grouping">)</span>
+    <span class="identifier">dtype</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">int16</span>
+
+    <span class="identifier">archive_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_pkl_filepath</span><span class="grouping">(</span><span class="identifier">data_home</span><span class="punctuation">,</span> <span class="identifier">DATA_ARCHIVE_NAME</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">exists</span><span class="grouping">(</span><span class="identifier">archive_path</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">download_if_missing</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">IOError</span><span class="grouping">(</span><span class="string-literal">"Data not found and `download_if_missing` is False"</span><span class="grouping">)</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">'Downloading species data from %s to %s'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span>
+            <span class="identifier">SAMPLES</span><span class="punctuation">.</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">samples_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_fetch_remote</span><span class="grouping">(</span><span class="identifier">SAMPLES</span><span class="punctuation">,</span> <span class="identifier">dirname</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span><span class="grouping">)</span>
+        <span class="keyword">with</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">samples_path</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">X</span><span class="punctuation">:</span>  <span class="comment"># samples.zip is a valid npz</span>
+            <span class="keyword">for</span> <span class="identifier">f</span> <span class="relational-operator">in</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">files</span><span class="punctuation">:</span>
+                <span class="identifier">fhandle</span> <span class="arithmetic-assignment">=</span> <span class="identifier">BytesIO</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">f</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="string-literal">'train'</span> <span class="relational-operator">in</span> <span class="identifier">f</span><span class="punctuation">:</span>
+                    <span class="identifier">train</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_load_csv</span><span class="grouping">(</span><span class="identifier">fhandle</span><span class="grouping">)</span>
+                <span class="keyword">if</span> <span class="string-literal">'test'</span> <span class="relational-operator">in</span> <span class="identifier">f</span><span class="punctuation">:</span>
+                    <span class="identifier">test</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_load_csv</span><span class="grouping">(</span><span class="identifier">fhandle</span><span class="grouping">)</span>
+        <span class="identifier">remove</span><span class="grouping">(</span><span class="identifier">samples_path</span><span class="grouping">)</span>
+
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">info</span><span class="grouping">(</span><span class="string-literal">'Downloading coverage data from %s to %s'</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span>
+            <span class="identifier">COVERAGES</span><span class="punctuation">.</span><span class="identifier">url</span><span class="punctuation">,</span> <span class="identifier">data_home</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">coverages_path</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_fetch_remote</span><span class="grouping">(</span><span class="identifier">COVERAGES</span><span class="punctuation">,</span> <span class="identifier">dirname</span><span class="arithmetic-assignment">=</span><span class="identifier">data_home</span><span class="grouping">)</span>
+        <span class="keyword">with</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">coverages_path</span><span class="grouping">)</span> <span class="keyword">as</span> <span class="identifier">X</span><span class="punctuation">:</span>  <span class="comment"># coverages.zip is a valid npz</span>
+            <span class="identifier">coverages</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+            <span class="keyword">for</span> <span class="identifier">f</span> <span class="relational-operator">in</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">files</span><span class="punctuation">:</span>
+                <span class="identifier">fhandle</span> <span class="arithmetic-assignment">=</span> <span class="identifier">BytesIO</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">f</span><span class="grouping">]</span><span class="grouping">)</span>
+                <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">debug</span><span class="grouping">(</span><span class="string-literal">' - converting {}'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">f</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">coverages</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">_load_coverage</span><span class="grouping">(</span><span class="identifier">fhandle</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">coverages</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">coverages</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="identifier">remove</span><span class="grouping">(</span><span class="identifier">coverages_path</span><span class="grouping">)</span>
+
+        <span class="identifier">bunch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Bunch</span><span class="grouping">(</span><span class="identifier">coverages</span><span class="arithmetic-assignment">=</span><span class="identifier">coverages</span><span class="punctuation">,</span>
+                      <span class="identifier">test</span><span class="arithmetic-assignment">=</span><span class="identifier">test</span><span class="punctuation">,</span>
+                      <span class="identifier">train</span><span class="arithmetic-assignment">=</span><span class="identifier">train</span><span class="punctuation">,</span>
+                      <span class="arithmetic-operator">**</span><span class="identifier">extra_params</span><span class="grouping">)</span>
+        <span class="identifier">joblib</span><span class="punctuation">.</span><span class="identifier">dump</span><span class="grouping">(</span><span class="identifier">bunch</span><span class="punctuation">,</span> <span class="identifier">archive_path</span><span class="punctuation">,</span> <span class="identifier">compress</span><span class="arithmetic-assignment">=</span><span class="int-literal">9</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">bunch</span> <span class="arithmetic-assignment">=</span> <span class="identifier">joblib</span><span class="punctuation">.</span><span class="identifier">load</span><span class="grouping">(</span><span class="identifier">archive_path</span><span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">bunch</span>
+
+    </pre>
+  </body>
+</html>

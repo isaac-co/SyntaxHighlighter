@@ -1,0 +1,770 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+Robust location and covariance estimators.
+
+Here are implemented estimators that are resistant to outliers.
+
+"""</span>
+<span class="comment"># Author: Virgile Fritsch &lt;virgile.fritsch@inria.fr&gt;</span>
+<span class="comment">#</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">stats</span> <span class="keyword">import</span> <span class="identifier">chi2</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="identifier">empirical_covariance</span><span class="punctuation">,</span> <span class="identifier">EmpiricalCovariance</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">fast_logdet</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span><span class="punctuation">,</span> <span class="identifier">check_array</span>
+
+
+<span class="comment"># Minimum Covariance Determinant</span>
+<span class="comment">#   Implementing of an algorithm by Rousseeuw & Van Driessen described in</span>
+<span class="comment">#   (A Fast Algorithm for the Minimum Covariance Determinant Estimator,</span>
+<span class="comment">#   1999, American Statistical Association and the American Society</span>
+<span class="comment">#   for Quality, TECHNOMETRICS)</span>
+<span class="comment"># XXX Is this really a public function? It's not listed in the docs or</span>
+<span class="comment"># exported by sklearn.covariance. Deprecate?</span>
+<span class="keyword">def</span> <span class="identifier">c_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">remaining_iterations</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span> <span class="identifier">initial_estimates</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+           <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">empirical_covariance</span><span class="punctuation">,</span>
+           <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""C_step procedure described in [Rouseeuw1984]_ aiming at computing MCD.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Data set in which we look for the n_support observations whose
+        scatter matrix has minimum determinant.
+
+    n_support : int
+        Number of observations to compute the robust estimates of location
+        and covariance from. This parameter must be greater than
+        `n_samples / 2`.
+
+    remaining_iterations : int, default=30
+        Number of iterations to perform.
+        According to [Rouseeuw1999]_, two iterations are sufficient to get
+        close to the minimum, and we never need more than 30 to reach
+        convergence.
+
+    initial_estimates : tuple of shape (2,), default=None
+        Initial estimates of location and shape from which to run the c_step
+        procedure:
+        - initial_estimates[0]: an initial location estimate
+        - initial_estimates[1]: an initial covariance estimate
+
+    verbose : bool, default=False
+        Verbose mode.
+
+    cov_computation_method : callable, \
+            default=:func:`sklearn.covariance.empirical_covariance`
+        The function which will be used to compute the covariance.
+        Must return array of shape (n_features, n_features).
+
+    random_state : int, RandomState instance or None, default=None
+        Determines the pseudo random number generator for shuffling the data.
+        Pass an int for reproducible results across multiple function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    Returns
+    -------
+    location : ndarray of shape (n_features,)
+        Robust location estimates.
+
+    covariance : ndarray of shape (n_features, n_features)
+        Robust covariance estimates.
+
+    support : ndarray of shape (n_samples,)
+        A mask for the `n_support` observations whose scatter matrix has
+        minimum determinant.
+
+    References
+    ----------
+    .. [Rouseeuw1999] A Fast Algorithm for the Minimum Covariance Determinant
+        Estimator, 1999, American Statistical Association and the American
+        Society for Quality, TECHNOMETRICS
+    """</span>
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">_c_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">remaining_iterations</span><span class="arithmetic-assignment">=</span><span class="identifier">remaining_iterations</span><span class="punctuation">,</span>
+                   <span class="identifier">initial_estimates</span><span class="arithmetic-assignment">=</span><span class="identifier">initial_estimates</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="punctuation">,</span>
+                   <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+                   <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_c_step</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="punctuation">,</span> <span class="identifier">remaining_iterations</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span>
+            <span class="identifier">initial_estimates</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+            <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">empirical_covariance</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+    <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+
+    <span class="comment"># Initialisation</span>
+    <span class="identifier">support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">initial_estimates</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="comment"># compute initial robust estimates from a random subset</span>
+        <span class="identifier">support</span><span class="grouping">[</span><span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">permutation</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_support</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># get initial robust estimates from the function parameters</span>
+        <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initial_estimates</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">initial_estimates</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="comment"># run a special iteration for that case (to get an initial support)</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">pinvh</span><span class="grouping">(</span><span class="identifier">covariance</span><span class="grouping">)</span>
+        <span class="identifier">X_centered</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">location</span>
+        <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_centered</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X_centered</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="comment"># compute new estimates</span>
+        <span class="identifier">support</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">dist</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_support</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+    <span class="identifier">X_support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">support</span><span class="grouping">]</span>
+    <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_support</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="int-literal">0</span><span class="grouping">)</span>
+    <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cov_computation_method</span><span class="grouping">(</span><span class="identifier">X_support</span><span class="grouping">)</span>
+
+    <span class="comment"># Iterative procedure for Minimum Covariance Determinant computation</span>
+    <span class="identifier">det</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fast_logdet</span><span class="grouping">(</span><span class="identifier">covariance</span><span class="grouping">)</span>
+    <span class="comment"># If the data already has singular covariance, calculate the precision,</span>
+    <span class="comment"># as the loop below will not be entered.</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isinf</span><span class="grouping">(</span><span class="identifier">det</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">pinvh</span><span class="grouping">(</span><span class="identifier">covariance</span><span class="grouping">)</span>
+
+    <span class="identifier">previous_det</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+    <span class="keyword">while</span> <span class="grouping">(</span><span class="identifier">det</span> <span class="relational-operator">&lt;</span> <span class="identifier">previous_det</span> <span class="logical-operator">and</span> <span class="identifier">remaining_iterations</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span>
+            <span class="logical-operator">and</span> <span class="logical-operator">not</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isinf</span><span class="grouping">(</span><span class="identifier">det</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># save old estimates values</span>
+        <span class="identifier">previous_location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">location</span>
+        <span class="identifier">previous_covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">covariance</span>
+        <span class="identifier">previous_det</span> <span class="arithmetic-assignment">=</span> <span class="identifier">det</span>
+        <span class="identifier">previous_support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">support</span>
+        <span class="comment"># compute a new support from the full data set mahalanobis distances</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">pinvh</span><span class="grouping">(</span><span class="identifier">covariance</span><span class="grouping">)</span>
+        <span class="identifier">X_centered</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">location</span>
+        <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_centered</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X_centered</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="comment"># compute new estimates</span>
+        <span class="identifier">support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+        <span class="identifier">support</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">dist</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_support</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="identifier">X_support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">support</span><span class="grouping">]</span>
+        <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_support</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">cov_computation_method</span><span class="grouping">(</span><span class="identifier">X_support</span><span class="grouping">)</span>
+        <span class="identifier">det</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fast_logdet</span><span class="grouping">(</span><span class="identifier">covariance</span><span class="grouping">)</span>
+        <span class="comment"># update remaining iterations for early stopping</span>
+        <span class="identifier">remaining_iterations</span> <span class="arithmetic-assignment">-=</span> <span class="int-literal">1</span>
+
+    <span class="identifier">previous_dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dist</span>
+    <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">location</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">location</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="comment"># Check if best fit already found (det =&gt; 0, logdet =&gt; -inf)</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">isinf</span><span class="grouping">(</span><span class="identifier">det</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">results</span> <span class="arithmetic-assignment">=</span> <span class="identifier">location</span><span class="punctuation">,</span> <span class="identifier">covariance</span><span class="punctuation">,</span> <span class="identifier">det</span><span class="punctuation">,</span> <span class="identifier">support</span><span class="punctuation">,</span> <span class="identifier">dist</span>
+    <span class="comment"># Check convergence</span>
+    <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">allclose</span><span class="grouping">(</span><span class="identifier">det</span><span class="punctuation">,</span> <span class="identifier">previous_det</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># c_step procedure converged</span>
+        <span class="keyword">if</span> <span class="identifier">verbose</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">"Optimal couple (location, covariance) found before"</span>
+                  <span class="string-literal">" ending iterations (%d left)"</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">remaining_iterations</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">results</span> <span class="arithmetic-assignment">=</span> <span class="identifier">location</span><span class="punctuation">,</span> <span class="identifier">covariance</span><span class="punctuation">,</span> <span class="identifier">det</span><span class="punctuation">,</span> <span class="identifier">support</span><span class="punctuation">,</span> <span class="identifier">dist</span>
+    <span class="keyword">elif</span> <span class="identifier">det</span> <span class="relational-operator">&gt;</span> <span class="identifier">previous_det</span><span class="punctuation">:</span>
+        <span class="comment"># determinant has increased (should not happen)</span>
+        <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"Determinant has increased; this should not happen: "</span>
+                      <span class="string-literal">"log(det) &gt; log(previous_det) (%.15f &gt; %.15f). "</span>
+                      <span class="string-literal">"You may want to try with a higher value of "</span>
+                      <span class="string-literal">"support_fraction (current value: %.3f)."</span>
+                      <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">det</span><span class="punctuation">,</span> <span class="identifier">previous_det</span><span class="punctuation">,</span> <span class="identifier">n_support</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="punctuation">,</span>
+                      <span class="identifier">RuntimeWarning</span><span class="grouping">)</span>
+        <span class="identifier">results</span> <span class="arithmetic-assignment">=</span> <span class="identifier">previous_location</span><span class="punctuation">,</span> <span class="identifier">previous_covariance</span><span class="punctuation">,</span> <span class="invalid">\</span>
+            <span class="identifier">previous_det</span><span class="punctuation">,</span> <span class="identifier">previous_support</span><span class="punctuation">,</span> <span class="identifier">previous_dist</span>
+
+    <span class="comment"># Check early stopping</span>
+    <span class="keyword">if</span> <span class="identifier">remaining_iterations</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">verbose</span><span class="punctuation">:</span>
+            <span class="identifier">print</span><span class="grouping">(</span><span class="string-literal">'Maximum number of iterations reached'</span><span class="grouping">)</span>
+        <span class="identifier">results</span> <span class="arithmetic-assignment">=</span> <span class="identifier">location</span><span class="punctuation">,</span> <span class="identifier">covariance</span><span class="punctuation">,</span> <span class="identifier">det</span><span class="punctuation">,</span> <span class="identifier">support</span><span class="punctuation">,</span> <span class="identifier">dist</span>
+
+    <span class="keyword">return</span> <span class="identifier">results</span>
+
+
+<span class="keyword">def</span> <span class="identifier">select_candidates</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">n_trials</span><span class="punctuation">,</span> <span class="identifier">select</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span>
+                      <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                      <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">empirical_covariance</span><span class="punctuation">,</span>
+                      <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Finds the best pure subset of observations to compute MCD from it.
+
+    The purpose of this function is to find the best sets of n_support
+    observations with respect to a minimization of their covariance
+    matrix determinant. Equivalently, it removes n_samples-n_support
+    observations to construct what we call a pure data set (i.e. not
+    containing outliers). The list of the observations of the pure
+    data set is referred to as the `support`.
+
+    Starting from a random support, the pure data set is found by the
+    c_step procedure introduced by Rousseeuw and Van Driessen in
+    [RV]_.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        Data (sub)set in which we look for the n_support purest observations.
+
+    n_support : int
+        The number of samples the pure data set must contain.
+        This parameter must be in the range `[(n + p + 1)/2] &lt; n_support &lt; n`.
+
+    n_trials : int or tuple of shape (2,)
+        Number of different initial sets of observations from which to
+        run the algorithm. This parameter should be a strictly positive
+        integer.
+        Instead of giving a number of trials to perform, one can provide a
+        list of initial estimates that will be used to iteratively run
+        c_step procedures. In this case:
+        - n_trials[0]: array-like, shape (n_trials, n_features)
+          is the list of `n_trials` initial location estimates
+        - n_trials[1]: array-like, shape (n_trials, n_features, n_features)
+          is the list of `n_trials` initial covariances estimates
+
+    select : int, default=1
+        Number of best candidates results to return. This parameter must be
+        a strictly positive integer.
+
+    n_iter : int, default=30
+        Maximum number of iterations for the c_step procedure.
+        (2 is enough to be close to the final solution. "Never" exceeds 20).
+        This parameter must be a strictly positive integer.
+
+    verbose : bool, default=False
+        Control the output verbosity.
+
+    cov_computation_method : callable, \
+            default=:func:`sklearn.covariance.empirical_covariance`
+        The function which will be used to compute the covariance.
+        Must return an array of shape (n_features, n_features).
+
+    random_state : int, RandomState instance or None, default=None
+        Determines the pseudo random number generator for shuffling the data.
+        Pass an int for reproducible results across multiple function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    See Also
+    ---------
+    c_step
+
+    Returns
+    -------
+    best_locations : ndarray of shape (select, n_features)
+        The `select` location estimates computed from the `select` best
+        supports found in the data set (`X`).
+
+    best_covariances : ndarray of shape (select, n_features, n_features)
+        The `select` covariance estimates computed from the `select`
+        best supports found in the data set (`X`).
+
+    best_supports : ndarray of shape (select, n_samples)
+        The `select` best supports found in the data set (`X`).
+
+    References
+    ----------
+    .. [RV] A Fast Algorithm for the Minimum Covariance Determinant
+        Estimator, 1999, American Statistical Association and the American
+        Society for Quality, TECHNOMETRICS
+    """</span>
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">n_trials</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">run_from_estimates</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+    <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">n_trials</span><span class="punctuation">,</span> <span class="identifier">tuple</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">run_from_estimates</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="identifier">estimates_list</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_trials</span>
+        <span class="identifier">n_trials</span> <span class="arithmetic-assignment">=</span> <span class="identifier">estimates_list</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">"Invalid 'n_trials' parameter, expected tuple or "</span>
+                        <span class="string-literal">" integer, got %s (%s)"</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">n_trials</span><span class="punctuation">,</span> <span class="identifier">type</span><span class="grouping">(</span><span class="identifier">n_trials</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="comment"># compute `n_trials` location and shape estimates candidates in the subset</span>
+    <span class="identifier">all_estimates</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">run_from_estimates</span><span class="punctuation">:</span>
+        <span class="comment"># perform `n_trials` computations from random initial supports</span>
+        <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_trials</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">all_estimates</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span>
+                <span class="identifier">_c_step</span><span class="grouping">(</span>
+                    <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">remaining_iterations</span><span class="arithmetic-assignment">=</span><span class="identifier">n_iter</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="punctuation">,</span>
+                    <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+                    <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="comment"># perform computations from every given initial estimates</span>
+        <span class="keyword">for</span> <span class="identifier">j</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_trials</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">initial_estimates</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">estimates_list</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">estimates_list</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">[</span><span class="identifier">j</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">all_estimates</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">_c_step</span><span class="grouping">(</span>
+                <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">remaining_iterations</span><span class="arithmetic-assignment">=</span><span class="identifier">n_iter</span><span class="punctuation">,</span>
+                <span class="identifier">initial_estimates</span><span class="arithmetic-assignment">=</span><span class="identifier">initial_estimates</span><span class="punctuation">,</span> <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="punctuation">,</span>
+                <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+                <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">all_locs_sub</span><span class="punctuation">,</span> <span class="identifier">all_covs_sub</span><span class="punctuation">,</span> <span class="identifier">all_dets_sub</span><span class="punctuation">,</span> <span class="identifier">all_supports_sub</span><span class="punctuation">,</span> <span class="identifier">all_ds_sub</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+        <span class="identifier">zip</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">all_estimates</span><span class="grouping">)</span>
+    <span class="comment"># find the `n_best` best results among the `n_trials` ones</span>
+    <span class="identifier">index_best</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">all_dets_sub</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">select</span><span class="grouping">]</span>
+    <span class="identifier">best_locations</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">all_locs_sub</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">index_best</span><span class="grouping">]</span>
+    <span class="identifier">best_covariances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">all_covs_sub</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">index_best</span><span class="grouping">]</span>
+    <span class="identifier">best_supports</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">all_supports_sub</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">index_best</span><span class="grouping">]</span>
+    <span class="identifier">best_ds</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">all_ds_sub</span><span class="grouping">)</span><span class="grouping">[</span><span class="identifier">index_best</span><span class="grouping">]</span>
+
+    <span class="keyword">return</span> <span class="identifier">best_locations</span><span class="punctuation">,</span> <span class="identifier">best_covariances</span><span class="punctuation">,</span> <span class="identifier">best_supports</span><span class="punctuation">,</span> <span class="identifier">best_ds</span>
+
+
+<span class="keyword">def</span> <span class="identifier">fast_mcd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">support_fraction</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+             <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">empirical_covariance</span><span class="punctuation">,</span>
+             <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Estimates the Minimum Covariance Determinant matrix.
+
+    Read more in the :ref:`User Guide &lt;robust_covariance&gt;`.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        The data matrix, with p features and n samples.
+
+    support_fraction : float, default=None
+        The proportion of points to be included in the support of the raw
+        MCD estimate. Default is `None`, which implies that the minimum
+        value of `support_fraction` will be used within the algorithm:
+        `(n_sample + n_features + 1) / 2`. This parameter must be in the
+        range (0, 1).
+
+    cov_computation_method : callable, \
+            default=:func:`sklearn.covariance.empirical_covariance`
+        The function which will be used to compute the covariance.
+        Must return an array of shape (n_features, n_features).
+
+    random_state : int, RandomState instance or None, default=None
+        Determines the pseudo random number generator for shuffling the data.
+        Pass an int for reproducible results across multiple function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    Returns
+    -------
+    location : ndarray of shape (n_features,)
+        Robust location of the data.
+
+    covariance : ndarray of shape (n_features, n_features)
+        Robust covariance of the features.
+
+    support : ndarray of shape (n_samples,), dtype=bool
+        A mask of the observations that have been used to compute
+        the robust location and covariance estimates of the data set.
+
+    Notes
+    -----
+    The FastMCD algorithm has been introduced by Rousseuw and Van Driessen
+    in "A Fast Algorithm for the Minimum Covariance Determinant Estimator,
+    1999, American Statistical Association and the American Society
+    for Quality, TECHNOMETRICS".
+    The principle is to compute robust estimates and random subsets before
+    pooling them into a larger subsets, and finally into the full data set.
+    Depending on the size of the initial sample, we have one, two or three
+    such computation levels.
+
+    Note that only raw estimates are returned. If one is interested in
+    the correction and reweighting steps described in [RouseeuwVan]_,
+    see the MinCovDet object.
+
+    References
+    ----------
+
+    .. [RouseeuwVan] A Fast Algorithm for the Minimum Covariance
+        Determinant Estimator, 1999, American Statistical Association
+        and the American Society for Quality, TECHNOMETRICS
+
+    .. [Butler1993] R. W. Butler, P. L. Davies and M. Jhun,
+        Asymptotics For The Minimum Covariance Determinant Estimator,
+        The Annals of Statistics, 1993, Vol. 21, No. 3, 1385-1400
+    """</span>
+    <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+    <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ensure_min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="string-literal">'fast_mcd'</span><span class="grouping">)</span>
+    <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+
+    <span class="comment"># minimum breakdown value</span>
+    <span class="keyword">if</span> <span class="identifier">support_fraction</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="identifier">n_support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ceil</span><span class="grouping">(</span><span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_features</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">n_support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">support_fraction</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+
+    <span class="comment"># 1-dimensional case quick computation</span>
+    <span class="comment"># (Rousseeuw, P. J. and Leroy, A. M. (2005) References, in Robust</span>
+    <span class="comment">#  Regression and Outlier Detection, John Wiley & Sons, chapter 4)</span>
+    <span class="keyword">if</span> <span class="identifier">n_features</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">n_support</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+            <span class="comment"># find the sample shortest halves</span>
+            <span class="identifier">X_sorted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sort</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">diff</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X_sorted</span><span class="grouping">[</span><span class="identifier">n_support</span><span class="punctuation">:</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="identifier">X_sorted</span><span class="grouping">[</span><span class="punctuation">:</span><span class="grouping">(</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">-</span> <span class="identifier">n_support</span><span class="grouping">)</span><span class="grouping">]</span>
+            <span class="identifier">halves_start</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">diff</span> <span class="relational-operator">==</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">min</span><span class="grouping">(</span><span class="identifier">diff</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="comment"># take the middle points' mean to get the robust location estimate</span>
+            <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">X_sorted</span><span class="grouping">[</span><span class="identifier">n_support</span> <span class="arithmetic-operator">+</span> <span class="identifier">halves_start</span><span class="grouping">]</span> <span class="arithmetic-operator">+</span>
+                              <span class="identifier">X_sorted</span><span class="grouping">[</span><span class="identifier">halves_start</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="grouping">)</span>
+            <span class="identifier">support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+            <span class="identifier">X_centered</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">location</span>
+            <span class="identifier">support</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argsort</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">X_centered</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_support</span><span class="grouping">]</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+            <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">var</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">support</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">location</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="comment"># get precision matrix in an optimized way</span>
+            <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">pinvh</span><span class="grouping">(</span><span class="identifier">covariance</span><span class="grouping">)</span>
+            <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_centered</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">X_centered</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+            <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="grouping">[</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">var</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">X_centered</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">location</span>
+            <span class="comment"># get precision matrix in an optimized way</span>
+            <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">pinvh</span><span class="grouping">(</span><span class="identifier">covariance</span><span class="grouping">)</span>
+            <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_centered</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">X_centered</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+    <span class="comment"># Starting FastMCD algorithm for p-dimensional case</span>
+    <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">n_samples</span> <span class="relational-operator">&gt;</span> <span class="int-literal">500</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># 1. Find candidate supports on subsets</span>
+        <span class="comment"># a. split the set in subsets of size ~ 300</span>
+        <span class="identifier">n_subsets</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">//</span> <span class="int-literal">300</span>
+        <span class="identifier">n_samples_subsets</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span> <span class="arithmetic-operator">//</span> <span class="identifier">n_subsets</span>
+        <span class="identifier">samples_shuffle</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">permutation</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">h_subset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ceil</span><span class="grouping">(</span><span class="identifier">n_samples_subsets</span> <span class="arithmetic-operator">*</span>
+                       <span class="grouping">(</span><span class="identifier">n_support</span> <span class="arithmetic-operator">/</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="comment"># b. perform a total of 500 trials</span>
+        <span class="identifier">n_trials_tot</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">500</span>
+        <span class="comment"># c. select 10 best (location, covariance) for each subset</span>
+        <span class="identifier">n_best_sub</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">10</span>
+        <span class="identifier">n_trials</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max</span><span class="grouping">(</span><span class="int-literal">10</span><span class="punctuation">,</span> <span class="identifier">n_trials_tot</span> <span class="arithmetic-operator">//</span> <span class="identifier">n_subsets</span><span class="grouping">)</span>
+        <span class="identifier">n_best_tot</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_subsets</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_best_sub</span>
+        <span class="identifier">all_best_locations</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_best_tot</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">all_best_covariances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_best_tot</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span>
+                                             <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">MemoryError</span><span class="punctuation">:</span>
+            <span class="comment"># The above is too big. Let's try with something much small</span>
+            <span class="comment"># (and less optimal)</span>
+            <span class="identifier">n_best_tot</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">10</span>
+            <span class="identifier">all_best_covariances</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_best_tot</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="punctuation">,</span>
+                                             <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">n_best_sub</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">n_subsets</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">low_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_samples_subsets</span>
+            <span class="identifier">high_bound</span> <span class="arithmetic-assignment">=</span> <span class="identifier">low_bound</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_samples_subsets</span>
+            <span class="identifier">current_subset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">samples_shuffle</span><span class="grouping">[</span><span class="identifier">low_bound</span><span class="punctuation">:</span><span class="identifier">high_bound</span><span class="grouping">]</span><span class="grouping">]</span>
+            <span class="identifier">best_locations_sub</span><span class="punctuation">,</span> <span class="identifier">best_covariances_sub</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">select_candidates</span><span class="grouping">(</span>
+                <span class="identifier">current_subset</span><span class="punctuation">,</span> <span class="identifier">h_subset</span><span class="punctuation">,</span> <span class="identifier">n_trials</span><span class="punctuation">,</span>
+                <span class="identifier">select</span><span class="arithmetic-assignment">=</span><span class="identifier">n_best_sub</span><span class="punctuation">,</span> <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+                <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+                <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+            <span class="identifier">subset_slice</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">arange</span><span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_best_sub</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">n_best_sub</span><span class="grouping">)</span>
+            <span class="identifier">all_best_locations</span><span class="grouping">[</span><span class="identifier">subset_slice</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">best_locations_sub</span>
+            <span class="identifier">all_best_covariances</span><span class="grouping">[</span><span class="identifier">subset_slice</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">best_covariances_sub</span>
+        <span class="comment"># 2. Pool the candidate supports into a merged set</span>
+        <span class="comment"># (possibly the full dataset)</span>
+        <span class="identifier">n_samples_merged</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="int-literal">1500</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">h_merged</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ceil</span><span class="grouping">(</span><span class="identifier">n_samples_merged</span> <span class="arithmetic-operator">*</span>
+                       <span class="grouping">(</span><span class="identifier">n_support</span> <span class="arithmetic-operator">/</span> <span class="identifier">float</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1500</span><span class="punctuation">:</span>
+            <span class="identifier">n_best_merged</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">10</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">n_best_merged</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="comment"># find the best couples (location, covariance) on the merged set</span>
+        <span class="identifier">selection</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span><span class="punctuation">.</span><span class="identifier">permutation</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_samples_merged</span><span class="grouping">]</span>
+        <span class="identifier">locations_merged</span><span class="punctuation">,</span> <span class="identifier">covariances_merged</span><span class="punctuation">,</span> <span class="identifier">supports_merged</span><span class="punctuation">,</span> <span class="identifier">d</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+            <span class="identifier">select_candidates</span><span class="grouping">(</span>
+                <span class="identifier">X</span><span class="grouping">[</span><span class="identifier">selection</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">h_merged</span><span class="punctuation">,</span>
+                <span class="identifier">n_trials</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">all_best_locations</span><span class="punctuation">,</span> <span class="identifier">all_best_covariances</span><span class="grouping">)</span><span class="punctuation">,</span>
+                <span class="identifier">select</span><span class="arithmetic-assignment">=</span><span class="identifier">n_best_merged</span><span class="punctuation">,</span>
+                <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+                <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="comment"># 3. Finally get the overall best (locations, covariance) couple</span>
+        <span class="keyword">if</span> <span class="identifier">n_samples</span> <span class="relational-operator">&lt;</span> <span class="int-literal">1500</span><span class="punctuation">:</span>
+            <span class="comment"># directly get the best couple (location, covariance)</span>
+            <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">locations_merged</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">covariances_merged</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+            <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+            <span class="identifier">support</span><span class="grouping">[</span><span class="identifier">selection</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">supports_merged</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">dist</span><span class="grouping">[</span><span class="identifier">selection</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">d</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># select the best couple on the full dataset</span>
+            <span class="identifier">locations_full</span><span class="punctuation">,</span> <span class="identifier">covariances_full</span><span class="punctuation">,</span> <span class="identifier">supports_full</span><span class="punctuation">,</span> <span class="identifier">d</span> <span class="arithmetic-assignment">=</span> <span class="invalid">\</span>
+                <span class="identifier">select_candidates</span><span class="grouping">(</span>
+                    <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span>
+                    <span class="identifier">n_trials</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">locations_merged</span><span class="punctuation">,</span> <span class="identifier">covariances_merged</span><span class="grouping">)</span><span class="punctuation">,</span>
+                    <span class="identifier">select</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                    <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+                    <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+            <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">locations_full</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">covariances_full</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">supports_full</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">d</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+    <span class="keyword">elif</span> <span class="identifier">n_features</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span><span class="punctuation">:</span>
+        <span class="comment"># 1. Find the 10 best couples (location, covariance)</span>
+        <span class="comment"># considering two iterations</span>
+        <span class="identifier">n_trials</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">30</span>
+        <span class="identifier">n_best</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">10</span>
+        <span class="identifier">locations_best</span><span class="punctuation">,</span> <span class="identifier">covariances_best</span><span class="punctuation">,</span> <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">select_candidates</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">n_trials</span><span class="arithmetic-assignment">=</span><span class="identifier">n_trials</span><span class="punctuation">,</span> <span class="identifier">select</span><span class="arithmetic-assignment">=</span><span class="identifier">n_best</span><span class="punctuation">,</span> <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+            <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="comment"># 2. Select the best couple on the full dataset amongst the 10</span>
+        <span class="identifier">locations_full</span><span class="punctuation">,</span> <span class="identifier">covariances_full</span><span class="punctuation">,</span> <span class="identifier">supports_full</span><span class="punctuation">,</span> <span class="identifier">d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">select_candidates</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_support</span><span class="punctuation">,</span> <span class="identifier">n_trials</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="identifier">locations_best</span><span class="punctuation">,</span> <span class="identifier">covariances_best</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="identifier">select</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">cov_computation_method</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">locations_full</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">covariances_full</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">supports_full</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">d</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+    <span class="keyword">return</span> <span class="identifier">location</span><span class="punctuation">,</span> <span class="identifier">covariance</span><span class="punctuation">,</span> <span class="identifier">support</span><span class="punctuation">,</span> <span class="identifier">dist</span>
+
+
+<span class="keyword">class</span> <span class="identifier">MinCovDet</span><span class="grouping">(</span><span class="identifier">EmpiricalCovariance</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Minimum Covariance Determinant (MCD): robust estimator of covariance.
+
+    The Minimum Covariance Determinant covariance estimator is to be applied
+    on Gaussian-distributed data, but could still be relevant on data
+    drawn from a unimodal, symmetric distribution. It is not meant to be used
+    with multi-modal data (the algorithm used to fit a MinCovDet object is
+    likely to fail in such a case).
+    One should consider projection pursuit methods to deal with multi-modal
+    datasets.
+
+    Read more in the :ref:`User Guide &lt;robust_covariance&gt;`.
+
+    Parameters
+    ----------
+    store_precision : bool, default=True
+        Specify if the estimated precision is stored.
+
+    assume_centered : bool, default=False
+        If True, the support of the robust location and the covariance
+        estimates is computed, and a covariance estimate is recomputed from
+        it, without centering the data.
+        Useful to work with data whose mean is significantly equal to
+        zero but is not exactly zero.
+        If False, the robust location and covariance are directly computed
+        with the FastMCD algorithm without additional treatment.
+
+    support_fraction : float, default=None
+        The proportion of points to be included in the support of the raw
+        MCD estimate. Default is None, which implies that the minimum
+        value of support_fraction will be used within the algorithm:
+        `(n_sample + n_features + 1) / 2`. The parameter must be in the range
+        (0, 1).
+
+    random_state : int, RandomState instance or None, default=None
+        Determines the pseudo random number generator for shuffling the data.
+        Pass an int for reproducible results across multiple function calls.
+        See :term: `Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    raw_location_ : ndarray of shape (n_features,)
+        The raw robust estimated location before correction and re-weighting.
+
+    raw_covariance_ : ndarray of shape (n_features, n_features)
+        The raw robust estimated covariance before correction and re-weighting.
+
+    raw_support_ : ndarray of shape (n_samples,)
+        A mask of the observations that have been used to compute
+        the raw robust estimates of location and shape, before correction
+        and re-weighting.
+
+    location_ : ndarray of shape (n_features,)
+        Estimated robust location.
+
+    covariance_ : ndarray of shape (n_features, n_features)
+        Estimated robust covariance matrix.
+
+    precision_ : ndarray of shape (n_features, n_features)
+        Estimated pseudo inverse matrix.
+        (stored only if store_precision is True)
+
+    support_ : ndarray of shape (n_samples,)
+        A mask of the observations that have been used to compute
+        the robust estimates of location and shape.
+
+    dist_ : ndarray of shape (n_samples,)
+        Mahalanobis distances of the training set (on which :meth:`fit` is
+        called) observations.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn.covariance import MinCovDet
+    &gt;&gt;&gt; from sklearn.datasets import make_gaussian_quantiles
+    &gt;&gt;&gt; real_cov = np.array([[.8, .3],
+    ...                      [.3, .4]])
+    &gt;&gt;&gt; rng = np.random.RandomState(0)
+    &gt;&gt;&gt; X = rng.multivariate_normal(mean=[0, 0],
+    ...                                   cov=real_cov,
+    ...                                   size=500)
+    &gt;&gt;&gt; cov = MinCovDet(random_state=0).fit(X)
+    &gt;&gt;&gt; cov.covariance_
+    array([[0.7411..., 0.2535...],
+           [0.2535..., 0.3053...]])
+    &gt;&gt;&gt; cov.location_
+    array([0.0813... , 0.0427...])
+
+    References
+    ----------
+
+    .. [Rouseeuw1984] P. J. Rousseeuw. Least median of squares regression.
+        J. Am Stat Ass, 79:871, 1984.
+    .. [Rousseeuw] A Fast Algorithm for the Minimum Covariance Determinant
+        Estimator, 1999, American Statistical Association and the American
+        Society for Quality, TECHNOMETRICS
+    .. [ButlerDavies] R. W. Butler, P. L. Davies and M. Jhun,
+        Asymptotics For The Minimum Covariance Determinant Estimator,
+        The Annals of Statistics, 1993, Vol. 21, No. 3, 1385-1400
+    """</span>
+    <span class="identifier">_nonrobust_covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">staticmethod</span><span class="grouping">(</span><span class="identifier">empirical_covariance</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">store_precision</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">support_fraction</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">store_precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">store_precision</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span> <span class="arithmetic-assignment">=</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_fraction</span> <span class="arithmetic-assignment">=</span> <span class="identifier">support_fraction</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fits a Minimum Covariance Determinant with the FastMCD algorithm.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data, where `n_samples` is the number of samples
+            and `n_features` is the number of features.
+
+        y : Ignored
+            Not used, present for API consistency by convention.
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">ensure_min_samples</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="arithmetic-assignment">=</span><span class="string-literal">'MinCovDet'</span><span class="grouping">)</span>
+        <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="comment"># check that the empirical covariance is full rank</span>
+        <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svdvals</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="float-literal">1e-8</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"The covariance matrix associated to your dataset "</span>
+                          <span class="string-literal">"is not full rank"</span><span class="grouping">)</span>
+        <span class="comment"># compute and store raw estimates</span>
+        <span class="identifier">raw_location</span><span class="punctuation">,</span> <span class="identifier">raw_covariance</span><span class="punctuation">,</span> <span class="identifier">raw_support</span><span class="punctuation">,</span> <span class="identifier">raw_dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">fast_mcd</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">support_fraction</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_fraction</span><span class="punctuation">,</span>
+            <span class="identifier">cov_computation_method</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_nonrobust_covariance</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span><span class="punctuation">:</span>
+            <span class="identifier">raw_location</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span>
+            <span class="identifier">raw_covariance</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_nonrobust_covariance</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">raw_support</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                                        <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+            <span class="comment"># get precision matrix in an optimized way</span>
+            <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">pinvh</span><span class="grouping">(</span><span class="identifier">raw_covariance</span><span class="grouping">)</span>
+            <span class="identifier">raw_dist</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">raw_location_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_location</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">raw_covariance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_covariance</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">raw_support_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_support</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">location_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_location</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_support</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dist_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">raw_dist</span>
+        <span class="comment"># obtain consistency at normal models</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">correct_covariance</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="comment"># re-weight estimator</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">reweight_covariance</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">correct_covariance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply a correction to raw Minimum Covariance Determinant estimates.
+
+        Correction using the empirical correction factor suggested
+        by Rousseeuw and Van Driessen in [RVD]_.
+
+        Parameters
+        ----------
+        data : array-like of shape (n_samples, n_features)
+            The data matrix, with p features and n samples.
+            The data set must be the one which was used to compute
+            the raw estimates.
+
+        Returns
+        -------
+        covariance_corrected : ndarray of shape (n_features, n_features)
+            Corrected robust covariance estimate.
+
+        References
+        ----------
+
+        .. [RVD] A Fast Algorithm for the Minimum Covariance
+            Determinant Estimator, 1999, American Statistical Association
+            and the American Society for Quality, TECHNOMETRICS
+        """</span>
+
+        <span class="comment"># Check that the covariance of the support data is not equal to 0.</span>
+        <span class="comment"># Otherwise self.dist_ = 0 and thus correction = 0.</span>
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dist_</span><span class="grouping">)</span>
+        <span class="identifier">n_support</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">n_support</span> <span class="relational-operator">&lt;</span> <span class="identifier">n_samples</span> <span class="logical-operator">and</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">allclose</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">raw_covariance_</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'The covariance matrix of the support data '</span>
+                             <span class="string-literal">'is equal to 0, try to increase support_fraction'</span><span class="grouping">)</span>
+        <span class="identifier">correction</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">median</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dist_</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">chi2</span><span class="grouping">(</span><span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">isf</span><span class="grouping">(</span><span class="float-literal">0.5</span><span class="grouping">)</span>
+        <span class="identifier">covariance_corrected</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">raw_covariance_</span> <span class="arithmetic-operator">*</span> <span class="identifier">correction</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dist_</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">correction</span>
+        <span class="keyword">return</span> <span class="identifier">covariance_corrected</span>
+
+    <span class="keyword">def</span> <span class="identifier">reweight_covariance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">data</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Re-weight raw Minimum Covariance Determinant estimates.
+
+        Re-weight observations using Rousseeuw's method (equivalent to
+        deleting outlying observations from the data set before
+        computing location and covariance estimates) described
+        in [RVDriessen]_.
+
+        Parameters
+        ----------
+        data : array-like of shape (n_samples, n_features)
+            The data matrix, with p features and n samples.
+            The data set must be the one which was used to compute
+            the raw estimates.
+
+        Returns
+        -------
+        location_reweighted : ndarray of shape (n_features,)
+            Re-weighted robust location estimate.
+
+        covariance_reweighted : ndarray of shape (n_features, n_features)
+            Re-weighted robust covariance estimate.
+
+        support_reweighted : ndarray of shape (n_samples,), dtype=bool
+            A mask of the observations that have been used to compute
+            the re-weighted robust location and covariance estimates.
+
+        References
+        ----------
+
+        .. [RVDriessen] A Fast Algorithm for the Minimum Covariance
+            Determinant Estimator, 1999, American Statistical Association
+            and the American Society for Quality, TECHNOMETRICS
+        """</span>
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">mask</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dist_</span> <span class="relational-operator">&lt;</span> <span class="identifier">chi2</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">isf</span><span class="grouping">(</span><span class="float-literal">0.025</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span><span class="punctuation">:</span>
+            <span class="identifier">location_reweighted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">location_reweighted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">covariance_reweighted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_nonrobust_covariance</span><span class="grouping">(</span>
+            <span class="identifier">data</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">u</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">n</span><span class="invalid">t</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">e</span><span class="invalid">d</span><span class="grouping">)</span>
+        <span class="identifier">support_reweighted</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">bool</span><span class="grouping">)</span>
+        <span class="identifier">support_reweighted</span><span class="grouping">[</span><span class="identifier">mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_set_covariance</span><span class="grouping">(</span><span class="identifier">covariance_reweighted</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">location_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">location_reweighted</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">support_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">support_reweighted</span>
+        <span class="identifier">X_centered</span> <span class="arithmetic-assignment">=</span> <span class="identifier">data</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">location_</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">dist_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_centered</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">get_precision</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">X_centered</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">location_reweighted</span><span class="punctuation">,</span> <span class="identifier">covariance_reweighted</span><span class="punctuation">,</span> <span class="identifier">support_reweighted</span>
+
+    </pre>
+  </body>
+</html>

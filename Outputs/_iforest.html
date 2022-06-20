@@ -1,0 +1,514 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># Authors: Nicolas Goix &lt;nicolas.goix@telecom-paristech.fr&gt;</span>
+<span class="comment">#          Alexandre Gramfort &lt;alexandre.gramfort@telecom-paristech.fr&gt;</span>
+<span class="comment"># License: BSD 3 clause</span>
+
+<span class="keyword">import</span> <span class="identifier">numbers</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">import</span> <span class="identifier">issparse</span>
+<span class="keyword">from</span> <span class="identifier">warnings</span> <span class="keyword">import</span> <span class="identifier">warn</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">tree</span> <span class="keyword">import</span> <span class="identifier">ExtraTreeRegressor</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="grouping">(</span>
+    <span class="identifier">check_random_state</span><span class="punctuation">,</span>
+    <span class="identifier">check_array</span><span class="punctuation">,</span>
+    <span class="identifier">gen_batches</span><span class="punctuation">,</span>
+    <span class="identifier">get_chunk_n_rows</span><span class="punctuation">,</span>
+<span class="grouping">)</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">fixes</span> <span class="keyword">import</span> <span class="identifier">_joblib_parallel_args</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span><span class="punctuation">,</span> <span class="identifier">_num_samples</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">OutlierMixin</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_bagging</span> <span class="keyword">import</span> <span class="identifier">BaseBagging</span>
+
+<span class="identifier">__all__</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="string-literal">"IsolationForest"</span><span class="grouping">]</span>
+
+
+<span class="keyword">class</span> <span class="identifier">IsolationForest</span><span class="grouping">(</span><span class="identifier">OutlierMixin</span><span class="punctuation">,</span> <span class="identifier">BaseBagging</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    Isolation Forest Algorithm.
+
+    Return the anomaly score of each sample using the IsolationForest algorithm
+
+    The IsolationForest 'isolates' observations by randomly selecting a feature
+    and then randomly selecting a split value between the maximum and minimum
+    values of the selected feature.
+
+    Since recursive partitioning can be represented by a tree structure, the
+    number of splittings required to isolate a sample is equivalent to the path
+    length from the root node to the terminating node.
+
+    This path length, averaged over a forest of such random trees, is a
+    measure of normality and our decision function.
+
+    Random partitioning produces noticeably shorter paths for anomalies.
+    Hence, when a forest of random trees collectively produce shorter path
+    lengths for particular samples, they are highly likely to be anomalies.
+
+    Read more in the :ref:`User Guide &lt;isolation_forest&gt;`.
+
+    .. versionadded:: 0.18
+
+    Parameters
+    ----------
+    n_estimators : int, default=100
+        The number of base estimators in the ensemble.
+
+    max_samples : "auto", int or float, default="auto"
+        The number of samples to draw from X to train each base estimator.
+            - If int, then draw `max_samples` samples.
+            - If float, then draw `max_samples * X.shape[0]` samples.
+            - If "auto", then `max_samples=min(256, n_samples)`.
+
+        If max_samples is larger than the number of samples provided,
+        all samples will be used for all trees (no sampling).
+
+    contamination : 'auto' or float, default='auto'
+        The amount of contamination of the data set, i.e. the proportion
+        of outliers in the data set. Used when fitting to define the threshold
+        on the scores of the samples.
+
+            - If 'auto', the threshold is determined as in the
+              original paper.
+            - If float, the contamination should be in the range (0, 0.5].
+
+        .. versionchanged:: 0.22
+           The default value of ``contamination`` changed from 0.1
+           to ``'auto'``.
+
+    max_features : int or float, default=1.0
+        The number of features to draw from X to train each base estimator.
+
+            - If int, then draw `max_features` features.
+            - If float, then draw `max_features * X.shape[1]` features.
+
+    bootstrap : bool, default=False
+        If True, individual trees are fit on random subsets of the training
+        data sampled with replacement. If False, sampling without replacement
+        is performed.
+
+    n_jobs : int, default=None
+        The number of jobs to run in parallel for both :meth:`fit` and
+        :meth:`predict`. ``None`` means 1 unless in a
+        :obj:`joblib.parallel_backend` context. ``-1`` means using all
+        processors. See :term:`Glossary &lt;n_jobs&gt;` for more details.
+
+    random_state : int, RandomState instance or None, default=None
+        Controls the pseudo-randomness of the selection of the feature
+        and split values for each branching step and each tree in the forest.
+
+        Pass an int for reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    verbose : int, default=0
+        Controls the verbosity of the tree building process.
+
+    warm_start : bool, default=False
+        When set to ``True``, reuse the solution of the previous call to fit
+        and add more estimators to the ensemble, otherwise, just fit a whole
+        new forest. See :term:`the Glossary &lt;warm_start&gt;`.
+
+        .. versionadded:: 0.21
+
+    Attributes
+    ----------
+    base_estimator_ : ExtraTreeRegressor instance
+        The child estimator template used to create the collection of
+        fitted sub-estimators.
+
+    estimators_ : list of ExtraTreeRegressor instances
+        The collection of fitted sub-estimators.
+
+    estimators_features_ : list of ndarray
+        The subset of drawn features for each base estimator.
+
+    estimators_samples_ : list of ndarray
+        The subset of drawn samples (i.e., the in-bag samples) for each base
+        estimator.
+
+    max_samples_ : int
+        The actual number of samples.
+
+    offset_ : float
+        Offset used to define the decision function from the raw scores. We
+        have the relation: ``decision_function = score_samples - offset_``.
+        ``offset_`` is defined as follows. When the contamination parameter is
+        set to "auto", the offset is equal to -0.5 as the scores of inliers are
+        close to 0 and the scores of outliers are close to -1. When a
+        contamination parameter different than "auto" is provided, the offset
+        is defined in such a way we obtain the expected number of outliers
+        (samples with decision function &lt; 0) in training.
+
+        .. versionadded:: 0.20
+
+    n_features_ : int
+        The number of features when ``fit`` is performed.
+
+        .. deprecated:: 1.0
+            Attribute `n_features_` was deprecated in version 1.0 and will be
+            removed in 1.2. Use `n_features_in_` instead.
+
+    Notes
+    -----
+    The implementation is based on an ensemble of ExtraTreeRegressor. The
+    maximum depth of each tree is set to ``ceil(log_2(n))`` where
+    :math:`n` is the number of samples used to build the tree
+    (see (Liu et al., 2008) for more details).
+
+    References
+    ----------
+    .. [1] Liu, Fei Tony, Ting, Kai Ming and Zhou, Zhi-Hua. "Isolation forest."
+           Data Mining, 2008. ICDM'08. Eighth IEEE International Conference on.
+    .. [2] Liu, Fei Tony, Ting, Kai Ming and Zhou, Zhi-Hua. "Isolation-based
+           anomaly detection." ACM Transactions on Knowledge Discovery from
+           Data (TKDD) 6.1 (2012): 3.
+
+    See Also
+    ----------
+    sklearn.covariance.EllipticEnvelope : An object for detecting outliers in a
+        Gaussian distributed dataset.
+    sklearn.svm.OneClassSVM : Unsupervised Outlier Detection.
+        Estimate the support of a high-dimensional distribution.
+        The implementation is based on libsvm.
+    sklearn.neighbors.LocalOutlierFactor : Unsupervised Outlier Detection
+        using Local Outlier Factor (LOF).
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.ensemble import IsolationForest
+    &gt;&gt;&gt; X = [[-1.1], [0.3], [0.5], [100]]
+    &gt;&gt;&gt; clf = IsolationForest(random_state=0).fit(X)
+    &gt;&gt;&gt; clf.predict([[0.1], [0], [90]])
+    array([ 1,  1, -1])
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span>
+                 <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="punctuation">,</span>
+                 <span class="identifier">max_samples</span><span class="arithmetic-assignment">=</span><span class="string-literal">"auto"</span><span class="punctuation">,</span>
+                 <span class="identifier">contamination</span><span class="arithmetic-assignment">=</span><span class="string-literal">"auto"</span><span class="punctuation">,</span>
+                 <span class="identifier">max_features</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span>
+                 <span class="identifier">bootstrap</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                 <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                 <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="punctuation">,</span>
+                 <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span>
+            <span class="identifier">base_estimator</span><span class="arithmetic-assignment">=</span><span class="identifier">ExtraTreeRegressor</span><span class="grouping">(</span>
+                <span class="identifier">max_features</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span>
+                <span class="identifier">splitter</span><span class="arithmetic-assignment">=</span><span class="string-literal">'random'</span><span class="punctuation">,</span>
+                <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="grouping">)</span><span class="punctuation">,</span>
+            <span class="comment"># here above max_features has no links with self.max_features</span>
+            <span class="identifier">bootstrap</span><span class="arithmetic-assignment">=</span><span class="identifier">bootstrap</span><span class="punctuation">,</span>
+            <span class="identifier">bootstrap_features</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+            <span class="identifier">n_estimators</span><span class="arithmetic-assignment">=</span><span class="identifier">n_estimators</span><span class="punctuation">,</span>
+            <span class="identifier">max_samples</span><span class="arithmetic-assignment">=</span><span class="identifier">max_samples</span><span class="punctuation">,</span>
+            <span class="identifier">max_features</span><span class="arithmetic-assignment">=</span><span class="identifier">max_features</span><span class="punctuation">,</span>
+            <span class="identifier">warm_start</span><span class="arithmetic-assignment">=</span><span class="identifier">warm_start</span><span class="punctuation">,</span>
+            <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span>
+            <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+            <span class="identifier">verbose</span><span class="arithmetic-assignment">=</span><span class="identifier">verbose</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contamination</span> <span class="arithmetic-assignment">=</span> <span class="identifier">contamination</span>
+
+    <span class="keyword">def</span> <span class="identifier">_set_oob_score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span><span class="string-literal">"OOB score not supported by iforest"</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_parallel_args</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># ExtraTreeRegressor releases the GIL, so it's more efficient to use</span>
+        <span class="comment"># a thread-based backend rather than a process-based backend so as</span>
+        <span class="comment"># to avoid suffering from communication overhead and extra memory</span>
+        <span class="comment"># copies.</span>
+        <span class="keyword">return</span> <span class="identifier">_joblib_parallel_args</span><span class="grouping">(</span><span class="identifier">prefer</span><span class="arithmetic-assignment">=</span><span class="string-literal">'threads'</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Fit estimator.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The input samples. Use ``dtype=np.float32`` for maximum
+            efficiency. Sparse matrices are also supported, use sparse
+            ``csc_matrix`` for maximum efficiency.
+
+        y : Ignored
+            Not used, present for API consistency by convention.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights. If None, then samples are equally weighted.
+
+        Returns
+        -------
+        self : object
+            Fitted estimator.
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csc'</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">issparse</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># Pre-sort indices to avoid that each individual tree of the</span>
+            <span class="comment"># ensemble sorts the indices.</span>
+            <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">sort_indices</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="identifier">rnd</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rnd</span><span class="punctuation">.</span><span class="identifier">uniform</span><span class="grouping">(</span><span class="identifier">size</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="comment"># ensure that max_sample is in [1, n_samples]:</span>
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contamination</span> <span class="relational-operator">!=</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span><span class="grouping">(</span><span class="int-literal">0</span><span class="punctuation">.</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contamination</span> <span class="relational-operator">&lt;=</span> <span class="float-literal">.5</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"contamination must be in (0, 0.5], "</span>
+                                 <span class="string-literal">"got: %f"</span> <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contamination</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span> <span class="relational-operator">==</span> <span class="string-literal">'auto'</span><span class="punctuation">:</span>
+                <span class="identifier">max_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">min</span><span class="grouping">(</span><span class="int-literal">256</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'max_samples (%s) is not supported.'</span>
+                                 <span class="string-literal">'Valid choices are: "auto", int or'</span>
+                                 <span class="string-literal">'float'</span> <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span><span class="grouping">)</span>
+
+        <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span><span class="punctuation">,</span> <span class="identifier">numbers</span><span class="punctuation">.</span><span class="identifier">Integral</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span> <span class="relational-operator">&gt;</span> <span class="identifier">n_samples</span><span class="punctuation">:</span>
+                <span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">"max_samples (%s) is greater than the "</span>
+                     <span class="string-literal">"total number of samples (%s). max_samples "</span>
+                     <span class="string-literal">"will be set to n_samples for estimation."</span>
+                     <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span><span class="punctuation">,</span> <span class="identifier">n_samples</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="identifier">max_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">max_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>  <span class="comment"># float</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="int-literal">0</span><span class="punctuation">.</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"max_samples must be in (0, 1], got %r"</span>
+                                 <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span><span class="grouping">)</span>
+            <span class="identifier">max_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples</span> <span class="arithmetic-operator">*</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_samples</span>
+        <span class="identifier">max_depth</span> <span class="arithmetic-assignment">=</span> <span class="identifier">int</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ceil</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log2</span><span class="grouping">(</span><span class="identifier">max</span><span class="grouping">(</span><span class="identifier">max_samples</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">_fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">max_samples</span><span class="punctuation">,</span>
+                     <span class="identifier">max_depth</span><span class="arithmetic-assignment">=</span><span class="identifier">max_depth</span><span class="punctuation">,</span>
+                     <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contamination</span> <span class="relational-operator">==</span> <span class="string-literal">"auto"</span><span class="punctuation">:</span>
+            <span class="comment"># 0.5 plays a special role as described in the original paper.</span>
+            <span class="comment"># we take the opposite as we consider the opposite of their score.</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">offset_</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">-0.5</span>
+            <span class="keyword">return</span> <span class="identifier">self</span>
+
+        <span class="comment"># else, define offset_ wrt contamination parameter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">offset_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">percentile</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">score_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">,</span>
+                                     <span class="int-literal">100</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">contamination</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Predict if a particular sample is an outlier or not.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The input samples. Internally, it will be converted to
+            ``dtype=np.float32`` and if a sparse matrix is provided
+            to a sparse ``csr_matrix``.
+
+        Returns
+        -------
+        is_inlier : ndarray of shape (n_samples,)
+            For each observation, tells whether or not (+1 or -1) it should
+            be considered as an inlier according to the fitted model.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">is_inlier</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">int</span><span class="grouping">)</span>
+        <span class="identifier">is_inlier</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+        <span class="keyword">return</span> <span class="identifier">is_inlier</span>
+
+    <span class="keyword">def</span> <span class="identifier">decision_function</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Average anomaly score of X of the base classifiers.
+
+        The anomaly score of an input sample is computed as
+        the mean anomaly score of the trees in the forest.
+
+        The measure of normality of an observation given a tree is the depth
+        of the leaf containing this observation, which is equivalent to
+        the number of splittings required to isolate this point. In case of
+        several observations n_left in the leaf, the average path length of
+        a n_left samples isolation tree is added.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The input samples. Internally, it will be converted to
+            ``dtype=np.float32`` and if a sparse matrix is provided
+            to a sparse ``csr_matrix``.
+
+        Returns
+        -------
+        scores : ndarray of shape (n_samples,)
+            The anomaly score of the input samples.
+            The lower, the more abnormal. Negative scores represent outliers,
+            positive scores represent inliers.
+        """</span>
+        <span class="comment"># We subtract self.offset_ to make 0 be the threshold value for being</span>
+        <span class="comment"># an outlier:</span>
+
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">score_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">offset_</span>
+
+    <span class="keyword">def</span> <span class="identifier">score_samples</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Opposite of the anomaly score defined in the original paper.
+
+        The anomaly score of an input sample is computed as
+        the mean anomaly score of the trees in the forest.
+
+        The measure of normality of an observation given a tree is the depth
+        of the leaf containing this observation, which is equivalent to
+        the number of splittings required to isolate this point. In case of
+        several observations n_left in the leaf, the average path length of
+        a n_left samples isolation tree is added.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
+        scores : ndarray of shape (n_samples,)
+            The anomaly score of the input samples.
+            The lower, the more abnormal.
+        """</span>
+        <span class="comment"># code structure from ForestClassifier/predict_proba</span>
+
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="comment"># Check data</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="string-literal">'csr'</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+        <span class="comment"># Take the opposite of the scores as bigger is better (here less</span>
+        <span class="comment"># abnormal)</span>
+        <span class="keyword">return</span> <span class="arithmetic-operator">-</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_compute_chunked_score_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_compute_chunked_score_samples</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_num_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_features</span> <span class="relational-operator">==</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="identifier">subsample_features</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">subsample_features</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+
+        <span class="comment"># We get as many rows as possible within our working_memory budget</span>
+        <span class="comment"># (defined by sklearn.get_config()['working_memory']) to store</span>
+        <span class="comment"># self._max_features in each row during computation.</span>
+        <span class="comment">#</span>
+        <span class="comment"># Note:</span>
+        <span class="comment">#  - this will get at least 1 row, even if 1 row of score will</span>
+        <span class="comment">#    exceed working_memory.</span>
+        <span class="comment">#  - this does only account for temporary memory usage while loading</span>
+        <span class="comment">#    the data needed to compute the scores -- the returned scores</span>
+        <span class="comment">#    themselves are 1D.</span>
+
+        <span class="identifier">chunk_n_rows</span> <span class="arithmetic-assignment">=</span> <span class="identifier">get_chunk_n_rows</span><span class="grouping">(</span><span class="identifier">row_bytes</span><span class="arithmetic-assignment">=</span><span class="int-literal">16</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_max_features</span><span class="punctuation">,</span>
+                                        <span class="identifier">max_n_rows</span><span class="arithmetic-assignment">=</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">slices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gen_batches</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">chunk_n_rows</span><span class="grouping">)</span>
+
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">"f"</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">sl</span> <span class="relational-operator">in</span> <span class="identifier">slices</span><span class="punctuation">:</span>
+            <span class="comment"># compute score on the slices of test samples:</span>
+            <span class="identifier">scores</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_compute_score_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">[</span><span class="identifier">sl</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">subsample_features</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">scores</span>
+
+    <span class="keyword">def</span> <span class="identifier">_compute_score_samples</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">subsample_features</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""
+        Compute the score of each samples in X going through the extra trees.
+
+        Parameters
+        ----------
+        X : array-like or sparse matrix
+            Data matrix.
+
+        subsample_features : bool
+            Whether features should be subsampled.
+        """</span>
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+
+        <span class="identifier">depths</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">order</span><span class="arithmetic-assignment">=</span><span class="string-literal">"f"</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">tree</span><span class="punctuation">,</span> <span class="identifier">features</span> <span class="relational-operator">in</span> <span class="identifier">zip</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_features_</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">X_subset</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">features</span><span class="grouping">]</span> <span class="keyword">if</span> <span class="identifier">subsample_features</span> <span class="keyword">else</span> <span class="identifier">X</span>
+
+            <span class="identifier">leaves_index</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tree</span><span class="punctuation">.</span><span class="identifier">apply</span><span class="grouping">(</span><span class="identifier">X_subset</span><span class="grouping">)</span>
+            <span class="identifier">node_indicator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tree</span><span class="punctuation">.</span><span class="identifier">decision_path</span><span class="grouping">(</span><span class="identifier">X_subset</span><span class="grouping">)</span>
+            <span class="identifier">n_samples_leaf</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tree</span><span class="punctuation">.</span><span class="identifier">tree_</span><span class="punctuation">.</span><span class="identifier">n_node_samples</span><span class="grouping">[</span><span class="identifier">leaves_index</span><span class="grouping">]</span>
+
+            <span class="identifier">depths</span> <span class="arithmetic-assignment">+=</span> <span class="grouping">(</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="identifier">node_indicator</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+                <span class="arithmetic-operator">+</span> <span class="identifier">_average_path_length</span><span class="grouping">(</span><span class="identifier">n_samples_leaf</span><span class="grouping">)</span>
+                <span class="arithmetic-operator">-</span> <span class="float-literal">1.0</span>
+            <span class="grouping">)</span>
+        <span class="identifier">denominator</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+            <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">estimators_</span><span class="grouping">)</span> <span class="arithmetic-operator">*</span> <span class="identifier">_average_path_length</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_samples_</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="grouping">)</span>
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">2</span> <span class="arithmetic-operator">**</span> <span class="grouping">(</span>
+            <span class="comment"># For a single training sample, denominator and depth are 0.</span>
+            <span class="comment"># Therefore, we set the score manually to 1.</span>
+            <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">divide</span><span class="grouping">(</span><span class="identifier">depths</span><span class="punctuation">,</span> <span class="identifier">denominator</span><span class="punctuation">,</span> <span class="identifier">out</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones_like</span><span class="grouping">(</span><span class="identifier">depths</span><span class="grouping">)</span><span class="punctuation">,</span>
+                       <span class="identifier">where</span><span class="arithmetic-assignment">=</span><span class="identifier">denominator</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">scores</span>
+
+    <span class="keyword">def</span> <span class="identifier">_more_tags</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="grouping">{</span>
+            <span class="string-literal">'_xfail_checks'</span><span class="punctuation">:</span> <span class="grouping">{</span>
+                <span class="string-literal">'check_sample_weights_invariance'</span><span class="punctuation">:</span>
+                <span class="string-literal">'zero sample_weight is not equivalent to removing samples'</span><span class="punctuation">,</span>
+            <span class="grouping">}</span>
+        <span class="grouping">}</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_average_path_length</span><span class="grouping">(</span><span class="identifier">n_samples_leaf</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""
+    The average path length in a n_samples iTree, which is equal to
+    the average path length of an unsuccessful BST search since the
+    latter has the same structure as an isolation tree.
+    Parameters
+    ----------
+    n_samples_leaf : array-like of shape (n_samples,)
+        The number of training samples in each test sample leaf, for
+        each estimators.
+
+    Returns
+    -------
+    average_path_length : ndarray of shape (n_samples,)
+    """</span>
+
+    <span class="identifier">n_samples_leaf</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_array</span><span class="grouping">(</span><span class="identifier">n_samples_leaf</span><span class="punctuation">,</span> <span class="identifier">ensure_2d</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+
+    <span class="identifier">n_samples_leaf_shape</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples_leaf</span><span class="punctuation">.</span><span class="identifier">shape</span>
+    <span class="identifier">n_samples_leaf</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples_leaf</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="identifier">average_path_length</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="identifier">n_samples_leaf</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+
+    <span class="identifier">mask_1</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples_leaf</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">1</span>
+    <span class="identifier">mask_2</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_samples_leaf</span> <span class="relational-operator">==</span> <span class="int-literal">2</span>
+    <span class="identifier">not_mask</span> <span class="arithmetic-assignment">=</span> <span class="bitwise-operator">~</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">logical_or</span><span class="grouping">(</span><span class="identifier">mask_1</span><span class="punctuation">,</span> <span class="identifier">mask_2</span><span class="grouping">)</span>
+
+    <span class="identifier">average_path_length</span><span class="grouping">[</span><span class="identifier">mask_1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span><span class="punctuation">.</span>
+    <span class="identifier">average_path_length</span><span class="grouping">[</span><span class="identifier">mask_2</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+    <span class="identifier">average_path_length</span><span class="grouping">[</span><span class="identifier">not_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+        <span class="float-literal">2.0</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">n_samples_leaf</span><span class="grouping">[</span><span class="identifier">not_mask</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="float-literal">1.0</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">euler_gamma</span><span class="grouping">)</span>
+        <span class="arithmetic-operator">-</span> <span class="float-literal">2.0</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_samples_leaf</span><span class="grouping">[</span><span class="identifier">not_mask</span><span class="grouping">]</span> <span class="arithmetic-operator">-</span> <span class="float-literal">1.0</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">n_samples_leaf</span><span class="grouping">[</span><span class="identifier">not_mask</span><span class="grouping">]</span>
+    <span class="grouping">)</span>
+
+    <span class="keyword">return</span> <span class="identifier">average_path_length</span><span class="punctuation">.</span><span class="identifier">reshape</span><span class="grouping">(</span><span class="identifier">n_samples_leaf_shape</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>

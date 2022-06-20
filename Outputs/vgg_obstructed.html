@@ -1,0 +1,232 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">#!/usr/bin/env python3</span>
+<span class="comment">""" VGG Obstructed face mask plugin """</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">keras</span><span class="punctuation">.</span><span class="identifier">layers</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">Add</span><span class="punctuation">,</span> <span class="identifier">Conv2D</span><span class="punctuation">,</span>  <span class="comment"># pylint:disable=no-name-in-module,import-error</span>
+                          <span class="identifier">Conv2DTranspose</span><span class="punctuation">,</span> <span class="identifier">Cropping2D</span><span class="punctuation">,</span> <span class="identifier">Dropout</span><span class="punctuation">,</span> <span class="identifier">Input</span><span class="punctuation">,</span> <span class="keyword">Lambda</span><span class="punctuation">,</span> <span class="identifier">MaxPooling2D</span><span class="punctuation">,</span>
+                          <span class="identifier">ZeroPadding2D</span><span class="grouping">)</span>
+
+<span class="keyword">from</span> <span class="identifier">lib</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">session</span> <span class="keyword">import</span> <span class="identifier">KSession</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">_base</span> <span class="keyword">import</span> <span class="identifier">Masker</span><span class="punctuation">,</span> <span class="identifier">logger</span>
+
+
+<span class="keyword">class</span> <span class="identifier">Mask</span><span class="grouping">(</span><span class="identifier">Masker</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" Neural network to process face image into a segmentation mask of the face """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">git_model_id</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">5</span>
+        <span class="identifier">model_filename</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"Nirkin_500_softmax_v1.h5"</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">git_model_id</span><span class="arithmetic-assignment">=</span><span class="identifier">git_model_id</span><span class="punctuation">,</span> <span class="identifier">model_filename</span><span class="arithmetic-assignment">=</span><span class="identifier">model_filename</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">name</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"VGG Obstructed"</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_size</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">500</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vram</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">3936</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vram_warnings</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1088</span>  <span class="comment"># at BS 1. OOMs at higher batch sizes</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">vram_per_batch</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">304</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">batchsize</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">[</span><span class="string-literal">"batch-size"</span><span class="grouping">]</span>
+
+    <span class="keyword">def</span> <span class="identifier">init_model</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">model</span> <span class="arithmetic-assignment">=</span> <span class="identifier">VGGObstructed</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">model_path</span><span class="punctuation">,</span>
+                                   <span class="identifier">allow_growth</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">config</span><span class="grouping">[</span><span class="string-literal">"allow_growth"</span><span class="grouping">]</span><span class="punctuation">,</span>
+                                   <span class="identifier">exclude_gpus</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_exclude_gpus</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">append_softmax_activation</span><span class="grouping">(</span><span class="identifier">layer_index</span><span class="arithmetic-assignment">=</span><span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">placeholder</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">batchsize</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_size</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">input_size</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span><span class="punctuation">,</span>
+                               <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="string-literal">"float32"</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">placeholder</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">process_input</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Compile the detected faces for prediction """</span>
+        <span class="identifier">input_</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="identifier">feed</span><span class="punctuation">.</span><span class="identifier">face</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="int-literal">3</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">feed</span> <span class="relational-operator">in</span> <span class="identifier">batch</span><span class="grouping">[</span><span class="string-literal">"feed_faces"</span><span class="grouping">]</span><span class="grouping">]</span>
+        <span class="identifier">batch</span><span class="grouping">[</span><span class="string-literal">"feed"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">input_</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">input_</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">logger</span><span class="punctuation">.</span><span class="identifier">trace</span><span class="grouping">(</span><span class="string-literal">"feed shape: %s", batch["feed"</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">batch</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Run model to get predictions """</span>
+        <span class="identifier">predictions</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">model</span><span class="punctuation">.</span><span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">batch</span><span class="grouping">[</span><span class="string-literal">"feed"</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">batch</span><span class="grouping">[</span><span class="string-literal">"prediction"</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">predictions</span><span class="grouping">[</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="float-literal">-1.0</span> <span class="arithmetic-operator">+</span> <span class="float-literal">1.0</span>
+        <span class="keyword">return</span> <span class="identifier">batch</span>
+
+    <span class="keyword">def</span> <span class="identifier">process_output</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">batch</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Compile found faces for output """</span>
+        <span class="keyword">return</span> <span class="identifier">batch</span>
+
+
+<span class="keyword">class</span> <span class="identifier">VGGObstructed</span><span class="grouping">(</span><span class="identifier">KSession</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">""" VGG Obstructed mask for Faceswap.
+
+    Caffe model re-implemented in Keras by Kyle Vrooman.
+    Re-implemented for Tensorflow 2 by TorzDF
+
+    Parameters
+    ----------
+    model_path: str
+        The path to the keras model file
+    allow_growth: bool
+        Enable the Tensorflow GPU allow_growth configuration option. This option prevents
+        Tensorflow from allocating all of the GPU VRAM, but can lead to higher fragmentation and
+        slower performance
+    exclude_gpus: list
+        A list of indices correlating to connected GPUs that Tensorflow should not use. Pass
+        ``None`` to not exclude any GPUs
+
+    References
+    ----------
+    On Face Segmentation, Face Swapping, and Face Perception (https://arxiv.org/abs/1704.06729)
+    Source Implementation: https://github.com/YuvalNirkin/face_segmentation
+    Model file sourced from:
+    https://github.com/YuvalNirkin/face_segmentation/releases/download/1.0/face_seg_fcn8s.zip
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">model_path</span><span class="punctuation">,</span> <span class="identifier">allow_growth</span><span class="punctuation">,</span> <span class="identifier">exclude_gpus</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="string-literal">"VGG Obstructed"</span><span class="punctuation">,</span>
+                         <span class="identifier">model_path</span><span class="punctuation">,</span>
+                         <span class="identifier">allow_growth</span><span class="arithmetic-assignment">=</span><span class="identifier">allow_growth</span><span class="punctuation">,</span>
+                         <span class="identifier">exclude_gpus</span><span class="arithmetic-assignment">=</span><span class="identifier">exclude_gpus</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">n</span><span class="invalid">e</span><span class="invalid">_</span><span class="invalid">m</span><span class="invalid">o</span><span class="invalid">d</span><span class="invalid">e</span><span class="invalid">l</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_model_definition</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">load_model_weights</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">m</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">h</span><span class="invalid">o</span><span class="invalid">d</span>
+    <span class="keyword">def</span> <span class="identifier">_model_definition</span><span class="grouping">(</span><span class="identifier">cls</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Definition of the VGG Obstructed Model.
+
+        Returns
+        -------
+        tuple
+            The tensor input to the model and tensor output to the model for compilation by
+            :func`define_model`
+        """</span>
+        <span class="identifier">input_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Input</span><span class="grouping">(</span><span class="identifier">shape</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">500</span><span class="punctuation">,</span> <span class="int-literal">500</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ZeroPadding2D</span><span class="grouping">(</span><span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="int-literal">100</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="int-literal">100</span><span class="punctuation">,</span> <span class="int-literal">100</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">input_</span><span class="grouping">)</span>
+
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ConvBlock</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="int-literal">64</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ConvBlock</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="int-literal">128</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ConvBlock</span><span class="grouping">(</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="int-literal">256</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="identifier">score_pool3</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ScorePool</span><span class="grouping">(</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="float-literal">0.0001</span><span class="punctuation">,</span> <span class="int-literal">9</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ConvBlock</span><span class="grouping">(</span><span class="int-literal">4</span><span class="punctuation">,</span> <span class="int-literal">512</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">score_pool4</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ScorePool</span><span class="grouping">(</span><span class="int-literal">4</span><span class="punctuation">,</span> <span class="float-literal">0.01</span><span class="punctuation">,</span> <span class="int-literal">5</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ConvBlock</span><span class="grouping">(</span><span class="int-literal">5</span><span class="punctuation">,</span> <span class="int-literal">512</span><span class="punctuation">,</span> <span class="int-literal">3</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="int-literal">4096</span><span class="punctuation">,</span> <span class="int-literal">7</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"valid", activation="relu", name="fc6"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Dropout</span><span class="grouping">(</span><span class="identifier">rate</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="int-literal">4096</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"valid", activation="relu", name="fc7"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Dropout</span><span class="grouping">(</span><span class="identifier">rate</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.5</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="int-literal">21</span><span class="punctuation">,</span> <span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"valid", activation="linear", name="score_fr"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DTranspose</span><span class="grouping">(</span><span class="int-literal">21</span><span class="punctuation">,</span>
+                                <span class="int-literal">4</span><span class="punctuation">,</span>
+                                <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+                                <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"linear"</span><span class="punctuation">,</span>
+                                <span class="identifier">use_bias</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"upscore2"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Add</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">var_x</span><span class="punctuation">,</span> <span class="identifier">score_pool4</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DTranspose</span><span class="grouping">(</span><span class="int-literal">21</span><span class="punctuation">,</span>
+                                <span class="int-literal">4</span><span class="punctuation">,</span>
+                                <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="int-literal">2</span><span class="punctuation">,</span>
+                                <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"linear"</span><span class="punctuation">,</span>
+                                <span class="identifier">use_bias</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"upscore_pool4"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Add</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">var_x</span><span class="punctuation">,</span> <span class="identifier">score_pool3</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2DTranspose</span><span class="grouping">(</span><span class="int-literal">21</span><span class="punctuation">,</span>
+                                <span class="int-literal">16</span><span class="punctuation">,</span>
+                                <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="int-literal">8</span><span class="punctuation">,</span>
+                                <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"linear"</span><span class="punctuation">,</span>
+                                <span class="identifier">use_bias</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"upscore8"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Cropping2D</span><span class="grouping">(</span><span class="identifier">cropping</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="grouping">(</span><span class="int-literal">31</span><span class="punctuation">,</span> <span class="int-literal">37</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="int-literal">31</span><span class="punctuation">,</span> <span class="int-literal">37</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"score"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">input_</span><span class="punctuation">,</span> <span class="identifier">var_x</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_ConvBlock</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Convolutional loop with max pooling layer for VGG Obstructed.
+
+    Parameters
+    ----------
+    level: int
+        For naming. The current level for this convolutional loop
+    filters: int
+        The number of filters that should appear in each Conv2D layer
+    iterations: int
+        The number of consecutive Conv2D layers to create
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">level</span><span class="punctuation">,</span> <span class="identifier">filters</span><span class="punctuation">,</span> <span class="identifier">iterations</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"conv{}_"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">level</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_level</span> <span class="arithmetic-assignment">=</span> <span class="identifier">level</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span> <span class="arithmetic-assignment">=</span> <span class="identifier">filters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_iterator</span> <span class="arithmetic-assignment">=</span> <span class="identifier">range</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">iterations</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Call the convolutional loop.
+
+        Parameters
+        ----------
+        inputs: tensor
+            The input tensor to the block
+
+        Returns
+        -------
+        tensor
+            The output tensor from the convolutional block
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">inputs</span>
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_iterator</span><span class="punctuation">:</span>
+            <span class="identifier">padding</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"valid" if self._level == i == 1 else "same"</span>
+            <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_filters</span><span class="punctuation">,</span>
+                           <span class="int-literal">3</span><span class="punctuation">,</span>
+                           <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="identifier">padding</span><span class="punctuation">,</span>
+                           <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"relu"</span><span class="punctuation">,</span>
+                           <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"{}{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="punctuation">,</span> <span class="identifier">i</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">MaxPooling2D</span><span class="grouping">(</span><span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"same"</span><span class="punctuation">,</span>
+                             <span class="identifier">strides</span><span class="arithmetic-assignment">=</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">,</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">,</span>
+                             <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"pool{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_level</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_ScorePool</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>  <span class="comment"># pylint:disable=too-few-public-methods</span>
+    <span class="comment">""" Cropped scaling of the pooling layer.
+
+    Parameters
+    ----------
+    level: int
+        For naming. The current level for this score pool
+    scale: float
+        The scaling to apply to the pool
+    crop: int
+        The amount of 2D cropping to apply
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">level</span><span class="punctuation">,</span> <span class="identifier">scale</span><span class="punctuation">,</span> <span class="identifier">crop</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"_pool{}"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">level</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cropping</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="grouping">(</span><span class="identifier">crop</span><span class="punctuation">,</span> <span class="identifier">crop</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">crop</span><span class="punctuation">,</span> <span class="identifier">crop</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scale</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">inputs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">""" Score pool block.
+
+        Parameters
+        ----------
+        inputs: tensor
+            The input tensor to the block
+
+        Returns
+        -------
+        tensor
+            The output tensor from the score pool block
+        """</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="keyword">Lambda</span><span class="grouping">(</span><span class="keyword">lambda</span> <span class="identifier">x</span><span class="punctuation">:</span> <span class="identifier">x</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scale</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"scale"</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">inputs</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Conv2D</span><span class="grouping">(</span><span class="int-literal">21</span><span class="punctuation">,</span>
+                       <span class="int-literal">1</span><span class="punctuation">,</span>
+                       <span class="identifier">padding</span><span class="arithmetic-assignment">=</span><span class="string-literal">"valid"</span><span class="punctuation">,</span>
+                       <span class="identifier">activation</span><span class="arithmetic-assignment">=</span><span class="string-literal">"linear"</span><span class="punctuation">,</span>
+                       <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"score"</span> <span class="arithmetic-operator">+</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_name</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="identifier">var_x</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Cropping2D</span><span class="grouping">(</span><span class="identifier">cropping</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_cropping</span><span class="punctuation">,</span> <span class="identifier">name</span><span class="arithmetic-assignment">=</span><span class="string-literal">"score" + self._name + "c"</span><span class="grouping">)</span><span class="grouping">(</span><span class="identifier">var_x</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">var_x</span>
+
+    </pre>
+  </body>
+</html>

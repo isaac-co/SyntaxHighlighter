@@ -1,0 +1,528 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment"># coding=utf8</span>
+<span class="comment">"""
+Label propagation in the context of this module refers to a set of
+semi-supervised classification algorithms. At a high level, these algorithms
+work by forming a fully-connected graph between all points given and solving
+for the steady-state distribution of labels at each point.
+
+These algorithms perform very well in practice. The cost of running can be very
+expensive, at approximately O(N^3) where N is the number of (labeled and
+unlabeled) points. The theory (why they perform so well) is motivated by
+intuitions from random walk algorithms and geometric relationships in the data.
+For more information see the references below.
+
+Model Features
+--------------
+Label clamping:
+  The algorithm tries to learn distributions of labels over the dataset given
+  label assignments over an initial subset. In one variant, the algorithm does
+  not allow for any errors in the initial assignment (hard-clamping) while
+  in another variant, the algorithm allows for some wiggle room for the initial
+  assignments, allowing them to change by a fraction alpha in each iteration
+  (soft-clamping).
+
+Kernel:
+  A function which projects a vector into some higher dimensional space. This
+  implementation supports RBF and KNN kernels. Using the RBF kernel generates
+  a dense matrix of size O(N^2). KNN kernel will generate a sparse matrix of
+  size O(k*N) which will run much faster. See the documentation for SVMs for
+  more info on kernels.
+
+Examples
+--------
+&gt;&gt;&gt; import numpy as np
+&gt;&gt;&gt; from sklearn import datasets
+&gt;&gt;&gt; from sklearn.semi_supervised import LabelPropagation
+&gt;&gt;&gt; label_prop_model = LabelPropagation()
+&gt;&gt;&gt; iris = datasets.load_iris()
+&gt;&gt;&gt; rng = np.random.RandomState(42)
+&gt;&gt;&gt; random_unlabeled_points = rng.rand(len(iris.target)) &lt; 0.3
+&gt;&gt;&gt; labels = np.copy(iris.target)
+&gt;&gt;&gt; labels[random_unlabeled_points] = -1
+&gt;&gt;&gt; label_prop_model.fit(iris.data, labels)
+LabelPropagation(...)
+
+Notes
+-----
+References:
+[1] Yoshua Bengio, Olivier Delalleau, Nicolas Le Roux. In Semi-Supervised
+Learning (2006), pp. 193-216
+
+[2] Olivier Delalleau, Yoshua Bengio, Nicolas Le Roux. Efficient
+Non-Parametric Function Induction in Semi-Supervised Learning. AISTAT 2005
+"""</span>
+
+<span class="comment"># Authors: Clay Woolam &lt;clay@woolam.org&gt;</span>
+<span class="comment">#          Utkarsh Upadhyay &lt;mail@musicallyut.in&gt;</span>
+<span class="comment"># License: BSD</span>
+<span class="keyword">from</span> <span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">ABCMeta</span><span class="punctuation">,</span> <span class="identifier">abstractmethod</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">sparse</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span><span class="punctuation">.</span><span class="identifier">sparse</span> <span class="keyword">import</span> <span class="identifier">csgraph</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">metrics</span><span class="punctuation">.</span><span class="identifier">pairwise</span> <span class="keyword">import</span> <span class="identifier">rbf_kernel</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">neighbors</span> <span class="keyword">import</span> <span class="identifier">NearestNeighbors</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">safe_sparse_dot</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">multiclass</span> <span class="keyword">import</span> <span class="identifier">check_classification_targets</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+
+
+<span class="keyword">class</span> <span class="identifier">BaseLabelPropagation</span><span class="grouping">(</span><span class="invalid">C</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">i</span><span class="invalid">f</span><span class="invalid">i</span><span class="invalid">e</span><span class="invalid">r</span><span class="invalid">M</span><span class="invalid">i</span><span class="invalid">x</span><span class="invalid">i</span><span class="invalid">n</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">metaclass</span><span class="arithmetic-assignment">=</span><span class="identifier">ABCMeta</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Base class for label propagation module.
+
+    Parameters
+    ----------
+    kernel : {'knn', 'rbf'} or callable, default='rbf'
+        String identifier for kernel function to use or the kernel function
+        itself. Only 'rbf' and 'knn' strings are valid inputs. The function
+        passed should take two inputs, each of shape (n_samples, n_features),
+        and return a (n_samples, n_samples) shaped weight matrix.
+
+    gamma : float, default=20
+        Parameter for rbf kernel.
+
+    n_neighbors : int, default=7
+        Parameter for knn kernel. Need to be strictly positive.
+
+    alpha : float, default=1.0
+        Clamping factor.
+
+    max_iter : int, default=30
+        Change maximum number of iterations allowed.
+
+    tol : float, default=1e-3
+        Convergence tolerance: threshold to consider the system at steady
+        state.
+
+   n_jobs : int, default=None
+        The number of parallel jobs to run.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+    """</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="string-literal">'rbf'</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="int-literal">20</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">7</span><span class="punctuation">,</span>
+                 <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-3</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+
+        <span class="comment"># kernel parameters</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kernel</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span> <span class="arithmetic-assignment">=</span> <span class="identifier">gamma</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_neighbors</span>
+
+        <span class="comment"># clamping factor</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">alpha</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_jobs</span>
+
+    <span class="keyword">def</span> <span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">==</span> <span class="string-literal">"rbf"</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">y</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">rbf_kernel</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">rbf_kernel</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">gamma</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">==</span> <span class="string-literal">"knn"</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">nn_fit</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">nn_fit</span> <span class="arithmetic-assignment">=</span> <span class="identifier">NearestNeighbors</span><span class="grouping">(</span><span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                                               <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_jobs</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="identifier">y</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">nn_fit</span><span class="punctuation">.</span><span class="identifier">kneighbors_graph</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">nn_fit</span><span class="punctuation">.</span><span class="identifier">_fit_X</span><span class="punctuation">,</span>
+                                                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span>
+                                                    <span class="identifier">mode</span><span class="arithmetic-assignment">=</span><span class="string-literal">'connectivity'</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">nn_fit</span><span class="punctuation">.</span><span class="identifier">kneighbors</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="invalid">r</span><span class="invalid">e</span><span class="invalid">t</span><span class="invalid">u</span><span class="invalid">r</span><span class="invalid">n</span><span class="invalid">_</span><span class="invalid">d</span><span class="invalid">i</span><span class="invalid">s</span><span class="invalid">t</span><span class="invalid">a</span><span class="invalid">n</span><span class="invalid">c</span><span class="invalid">e</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">y</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"%s is not a valid kernel. Only rbf and knn"</span>
+                             <span class="string-literal">" or an explicit function "</span>
+                             <span class="string-literal">" are supported at this time."</span> <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span><span class="grouping">)</span>
+
+    <span class="punctuation">@</span><span class="identifier">abstractmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_build_graph</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">NotImplementedError</span><span class="grouping">(</span><span class="string-literal">"Graph construction must be implemented"</span>
+                                  <span class="string-literal">" to fit a label propagation model."</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Performs inductive inference across the model.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data matrix.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples,)
+            Predictions for input data.
+        """</span>
+        <span class="identifier">probas</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">probas</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">predict_proba</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Predict probability for each possible outcome.
+
+        Compute the probability estimates for each single sample in X
+        and each possible outcome seen during training (categorical
+        distribution).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The data matrix.
+
+        Returns
+        -------
+        probabilities : ndarray of shape (n_samples, n_classes)
+            Normalized probability distributions across
+            class labels.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X_2d</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span>
+            <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">accept_sparse</span><span class="arithmetic-assignment">=</span><span class="grouping">[</span><span class="string-literal">'csc', 'csr', 'coo', 'dok', 'bsr', 'lil', 'dia'</span><span class="grouping">]</span><span class="punctuation">,</span>
+            <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">weight_matrices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_</span><span class="punctuation">,</span> <span class="identifier">X_2d</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">==</span> <span class="string-literal">'knn'</span><span class="punctuation">:</span>
+            <span class="identifier">probabilities</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="grouping">[</span>
+                <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="grouping">[</span><span class="identifier">weight_matrix</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+                <span class="keyword">for</span> <span class="identifier">weight_matrix</span> <span class="relational-operator">in</span> <span class="identifier">weight_matrices</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">weight_matrices</span> <span class="arithmetic-assignment">=</span> <span class="identifier">weight_matrices</span><span class="punctuation">.</span><span class="identifier">T</span>
+            <span class="identifier">probabilities</span> <span class="arithmetic-assignment">=</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span>
+                    <span class="identifier">weight_matrices</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="grouping">)</span>
+        <span class="identifier">normalizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">atleast_2d</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">probabilities</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+        <span class="identifier">probabilities</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">normalizer</span>
+        <span class="keyword">return</span> <span class="identifier">probabilities</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit a semi-supervised label propagation model based
+
+        All the input data is provided matrix X (labeled and unlabeled)
+        and corresponding label matrix y with a dedicated marker value for
+        unlabeled samples.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            A matrix of shape (n_samples, n_samples) will be created from this.
+
+        y : array-like of shape (n_samples,)
+            `n_labeled_samples` (unlabeled points are marked as -1)
+            All unlabeled samples will be transductively assigned labels.
+
+        Returns
+        -------
+        self : object
+        """</span>
+        <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span>
+        <span class="identifier">check_classification_targets</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+
+        <span class="comment"># actual graph construction (implementations should override this)</span>
+        <span class="identifier">graph_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_build_graph</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="comment"># label construction</span>
+        <span class="comment"># construct a categorical distribution for classification only</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">unique</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">[</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="relational-operator">!=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span> <span class="arithmetic-assignment">=</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_classes</span> <span class="arithmetic-assignment">=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">len</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+
+        <span class="identifier">alpha</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">alpha</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_variant</span> <span class="relational-operator">==</span> <span class="string-literal">'spreading'</span> <span class="logical-operator">and</span> <span class="invalid">\</span>
+                <span class="grouping">(</span><span class="identifier">alpha</span> <span class="relational-operator">is</span> <span class="none-literal">None</span> <span class="logical-operator">or</span> <span class="identifier">alpha</span> <span class="relational-operator">&lt;=</span> <span class="float-literal">0.0</span> <span class="logical-operator">or</span> <span class="identifier">alpha</span> <span class="relational-operator">&gt;=</span> <span class="float-literal">1.0</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'alpha=%s is invalid: it must be inside '</span>
+                             <span class="string-literal">'the open interval (0, 1)'</span> <span class="arithmetic-operator">%</span> <span class="identifier">alpha</span><span class="grouping">)</span>
+        <span class="identifier">y</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">a</span><span class="invalid">r</span><span class="invalid">r</span><span class="invalid">a</span><span class="invalid">y</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">unlabeled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">y</span> <span class="relational-operator">==</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+
+        <span class="comment"># initialize distributions</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">for</span> <span class="identifier">label</span> <span class="relational-operator">in</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="grouping">[</span><span class="identifier">y</span> <span class="relational-operator">==</span> <span class="identifier">label</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="relational-operator">==</span> <span class="identifier">label</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+
+        <span class="identifier">y_static</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_variant</span> <span class="relational-operator">==</span> <span class="string-literal">'propagation'</span><span class="punctuation">:</span>
+            <span class="comment"># LabelPropagation</span>
+            <span class="identifier">y_static</span><span class="grouping">[</span><span class="identifier">unlabeled</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="comment"># LabelSpreading</span>
+            <span class="identifier">y_static</span> <span class="arithmetic-assignment">*=</span> <span class="int-literal">1</span> <span class="arithmetic-operator">-</span> <span class="identifier">alpha</span>
+
+        <span class="identifier">l_previous</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">zeros</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">n_classes</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">unlabeled</span> <span class="arithmetic-assignment">=</span> <span class="identifier">unlabeled</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="keyword">if</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">isspmatrix</span><span class="grouping">(</span><span class="identifier">graph_matrix</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">graph_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">graph_matrix</span><span class="punctuation">.</span><span class="identifier">tocsr</span><span class="grouping">(</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">abs</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span> <span class="arithmetic-operator">-</span> <span class="identifier">l_previous</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+
+            <span class="identifier">l_previous</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">safe_sparse_dot</span><span class="grouping">(</span>
+                <span class="identifier">graph_matrix</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="grouping">)</span>
+
+            <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_variant</span> <span class="relational-operator">==</span> <span class="string-literal">'propagation'</span><span class="punctuation">:</span>
+                <span class="identifier">normalizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+                <span class="identifier">normalizer</span><span class="grouping">[</span><span class="identifier">normalizer</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">normalizer</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">where</span><span class="grouping">(</span><span class="identifier">unlabeled</span><span class="punctuation">,</span>
+                                                     <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="punctuation">,</span>
+                                                     <span class="identifier">y_static</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="comment"># clamp</span>
+                <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">multiply</span><span class="grouping">(</span>
+                    <span class="identifier">alpha</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">y_static</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span>
+                <span class="string-literal">'max_iter=%d was reached without convergence.'</span> <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                <span class="identifier">category</span><span class="arithmetic-assignment">=</span><span class="identifier">ConvergenceWarning</span>
+            <span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span>
+
+        <span class="identifier">normalizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="identifier">normalizer</span><span class="grouping">[</span><span class="identifier">normalizer</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">normalizer</span>
+
+        <span class="comment"># set the transduction item</span>
+        <span class="identifier">transduction</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">argmax</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">label_distributions_</span><span class="punctuation">,</span>
+                                               <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span><span class="grouping">]</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">transduction_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">transduction</span><span class="punctuation">.</span><span class="identifier">ravel</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+
+<span class="keyword">class</span> <span class="identifier">LabelPropagation</span><span class="grouping">(</span><span class="identifier">BaseLabelPropagation</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Label Propagation classifier
+
+    Read more in the :ref:`User Guide &lt;label_propagation&gt;`.
+
+    Parameters
+    ----------
+    kernel : {'knn', 'rbf'} or callable, default='rbf'
+        String identifier for kernel function to use or the kernel function
+        itself. Only 'rbf' and 'knn' strings are valid inputs. The function
+        passed should take two inputs, each of shape (n_samples, n_features),
+        and return a (n_samples, n_samples) shaped weight matrix.
+
+    gamma : float, default=20
+        Parameter for rbf kernel.
+
+    n_neighbors : int, default=7
+        Parameter for knn kernel which need to be strictly positive.
+
+    max_iter : int, default=1000
+        Change maximum number of iterations allowed.
+
+    tol : float, 1e-3
+        Convergence tolerance: threshold to consider the system at steady
+        state.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Attributes
+    ----------
+    X_ : ndarray of shape (n_samples, n_features)
+        Input array.
+
+    classes_ : ndarray of shape (n_classes,)
+        The distinct labels used in classifying instances.
+
+    label_distributions_ : ndarray of shape (n_samples, n_classes)
+        Categorical distribution for each item.
+
+    transduction_ : ndarray of shape (n_samples)
+        Label assigned to each item via the transduction.
+
+    n_iter_ : int
+        Number of iterations run.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn import datasets
+    &gt;&gt;&gt; from sklearn.semi_supervised import LabelPropagation
+    &gt;&gt;&gt; label_prop_model = LabelPropagation()
+    &gt;&gt;&gt; iris = datasets.load_iris()
+    &gt;&gt;&gt; rng = np.random.RandomState(42)
+    &gt;&gt;&gt; random_unlabeled_points = rng.rand(len(iris.target)) &lt; 0.3
+    &gt;&gt;&gt; labels = np.copy(iris.target)
+    &gt;&gt;&gt; labels[random_unlabeled_points] = -1
+    &gt;&gt;&gt; label_prop_model.fit(iris.data, labels)
+    LabelPropagation(...)
+
+    References
+    ----------
+    Xiaojin Zhu and Zoubin Ghahramani. Learning from labeled and unlabeled data
+    with label propagation. Technical Report CMU-CALD-02-107, Carnegie Mellon
+    University, 2002 http://pages.cs.wisc.edu/~jerryzhu/pub/CMU-CALD-02-107.pdf
+
+    See Also
+    --------
+    LabelSpreading : Alternate label propagation strategy more robust to noise.
+    """</span>
+
+    <span class="identifier">_variant</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'propagation'</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="string-literal">'rbf'</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="int-literal">20</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">7</span><span class="punctuation">,</span>
+                 <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">1000</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-3</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">kernel</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="identifier">gamma</span><span class="punctuation">,</span>
+                         <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="punctuation">,</span>
+                         <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_build_graph</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Matrix representing a fully connected graph between each sample
+
+        This basic implementation creates a non-stochastic affinity matrix, so
+        class distributions will exceed 1 (normalization may be desired).
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">==</span> <span class="string-literal">'knn'</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">nn_fit</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">affinity_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_</span><span class="grouping">)</span>
+        <span class="identifier">normalizer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">affinity_matrix</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">isspmatrix</span><span class="grouping">(</span><span class="identifier">affinity_matrix</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">affinity_matrix</span><span class="punctuation">.</span><span class="identifier">data</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">normalizer</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">affinity_matrix</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">normalizer</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="keyword">return</span> <span class="identifier">affinity_matrix</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">LabelSpreading</span><span class="grouping">(</span><span class="identifier">BaseLabelPropagation</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""LabelSpreading model for semi-supervised learning
+
+    This model is similar to the basic Label Propagation algorithm,
+    but uses affinity matrix based on the normalized graph Laplacian
+    and soft clamping across the labels.
+
+    Read more in the :ref:`User Guide &lt;label_propagation&gt;`.
+
+    Parameters
+    ----------
+    kernel : {'knn', 'rbf'} or callable, default='rbf'
+        String identifier for kernel function to use or the kernel function
+        itself. Only 'rbf' and 'knn' strings are valid inputs. The function
+        passed should take two inputs, each of shape (n_samples, n_features),
+        and return a (n_samples, n_samples) shaped weight matrix.
+
+    gamma : float, default=20
+      Parameter for rbf kernel.
+
+    n_neighbors : int, default=7
+      Parameter for knn kernel which is a strictly positive integer.
+
+    alpha : float, default=0.2
+      Clamping factor. A value in (0, 1) that specifies the relative amount
+      that an instance should adopt the information from its neighbors as
+      opposed to its initial label.
+      alpha=0 means keeping the initial label information; alpha=1 means
+      replacing all initial information.
+
+    max_iter : int, default=30
+      Maximum number of iterations allowed.
+
+    tol : float, default=1e-3
+      Convergence tolerance: threshold to consider the system at steady
+      state.
+
+    n_jobs : int, default=None
+        The number of parallel jobs to run.
+        ``None`` means 1 unless in a :obj:`joblib.parallel_backend` context.
+        ``-1`` means using all processors. See :term:`Glossary &lt;n_jobs&gt;`
+        for more details.
+
+    Attributes
+    ----------
+    X_ : ndarray of shape (n_samples, n_features)
+        Input array.
+
+    classes_ : ndarray of shape (n_classes,)
+        The distinct labels used in classifying instances.
+
+    label_distributions_ : ndarray of shape (n_samples, n_classes)
+        Categorical distribution for each item.
+
+    transduction_ : ndarray of shape (n_samples,)
+        Label assigned to each item via the transduction.
+
+    n_iter_ : int
+        Number of iterations run.
+
+    Examples
+    --------
+    &gt;&gt;&gt; import numpy as np
+    &gt;&gt;&gt; from sklearn import datasets
+    &gt;&gt;&gt; from sklearn.semi_supervised import LabelSpreading
+    &gt;&gt;&gt; label_prop_model = LabelSpreading()
+    &gt;&gt;&gt; iris = datasets.load_iris()
+    &gt;&gt;&gt; rng = np.random.RandomState(42)
+    &gt;&gt;&gt; random_unlabeled_points = rng.rand(len(iris.target)) &lt; 0.3
+    &gt;&gt;&gt; labels = np.copy(iris.target)
+    &gt;&gt;&gt; labels[random_unlabeled_points] = -1
+    &gt;&gt;&gt; label_prop_model.fit(iris.data, labels)
+    LabelSpreading(...)
+
+    References
+    ----------
+    Dengyong Zhou, Olivier Bousquet, Thomas Navin Lal, Jason Weston,
+    Bernhard Schoelkopf. Learning with local and global consistency (2004)
+    http://citeseer.ist.psu.edu/viewdoc/summary?doi=10.1.1.115.3219
+
+    See Also
+    --------
+    LabelPropagation : Unregularized graph based semi-supervised learning.
+    """</span>
+
+    <span class="identifier">_variant</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'spreading'</span>
+
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="string-literal">'rbf'</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="int-literal">20</span><span class="punctuation">,</span> <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="int-literal">7</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="float-literal">0.2</span><span class="punctuation">,</span>
+                 <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">30</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-3</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+
+        <span class="comment"># this one has different base parameters</span>
+        <span class="identifier">super</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">kernel</span><span class="arithmetic-assignment">=</span><span class="identifier">kernel</span><span class="punctuation">,</span> <span class="identifier">gamma</span><span class="arithmetic-assignment">=</span><span class="identifier">gamma</span><span class="punctuation">,</span>
+                         <span class="identifier">n_neighbors</span><span class="arithmetic-assignment">=</span><span class="identifier">n_neighbors</span><span class="punctuation">,</span> <span class="identifier">alpha</span><span class="arithmetic-assignment">=</span><span class="identifier">alpha</span><span class="punctuation">,</span>
+                         <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">max_iter</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">tol</span><span class="punctuation">,</span> <span class="identifier">n_jobs</span><span class="arithmetic-assignment">=</span><span class="identifier">n_jobs</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_build_graph</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Graph matrix for Label Spreading computes the graph laplacian"""</span>
+        <span class="comment"># compute affinity matrix (or gram matrix)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">kernel</span> <span class="relational-operator">==</span> <span class="string-literal">'knn'</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">nn_fit</span> <span class="arithmetic-assignment">=</span> <span class="none-literal">None</span>
+        <span class="identifier">n_samples</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+        <span class="identifier">affinity_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_get_kernel</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">X_</span><span class="grouping">)</span>
+        <span class="identifier">laplacian</span> <span class="arithmetic-assignment">=</span> <span class="identifier">csgraph</span><span class="punctuation">.</span><span class="identifier">laplacian</span><span class="grouping">(</span><span class="identifier">affinity_matrix</span><span class="punctuation">,</span> <span class="identifier">normed</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+        <span class="identifier">laplacian</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">laplacian</span>
+        <span class="keyword">if</span> <span class="identifier">sparse</span><span class="punctuation">.</span><span class="identifier">isspmatrix</span><span class="grouping">(</span><span class="identifier">laplacian</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">diag_mask</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="identifier">laplacian</span><span class="punctuation">.</span><span class="identifier">row</span> <span class="relational-operator">==</span> <span class="identifier">laplacian</span><span class="punctuation">.</span><span class="identifier">col</span><span class="grouping">)</span>
+            <span class="identifier">laplacian</span><span class="punctuation">.</span><span class="identifier">data</span><span class="grouping">[</span><span class="identifier">diag_mask</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">laplacian</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">0.0</span>  <span class="comment"># set diag to 0.0</span>
+        <span class="keyword">return</span> <span class="identifier">laplacian</span>
+
+    </pre>
+  </body>
+</html>

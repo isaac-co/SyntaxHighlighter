@@ -1,0 +1,423 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""Factor Analysis.
+
+A latent linear variable model.
+
+FactorAnalysis is similar to probabilistic PCA implemented by PCA.score
+While PCA assumes Gaussian noise with the same variance for each
+feature, the FactorAnalysis model assumes different variances for
+each of them.
+
+This implementation is based on David Barber's Book,
+Bayesian Reasoning and Machine Learning,
+http://www.cs.ucl.ac.uk/staff/d.barber/brml,
+Algorithm 21.1
+"""</span>
+
+<span class="comment"># Author: Christian Osendorfer &lt;osendorf@gmail.com&gt;</span>
+<span class="comment">#         Alexandre Gramfort &lt;alexandre.gramfort@inria.fr&gt;</span>
+<span class="comment">#         Denis A. Engemann &lt;denis-alexander.engemann@inria.fr&gt;</span>
+
+<span class="comment"># License: BSD3</span>
+
+<span class="keyword">import</span> <span class="identifier">warnings</span>
+<span class="keyword">from</span> <span class="identifier">math</span> <span class="keyword">import</span> <span class="identifier">sqrt</span><span class="punctuation">,</span> <span class="identifier">log</span>
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+<span class="keyword">from</span> <span class="identifier">scipy</span> <span class="keyword">import</span> <span class="identifier">linalg</span>
+
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">BaseEstimator</span><span class="punctuation">,</span> <span class="identifier">TransformerMixin</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span> <span class="keyword">import</span> <span class="identifier">check_random_state</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">extmath</span> <span class="keyword">import</span> <span class="identifier">fast_logdet</span><span class="punctuation">,</span> <span class="identifier">randomized_svd</span><span class="punctuation">,</span> <span class="identifier">squared_norm</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">validation</span> <span class="keyword">import</span> <span class="identifier">check_is_fitted</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="invalid">e</span><span class="invalid">x</span><span class="invalid">c</span><span class="invalid">e</span><span class="invalid">p</span><span class="invalid">t</span><span class="invalid">i</span><span class="invalid">o</span><span class="invalid">n</span><span class="invalid">s</span> <span class="keyword">import</span> <span class="identifier">ConvergenceWarning</span>
+
+
+<span class="keyword">class</span> <span class="identifier">FactorAnalysis</span><span class="grouping">(</span><span class="identifier">TransformerMixin</span><span class="punctuation">,</span> <span class="identifier">BaseEstimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Factor Analysis (FA).
+
+    A simple linear generative model with Gaussian latent variables.
+
+    The observations are assumed to be caused by a linear transformation of
+    lower dimensional latent factors and added Gaussian noise.
+    Without loss of generality the factors are distributed according to a
+    Gaussian with zero mean and unit covariance. The noise is also zero mean
+    and has an arbitrary diagonal covariance matrix.
+
+    If we would restrict the model further, by assuming that the Gaussian
+    noise is even isotropic (all diagonal entries are the same) we would obtain
+    :class:`PPCA`.
+
+    FactorAnalysis performs a maximum likelihood estimate of the so-called
+    `loading` matrix, the transformation of the latent variables to the
+    observed ones, using SVD based approach.
+
+    Read more in the :ref:`User Guide &lt;FA&gt;`.
+
+    .. versionadded:: 0.13
+
+    Parameters
+    ----------
+    n_components : int, default=None
+        Dimensionality of latent space, the number of components
+        of ``X`` that are obtained after ``transform``.
+        If None, n_components is set to the number of features.
+
+    tol : float, defaul=1e-2
+        Stopping tolerance for log-likelihood increase.
+
+    copy : bool, default=True
+        Whether to make a copy of X. If ``False``, the input X gets overwritten
+        during fitting.
+
+    max_iter : int, default=1000
+        Maximum number of iterations.
+
+    noise_variance_init : ndarray of shape (n_features,), default=None
+        The initial guess of the noise variance for each feature.
+        If None, it defaults to np.ones(n_features).
+
+    svd_method : {'lapack', 'randomized'}, default='randomized'
+        Which SVD method to use. If 'lapack' use standard SVD from
+        scipy.linalg, if 'randomized' use fast ``randomized_svd`` function.
+        Defaults to 'randomized'. For most applications 'randomized' will
+        be sufficiently precise while providing significant speed gains.
+        Accuracy can also be improved by setting higher values for
+        `iterated_power`. If this is not sufficient, for maximum precision
+        you should choose 'lapack'.
+
+    iterated_power : int, default=3
+        Number of iterations for the power method. 3 by default. Only used
+        if ``svd_method`` equals 'randomized'.
+
+    rotation : {'varimax', 'quartimax'}, default=None
+        If not None, apply the indicated rotation. Currently, varimax and
+        quartimax are implemented. See
+        `"The varimax criterion for analytic rotation in factor analysis"
+        &lt;https://link.springer.com/article/10.1007%2FBF02289233&gt;`_
+        H. F. Kaiser, 1958.
+
+        .. versionadded:: 0.24
+
+    random_state : int or RandomState instance, default=0
+        Only used when ``svd_method`` equals 'randomized'. Pass an int for
+        reproducible results across multiple function calls.
+        See :term:`Glossary &lt;random_state&gt;`.
+
+    Attributes
+    ----------
+    components_ : ndarray of shape (n_components, n_features)
+        Components with maximum variance.
+
+    loglike_ : list of shape (n_iterations,)
+        The log likelihood at each iteration.
+
+    noise_variance_ : ndarray of shape (n_features,)
+        The estimated noise variance for each feature.
+
+    n_iter_ : int
+        Number of iterations run.
+
+    mean_ : ndarray of shape (n_features,)
+        Per-feature empirical mean, estimated from the training set.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.datasets import load_digits
+    &gt;&gt;&gt; from sklearn.decomposition import FactorAnalysis
+    &gt;&gt;&gt; X, _ = load_digits(return_X_y=True)
+    &gt;&gt;&gt; transformer = FactorAnalysis(n_components=7, random_state=0)
+    &gt;&gt;&gt; X_transformed = transformer.fit_transform(X)
+    &gt;&gt;&gt; X_transformed.shape
+    (1797, 7)
+
+    References
+    ----------
+    - David Barber, Bayesian Reasoning and Machine Learning,
+      Algorithm 21.1.
+
+    - Christopher M. Bishop: Pattern Recognition and Machine Learning,
+      Chapter 12.2.4.
+
+    See Also
+    --------
+    PCA: Principal component analysis is also a latent linear variable model
+        which however assumes equal noise variance for each feature.
+        This extra assumption makes probabilistic PCA faster as it can be
+        computed in closed form.
+    FastICA: Independent component analysis, a latent variable model with
+        non-Gaussian latent variables.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-2</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                 <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">1000</span><span class="punctuation">,</span>
+                 <span class="identifier">noise_variance_init</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">svd_method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'randomized'</span><span class="punctuation">,</span>
+                 <span class="identifier">iterated_power</span><span class="arithmetic-assignment">=</span><span class="int-literal">3</span><span class="punctuation">,</span> <span class="identifier">rotation</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_components</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span> <span class="arithmetic-assignment">=</span> <span class="identifier">copy</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">tol</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">max_iter</span>
+        <span class="keyword">if</span> <span class="identifier">svd_method</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">'lapack', 'randomized'</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'SVD method %s is not supported. Please consider'</span>
+                             <span class="string-literal">' the documentation'</span> <span class="arithmetic-operator">%</span> <span class="identifier">svd_method</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">svd_method</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_init</span> <span class="arithmetic-assignment">=</span> <span class="identifier">noise_variance_init</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">iterated_power</span> <span class="arithmetic-assignment">=</span> <span class="identifier">iterated_power</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">random_state</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rotation</span> <span class="arithmetic-assignment">=</span> <span class="identifier">rotation</span>
+
+    <span class="keyword">def</span> <span class="identifier">fit</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Fit the FactorAnalysis model to X using SVD based approach
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        y : Ignored
+
+        Returns
+        -------
+        self
+        """</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">copy</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">copy</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">float64</span><span class="grouping">)</span>
+
+        <span class="identifier">n_samples</span><span class="punctuation">,</span> <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span>
+        <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span>
+        <span class="keyword">if</span> <span class="identifier">n_components</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">n_components</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">-=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="comment"># some constant terms</span>
+        <span class="identifier">nsqrt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">n_samples</span><span class="grouping">)</span>
+        <span class="identifier">llconst</span> <span class="arithmetic-assignment">=</span> <span class="identifier">n_features</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">n_components</span>
+        <span class="identifier">var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">var</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_init</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">psi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">ones</span><span class="grouping">(</span><span class="identifier">n_features</span><span class="punctuation">,</span> <span class="identifier">dtype</span><span class="arithmetic-assignment">=</span><span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">dtype</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_init</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+                <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"noise_variance_init dimension does not "</span>
+                                 <span class="string-literal">"with number of features : %d != %d"</span> <span class="arithmetic-operator">%</span>
+                                 <span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_init</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">n_features</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">psi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">array</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_init</span><span class="grouping">)</span>
+
+        <span class="identifier">loglike</span> <span class="arithmetic-assignment">=</span> <span class="grouping">[</span><span class="grouping">]</span>
+        <span class="identifier">old_ll</span> <span class="arithmetic-assignment">=</span> <span class="arithmetic-operator">-</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">inf</span>
+        <span class="identifier">SMALL</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">1e-12</span>
+
+        <span class="comment"># we'll modify svd outputs to return unexplained variance</span>
+        <span class="comment"># to allow for unified computation of loglikelihood</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span> <span class="relational-operator">==</span> <span class="string-literal">'lapack'</span><span class="punctuation">:</span>
+            <span class="keyword">def</span> <span class="identifier">my_svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span>
+                                      <span class="identifier">full_matrices</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                      <span class="identifier">check_finite</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+                <span class="keyword">return</span> <span class="grouping">(</span><span class="identifier">s</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">Vt</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">n_components</span><span class="grouping">]</span><span class="punctuation">,</span>
+                        <span class="identifier">squared_norm</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">[</span><span class="identifier">n_components</span><span class="punctuation">:</span><span class="grouping">]</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span> <span class="relational-operator">==</span> <span class="string-literal">'randomized'</span><span class="punctuation">:</span>
+            <span class="identifier">random_state</span> <span class="arithmetic-assignment">=</span> <span class="identifier">check_random_state</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">random_state</span><span class="grouping">)</span>
+
+            <span class="keyword">def</span> <span class="identifier">my_svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">_</span><span class="punctuation">,</span> <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">Vt</span> <span class="arithmetic-assignment">=</span> <span class="identifier">randomized_svd</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="punctuation">,</span>
+                                          <span class="identifier">random_state</span><span class="arithmetic-assignment">=</span><span class="identifier">random_state</span><span class="punctuation">,</span>
+                                          <span class="identifier">n_iter</span><span class="arithmetic-assignment">=</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">iterated_power</span><span class="grouping">)</span>
+                <span class="keyword">return</span> <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">Vt</span><span class="punctuation">,</span> <span class="identifier">squared_norm</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span> <span class="arithmetic-operator">-</span> <span class="identifier">squared_norm</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'SVD method %s is not supported. Please consider'</span>
+                             <span class="string-literal">' the documentation'</span> <span class="arithmetic-operator">%</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">svd_method</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">i</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="comment"># SMALL helps numerics</span>
+            <span class="identifier">sqrt_psi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">psi</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="identifier">SMALL</span>
+            <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">Vt</span><span class="punctuation">,</span> <span class="identifier">unexp_var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">my_svd</span><span class="grouping">(</span><span class="identifier">X</span> <span class="arithmetic-operator">/</span> <span class="grouping">(</span><span class="identifier">sqrt_psi</span> <span class="arithmetic-operator">*</span> <span class="identifier">nsqrt</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">s</span> <span class="arithmetic-assignment">**=</span> <span class="int-literal">2</span>
+            <span class="comment"># Use 'maximum' here to avoid sqrt problems.</span>
+            <span class="identifier">W</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sqrt</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="identifier">s</span> <span class="arithmetic-operator">-</span> <span class="int-literal">1</span><span class="punctuation">.</span><span class="punctuation">,</span> <span class="int-literal">0</span><span class="punctuation">.</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span> <span class="arithmetic-operator">*</span> <span class="identifier">Vt</span>
+            <span class="keyword">del</span> <span class="identifier">Vt</span>
+            <span class="identifier">W</span> <span class="arithmetic-assignment">*=</span> <span class="identifier">sqrt_psi</span>
+
+            <span class="comment"># loglikelihood</span>
+            <span class="identifier">ll</span> <span class="arithmetic-assignment">=</span> <span class="identifier">llconst</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">ll</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">unexp_var</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">log</span><span class="grouping">(</span><span class="identifier">psi</span><span class="grouping">)</span><span class="grouping">)</span>
+            <span class="identifier">ll</span> <span class="arithmetic-assignment">*=</span> <span class="arithmetic-operator">-</span><span class="identifier">n_samples</span> <span class="arithmetic-operator">/</span> <span class="int-literal">2</span><span class="punctuation">.</span>
+            <span class="identifier">loglike</span><span class="punctuation">.</span><span class="identifier">append</span><span class="grouping">(</span><span class="identifier">ll</span><span class="grouping">)</span>
+            <span class="keyword">if</span> <span class="grouping">(</span><span class="identifier">ll</span> <span class="arithmetic-operator">-</span> <span class="identifier">old_ll</span><span class="grouping">)</span> <span class="relational-operator">&lt;</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">tol</span><span class="punctuation">:</span>
+                <span class="keyword">break</span>
+            <span class="identifier">old_ll</span> <span class="arithmetic-assignment">=</span> <span class="identifier">ll</span>
+
+            <span class="identifier">psi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">maximum</span><span class="grouping">(</span><span class="identifier">var</span> <span class="arithmetic-operator">-</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">W</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="punctuation">,</span> <span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">SMALL</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="identifier">warnings</span><span class="punctuation">.</span><span class="identifier">warn</span><span class="grouping">(</span><span class="string-literal">'FactorAnalysis did not converge.'</span> <span class="arithmetic-operator">+</span>
+                          <span class="string-literal">' You might want'</span> <span class="arithmetic-operator">+</span>
+                          <span class="string-literal">' to increase the number of iterations.'</span><span class="punctuation">,</span>
+                          <span class="identifier">ConvergenceWarning</span><span class="grouping">)</span>
+
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">W</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rotation</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_rotate</span><span class="grouping">(</span><span class="identifier">W</span><span class="grouping">)</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">psi</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">loglike_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">loglike</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_iter_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">i</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span>
+        <span class="keyword">return</span> <span class="identifier">self</span>
+
+    <span class="keyword">def</span> <span class="identifier">transform</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Apply dimensionality reduction to X using the model.
+
+        Compute the expected mean of the latent variables.
+        See Barber, 21.2.33 (or Bishop, 12.66).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+            The latent variables of X.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">Ih</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="identifier">X_transformed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+
+        <span class="identifier">Wpsi</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span>
+        <span class="identifier">cov_z</span> <span class="arithmetic-assignment">=</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">inv</span><span class="grouping">(</span><span class="identifier">Ih</span> <span class="arithmetic-operator">+</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">Wpsi</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">tmp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">X_transformed</span><span class="punctuation">,</span> <span class="identifier">Wpsi</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="identifier">X_transformed</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">tmp</span><span class="punctuation">,</span> <span class="identifier">cov_z</span><span class="grouping">)</span>
+
+        <span class="keyword">return</span> <span class="identifier">X_transformed</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_covariance</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute data covariance with the FactorAnalysis model.
+
+        ``cov = components_.T * components_ + diag(noise_variance)``
+
+        Returns
+        -------
+        cov : ndarray of shape (n_features, n_features)
+            Estimated covariance of data.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">cov</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="grouping">)</span>
+        <span class="identifier">cov</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">cov</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span>  <span class="comment"># modify diag inplace</span>
+        <span class="keyword">return</span> <span class="identifier">cov</span>
+
+    <span class="keyword">def</span> <span class="identifier">get_precision</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute data precision matrix with the FactorAnalysis model.
+
+        Returns
+        -------
+        precision : ndarray of shape (n_features, n_features)
+            Estimated precision of data.
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+
+        <span class="comment"># handle corner cases first</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">diag</span><span class="grouping">(</span><span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span> <span class="relational-operator">==</span> <span class="identifier">n_features</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">inv</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">get_covariance</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="comment"># Get precision using matrix inversion lemma</span>
+        <span class="identifier">components_</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">components_</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">components_</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span><span class="punctuation">,</span> <span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="grouping">)</span>
+        <span class="identifier">precision</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span><span class="punctuation">.</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">components_</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span>
+                           <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">inv</span><span class="grouping">(</span><span class="identifier">precision</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">components_</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">/=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="grouping">]</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">/=</span> <span class="arithmetic-operator">-</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span><span class="grouping">[</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">newaxis</span><span class="punctuation">,</span> <span class="punctuation">:</span><span class="grouping">]</span>
+        <span class="identifier">precision</span><span class="punctuation">.</span><span class="identifier">flat</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">:</span><span class="identifier">len</span><span class="grouping">(</span><span class="identifier">precision</span><span class="grouping">)</span> <span class="arithmetic-operator">+</span> <span class="int-literal">1</span><span class="grouping">]</span> <span class="arithmetic-assignment">+=</span> <span class="int-literal">1</span><span class="punctuation">.</span> <span class="arithmetic-operator">/</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">noise_variance_</span>
+        <span class="keyword">return</span> <span class="identifier">precision</span>
+
+    <span class="keyword">def</span> <span class="identifier">score_samples</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute the log-likelihood of each sample
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            The data
+
+        Returns
+        -------
+        ll : ndarray of shape (n_samples,)
+            Log-likelihood of each sample under the current model
+        """</span>
+        <span class="identifier">check_is_fitted</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span>
+        <span class="identifier">X</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_validate_data</span><span class="grouping">(</span><span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">reset</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+        <span class="identifier">Xr</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span> <span class="arithmetic-operator">-</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">mean_</span>
+        <span class="identifier">precision</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">get_precision</span><span class="grouping">(</span><span class="grouping">)</span>
+        <span class="identifier">n_features</span> <span class="arithmetic-assignment">=</span> <span class="identifier">X</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span>
+        <span class="identifier">log_like</span> <span class="arithmetic-assignment">=</span> <span class="float-literal">-.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">Xr</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">Xr</span><span class="punctuation">,</span> <span class="identifier">precision</span><span class="grouping">)</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">1</span><span class="grouping">)</span>
+        <span class="identifier">log_like</span> <span class="arithmetic-assignment">-=</span> <span class="float-literal">.5</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="identifier">n_features</span> <span class="arithmetic-operator">*</span> <span class="identifier">log</span><span class="grouping">(</span><span class="int-literal">2</span><span class="punctuation">.</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">pi</span><span class="grouping">)</span>
+                          <span class="arithmetic-operator">-</span> <span class="identifier">fast_logdet</span><span class="grouping">(</span><span class="identifier">precision</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">log_like</span>
+
+    <span class="keyword">def</span> <span class="identifier">score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Compute the average log-likelihood of the samples
+
+        Parameters
+        ----------
+        X : ndarray of shape (n_samples, n_features)
+            The data
+
+        y : Ignored
+
+        Returns
+        -------
+        ll : float
+            Average log-likelihood of the samples under the current model
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">mean</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">score_samples</span><span class="grouping">(</span><span class="identifier">X</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_rotate</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">components</span><span class="punctuation">,</span> <span class="identifier">n_components</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-6</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="string-literal">"Rotate the factor analysis solution."</span>
+        <span class="comment"># note that tol is not exposed</span>
+        <span class="identifier">implemented</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"varimax", "quartimax"</span><span class="grouping">)</span>
+        <span class="identifier">method</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">rotation</span>
+        <span class="keyword">if</span> <span class="identifier">method</span> <span class="relational-operator">in</span> <span class="identifier">implemented</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">_ortho_rotation</span><span class="grouping">(</span><span class="identifier">components</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="identifier">method</span><span class="punctuation">,</span>
+                                   <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="identifier">tol</span><span class="grouping">)</span><span class="grouping">[</span><span class="punctuation">:</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">n_components</span><span class="grouping">]</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"'method' must be in %s, not %s"</span>
+                             <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">implemented</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="grouping">)</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_ortho_rotation</span><span class="grouping">(</span><span class="identifier">components</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="arithmetic-assignment">=</span><span class="string-literal">'varimax'</span><span class="punctuation">,</span> <span class="identifier">tol</span><span class="arithmetic-assignment">=</span><span class="float-literal">1e-6</span><span class="punctuation">,</span> <span class="identifier">max_iter</span><span class="arithmetic-assignment">=</span><span class="int-literal">100</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Return rotated components."""</span>
+    <span class="identifier">nrow</span><span class="punctuation">,</span> <span class="identifier">ncol</span> <span class="arithmetic-assignment">=</span> <span class="identifier">components</span><span class="punctuation">.</span><span class="identifier">shape</span>
+    <span class="identifier">rotation_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">eye</span><span class="grouping">(</span><span class="identifier">ncol</span><span class="grouping">)</span>
+    <span class="identifier">var</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+
+    <span class="keyword">for</span> <span class="identifier">_</span> <span class="relational-operator">in</span> <span class="identifier">range</span><span class="grouping">(</span><span class="identifier">max_iter</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">comp_rot</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">components</span><span class="punctuation">,</span> <span class="identifier">rotation_matrix</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">"varimax"</span><span class="punctuation">:</span>
+            <span class="identifier">tmp</span> <span class="arithmetic-assignment">=</span> <span class="identifier">comp_rot</span> <span class="arithmetic-operator">*</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">transpose</span><span class="grouping">(</span><span class="grouping">(</span><span class="identifier">comp_rot</span> <span class="arithmetic-operator">**</span> <span class="int-literal">2</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">axis</span><span class="arithmetic-assignment">=</span><span class="int-literal">0</span><span class="grouping">)</span> <span class="arithmetic-operator">/</span> <span class="identifier">nrow</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">method</span> <span class="relational-operator">==</span> <span class="string-literal">"quartimax"</span><span class="punctuation">:</span>
+            <span class="identifier">tmp</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">0</span>
+        <span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">s</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">linalg</span><span class="punctuation">.</span><span class="identifier">svd</span><span class="grouping">(</span>
+            <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">components</span><span class="punctuation">.</span><span class="identifier">T</span><span class="punctuation">,</span> <span class="identifier">comp_rot</span> <span class="arithmetic-operator">**</span> <span class="int-literal">3</span> <span class="arithmetic-operator">-</span> <span class="identifier">tmp</span><span class="grouping">)</span><span class="grouping">)</span>
+        <span class="identifier">rotation_matrix</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">u</span><span class="punctuation">,</span> <span class="identifier">v</span><span class="grouping">)</span>
+        <span class="identifier">var_new</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">sum</span><span class="grouping">(</span><span class="identifier">s</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">var</span> <span class="relational-operator">!=</span> <span class="int-literal">0</span> <span class="logical-operator">and</span> <span class="identifier">var_new</span> <span class="relational-operator">&lt;</span> <span class="identifier">var</span> <span class="arithmetic-operator">*</span> <span class="grouping">(</span><span class="int-literal">1</span> <span class="arithmetic-operator">+</span> <span class="identifier">tol</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">break</span>
+        <span class="identifier">var</span> <span class="arithmetic-assignment">=</span> <span class="identifier">var_new</span>
+
+    <span class="keyword">return</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">dot</span><span class="grouping">(</span><span class="identifier">components</span><span class="punctuation">,</span> <span class="identifier">rotation_matrix</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+    </pre>
+  </body>
+</html>

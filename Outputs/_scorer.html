@@ -1,0 +1,751 @@
+<html>
+  <head>
+    <title>Python Lexical Highliter</title>
+    <link rel="stylesheet" href="token_colors.css">
+  </head>
+  <body>
+    <pre><span class="comment">"""
+The :mod:`sklearn.metrics.scorer` submodule implements a flexible
+interface for model selection and evaluation using
+arbitrary score functions.
+
+A scorer object is a callable that can be passed to
+:class:`~sklearn.model_selection.GridSearchCV` or
+:func:`sklearn.model_selection.cross_val_score` as the ``scoring``
+parameter, to specify how a model should be evaluated.
+
+The signature of the call is ``(estimator, X, y)`` where ``estimator``
+is the model to be evaluated, ``X`` is the test data and ``y`` is the
+ground truth labeling (or ``None`` in the case of unsupervised models).
+"""</span>
+
+<span class="comment"># Authors: Andreas Mueller &lt;amueller@ais.uni-bonn.de&gt;</span>
+<span class="comment">#          Lars Buitinck</span>
+<span class="comment">#          Arnaud Joly &lt;arnaud.v.joly@gmail.com&gt;</span>
+<span class="comment"># License: Simplified BSD</span>
+
+<span class="keyword">from</span> <span class="identifier">collections</span><span class="punctuation">.</span><span class="identifier">abc</span> <span class="keyword">import</span> <span class="identifier">Iterable</span>
+<span class="keyword">from</span> <span class="identifier">functools</span> <span class="keyword">import</span> <span class="identifier">partial</span>
+<span class="keyword">from</span> <span class="identifier">collections</span> <span class="keyword">import</span> <span class="identifier">Counter</span>
+
+<span class="keyword">import</span> <span class="identifier">numpy</span> <span class="keyword">as</span> <span class="identifier">np</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span> <span class="keyword">import</span> <span class="grouping">(</span><span class="identifier">r2_score</span><span class="punctuation">,</span> <span class="identifier">median_absolute_error</span><span class="punctuation">,</span> <span class="identifier">max_error</span><span class="punctuation">,</span> <span class="identifier">mean_absolute_error</span><span class="punctuation">,</span>
+               <span class="identifier">mean_squared_error</span><span class="punctuation">,</span> <span class="identifier">mean_squared_log_error</span><span class="punctuation">,</span>
+               <span class="identifier">mean_poisson_deviance</span><span class="punctuation">,</span> <span class="identifier">mean_gamma_deviance</span><span class="punctuation">,</span> <span class="identifier">accuracy_score</span><span class="punctuation">,</span>
+               <span class="identifier">top_k_accuracy_score</span><span class="punctuation">,</span> <span class="identifier">f1_score</span><span class="punctuation">,</span> <span class="identifier">roc_auc_score</span><span class="punctuation">,</span>
+               <span class="identifier">average_precision_score</span><span class="punctuation">,</span> <span class="identifier">precision_score</span><span class="punctuation">,</span> <span class="identifier">recall_score</span><span class="punctuation">,</span>
+               <span class="identifier">log_loss</span><span class="punctuation">,</span> <span class="identifier">balanced_accuracy_score</span><span class="punctuation">,</span> <span class="identifier">explained_variance_score</span><span class="punctuation">,</span>
+               <span class="identifier">brier_score_loss</span><span class="punctuation">,</span> <span class="identifier">jaccard_score</span><span class="punctuation">,</span> <span class="identifier">mean_absolute_percentage_error</span><span class="grouping">)</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">adjusted_rand_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">rand_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">homogeneity_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">completeness_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">v_measure_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">mutual_info_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">adjusted_mutual_info_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">normalized_mutual_info_score</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="identifier">cluster</span> <span class="keyword">import</span> <span class="identifier">fowlkes_mallows_score</span>
+
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">utils</span><span class="punctuation">.</span><span class="identifier">multiclass</span> <span class="keyword">import</span> <span class="identifier">type_of_target</span>
+<span class="keyword">from</span> <span class="punctuation">.</span><span class="punctuation">.</span><span class="identifier">base</span> <span class="keyword">import</span> <span class="identifier">is_regressor</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_cached_call</span><span class="grouping">(</span><span class="identifier">cache</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Call estimator with method and args and kwargs."""</span>
+    <span class="keyword">if</span> <span class="identifier">cache</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="grouping">)</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+    <span class="keyword">try</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">method</span><span class="grouping">]</span>
+    <span class="keyword">except</span> <span class="identifier">KeyError</span><span class="punctuation">:</span>
+        <span class="identifier">result</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">method</span><span class="grouping">)</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+        <span class="identifier">cache</span><span class="grouping">[</span><span class="identifier">method</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">result</span>
+        <span class="keyword">return</span> <span class="identifier">result</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_MultimetricScorer</span><span class="punctuation">:</span>
+    <span class="comment">"""Callable for multimetric scoring used to avoid repeated calls
+    to `predict_proba`, `predict`, and `decision_function`.
+
+    `_MultimetricScorer` will return a dictionary of scores corresponding to
+    the scorers in the dictionary. Note that `_MultimetricScorer` can be
+    created with a dictionary with one key  (i.e. only one actual scorer).
+
+    Parameters
+    ----------
+    scorers : dict
+        Dictionary mapping names to callable scorers.
+    """</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">scorers</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scorers</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scorers</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Evaluate predicted target values."""</span>
+        <span class="identifier">scores</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span>
+        <span class="identifier">cache</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="grouping">}</span> <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_use_cache</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span> <span class="keyword">else</span> <span class="none-literal">None</span>
+        <span class="identifier">cached_call</span> <span class="arithmetic-assignment">=</span> <span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">_cached_call</span><span class="punctuation">,</span> <span class="identifier">cache</span><span class="grouping">)</span>
+
+        <span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">scorer</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scorers</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scorer</span><span class="punctuation">,</span> <span class="identifier">_BaseScorer</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scorer</span><span class="punctuation">.</span><span class="identifier">_score</span><span class="grouping">(</span><span class="identifier">cached_call</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span>
+                                      <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+            <span class="keyword">else</span><span class="punctuation">:</span>
+                <span class="identifier">score</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scorer</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+            <span class="identifier">scores</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">score</span>
+        <span class="keyword">return</span> <span class="identifier">scores</span>
+
+    <span class="keyword">def</span> <span class="identifier">_use_cache</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return True if using a cache is beneficial.
+
+        Caching may be beneficial when one of these conditions holds:
+          - `_ProbaScorer` will be called twice.
+          - `_PredictScorer` will be called twice.
+          - `_ThresholdScorer` will be called twice.
+          - `_ThresholdScorer` and `_PredictScorer` are called and
+             estimator is a regressor.
+          - `_ThresholdScorer` and `_ProbaScorer` are called and
+             estimator does not have a `decision_function` attribute.
+
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scorers</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">1</span><span class="punctuation">:</span>  <span class="comment"># Only one scorer</span>
+            <span class="keyword">return</span> <span class="bool-literal">False</span>
+
+        <span class="identifier">counter</span> <span class="arithmetic-assignment">=</span> <span class="identifier">Counter</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">type</span><span class="grouping">(</span><span class="identifier">v</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_scorers</span><span class="punctuation">.</span><span class="identifier">values</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">any</span><span class="grouping">(</span><span class="identifier">counter</span><span class="grouping">[</span><span class="identifier">known_type</span><span class="grouping">]</span> <span class="relational-operator">&gt;</span> <span class="int-literal">1</span> <span class="keyword">for</span> <span class="identifier">known_type</span> <span class="relational-operator">in</span>
+               <span class="grouping">[</span><span class="identifier">_PredictScorer</span><span class="punctuation">,</span> <span class="identifier">_ProbaScorer</span><span class="punctuation">,</span> <span class="identifier">_ThresholdScorer</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="bool-literal">True</span>
+
+        <span class="keyword">if</span> <span class="identifier">counter</span><span class="grouping">[</span><span class="identifier">_ThresholdScorer</span><span class="grouping">]</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="identifier">counter</span><span class="grouping">[</span><span class="identifier">_PredictScorer</span><span class="grouping">]</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="bool-literal">True</span>
+            <span class="keyword">elif</span> <span class="grouping">(</span><span class="identifier">counter</span><span class="grouping">[</span><span class="identifier">_ProbaScorer</span><span class="grouping">]</span> <span class="logical-operator">and</span>
+                  <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">"decision_function"</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">return</span> <span class="bool-literal">True</span>
+        <span class="keyword">return</span> <span class="bool-literal">False</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_BaseScorer</span><span class="punctuation">:</span>
+    <span class="keyword">def</span> <span class="identifier">__init__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">score_func</span><span class="punctuation">,</span> <span class="identifier">sign</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span> <span class="arithmetic-assignment">=</span> <span class="identifier">kwargs</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span> <span class="arithmetic-assignment">=</span> <span class="identifier">score_func</span>
+        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sign</span> <span class="arithmetic-assignment">=</span> <span class="identifier">sign</span>
+
+    <span class="punctuation">@</span><span class="identifier">staticmethod</span>
+    <span class="keyword">def</span> <span class="identifier">_check_pos_label</span><span class="grouping">(</span><span class="identifier">pos_label</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">pos_label</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="identifier">list</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span>
+                <span class="identifier">f</span><span class="string-literal">"pos_label={pos_label} is not a valid label: {classes}"</span>
+            <span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_select_proba_binary</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Select the column of the positive label in `y_pred` when
+        probabilities are provided.
+
+        Parameters
+        ----------
+        y_pred : ndarray of shape (n_samples, n_classes)
+            The prediction given by `predict_proba`.
+
+        classes : ndarray of shape (n_classes,)
+            The class labels for the estimator.
+
+        Returns
+        -------
+        y_pred : ndarray of shape (n_samples,)
+            Probability predictions of the positive class.
+        """</span>
+        <span class="keyword">if</span> <span class="identifier">y_pred</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="identifier">pos_label</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="punctuation">.</span><span class="identifier">get</span><span class="grouping">(</span><span class="string-literal">"pos_label"</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span><span class="grouping">)</span>
+            <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_pos_label</span><span class="grouping">(</span><span class="identifier">pos_label</span><span class="punctuation">,</span> <span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="grouping">)</span>
+            <span class="identifier">col_idx</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">flatnonzero</span><span class="grouping">(</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span> <span class="relational-operator">==</span> <span class="identifier">pos_label</span><span class="grouping">)</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span>
+            <span class="keyword">return</span> <span class="identifier">y_pred</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="identifier">col_idx</span><span class="grouping">]</span>
+
+        <span class="identifier">err_msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+            <span class="identifier">f</span><span class="string-literal">"Got predict_proba of shape {y_pred.shape}, but need "</span>
+            <span class="identifier">f</span><span class="string-literal">"classifier with two classes for {self._score_func.__name__} "</span>
+            <span class="identifier">f</span><span class="string-literal">"scoring"</span>
+        <span class="grouping">)</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">err_msg</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">__repr__</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">kwargs_string</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">"".join([", %s=%s"</span> <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">str</span><span class="grouping">(</span><span class="identifier">k</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">(</span><span class="identifier">v</span><span class="grouping">)</span><span class="grouping">)</span>
+                                 <span class="keyword">for</span> <span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">v</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">]</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="grouping">(</span><span class="string-literal">"make_scorer(%s%s%s%s)"</span>
+                <span class="arithmetic-operator">%</span> <span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span><span class="punctuation">.</span><span class="identifier">__name__</span><span class="punctuation">,</span>
+                   <span class="string-literal">"" if self._sign &gt; 0 else ", greater_is_better=False"</span><span class="punctuation">,</span>
+                   <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_factory_args</span><span class="grouping">(</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">kwargs_string</span><span class="grouping">)</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">__call__</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Evaluate predicted target values for X relative to y_true.
+
+        Parameters
+        ----------
+        estimator : object
+            Trained estimator to use for scoring. Must have a predict_proba
+            method; the output of that is used to compute the score.
+
+        X : {array-like, sparse matrix}
+            Test data that will be fed to estimator.predict.
+
+        y_true : array-like
+            Gold standard target values for X.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        score : float
+            Score function applied to prediction of estimator on X.
+        """</span>
+        <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score</span><span class="grouping">(</span><span class="identifier">partial</span><span class="grouping">(</span><span class="identifier">_cached_call</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span>
+                           <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_factory_args</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Return non-default make_scorer arguments for repr."""</span>
+        <span class="keyword">return</span> <span class="string-literal">""</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_PredictScorer</span><span class="grouping">(</span><span class="identifier">_BaseScorer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">def</span> <span class="identifier">_score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">method_caller</span><span class="punctuation">,</span> <span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Evaluate predicted target values for X relative to y_true.
+
+        Parameters
+        ----------
+        method_caller : callable
+            Returns predictions given an estimator, method name, and other
+            arguments, potentially caching results.
+
+        estimator : object
+            Trained estimator to use for scoring. Must have a `predict`
+            method; the output of that is used to compute the score.
+
+        X : {array-like, sparse matrix}
+            Test data that will be fed to estimator.predict.
+
+        y_true : array-like
+            Gold standard target values for X.
+
+        sample_weight : array-like of shape (n_samples,), default=None
+            Sample weights.
+
+        Returns
+        -------
+        score : float
+            Score function applied to prediction of estimator on X.
+        """</span>
+
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">method_caller</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">"predict"</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sign</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span>
+                                                 <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span>
+                                                 <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sign</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span><span class="grouping">(</span><span class="identifier">y_true</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span>
+                                                 <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_ProbaScorer</span><span class="grouping">(</span><span class="identifier">_BaseScorer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">def</span> <span class="identifier">_score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">method_caller</span><span class="punctuation">,</span> <span class="identifier">clf</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Evaluate predicted probabilities for X relative to y_true.
+
+        Parameters
+        ----------
+        method_caller : callable
+            Returns predictions given an estimator, method name, and other
+            arguments, potentially caching results.
+
+        clf : object
+            Trained classifier to use for scoring. Must have a `predict_proba`
+            method; the output of that is used to compute the score.
+
+        X : {array-like, sparse matrix}
+            Test data that will be fed to clf.predict_proba.
+
+        y : array-like
+            Gold standard target values for X. These must be class labels,
+            not probabilities.
+
+        sample_weight : array-like, default=None
+            Sample weights.
+
+        Returns
+        -------
+        score : float
+            Score function applied to prediction of estimator on X.
+        """</span>
+
+        <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">method_caller</span><span class="grouping">(</span><span class="identifier">clf</span><span class="punctuation">,</span> <span class="string-literal">"predict_proba"</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary"</span> <span class="logical-operator">and</span> <span class="identifier">y_pred</span><span class="punctuation">.</span><span class="identifier">shape</span><span class="grouping">[</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="relational-operator">&lt;=</span> <span class="int-literal">2</span><span class="punctuation">:</span>
+            <span class="comment"># `y_type` could be equal to "binary" even in a multi-class</span>
+            <span class="comment"># problem: (when only 2 class are given to `y_true` during scoring)</span>
+            <span class="comment"># Thus, we need to check for the shape of `y_pred`.</span>
+            <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_select_proba_binary</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">clf</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sign</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span>
+                                                 <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span>
+                                                 <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sign</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_factory_args</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="string-literal">", needs_proba=True"</span>
+
+
+<span class="keyword">class</span> <span class="identifier">_ThresholdScorer</span><span class="grouping">(</span><span class="identifier">_BaseScorer</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="keyword">def</span> <span class="identifier">_score</span><span class="grouping">(</span><span class="identifier">self</span><span class="punctuation">,</span> <span class="identifier">method_caller</span><span class="punctuation">,</span> <span class="identifier">clf</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="punctuation">,</span> <span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment">"""Evaluate decision function output for X relative to y_true.
+
+        Parameters
+        ----------
+        method_caller : callable
+            Returns predictions given an estimator, method name, and other
+            arguments, potentially caching results.
+
+        clf : object
+            Trained classifier to use for scoring. Must have either a
+            decision_function method or a predict_proba method; the output of
+            that is used to compute the score.
+
+        X : {array-like, sparse matrix}
+            Test data that will be fed to clf.decision_function or
+            clf.predict_proba.
+
+        y : array-like
+            Gold standard target values for X. These must be class labels,
+            not decision function values.
+
+        sample_weight : array-like, default=None
+            Sample weights.
+
+        Returns
+        -------
+        score : float
+            Score function applied to prediction of estimator on X.
+        """</span>
+
+        <span class="identifier">y_type</span> <span class="arithmetic-assignment">=</span> <span class="identifier">type_of_target</span><span class="grouping">(</span><span class="identifier">y</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="logical-operator">not</span> <span class="relational-operator">in</span> <span class="grouping">(</span><span class="string-literal">"binary", "multilabel-indicator"</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"{0} format is not supported"</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">y_type</span><span class="grouping">)</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">is_regressor</span><span class="grouping">(</span><span class="identifier">clf</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">method_caller</span><span class="grouping">(</span><span class="identifier">clf</span><span class="punctuation">,</span> <span class="string-literal">"predict"</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">try</span><span class="punctuation">:</span>
+                <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">method_caller</span><span class="grouping">(</span><span class="identifier">clf</span><span class="punctuation">,</span> <span class="string-literal">"decision_function"</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+
+                <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="comment"># For multi-output multi-class estimator</span>
+                    <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">p</span> <span class="keyword">for</span> <span class="identifier">p</span> <span class="relational-operator">in</span> <span class="identifier">y_pred</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+                <span class="keyword">elif</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary" and "pos_label"</span> <span class="relational-operator">in</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="punctuation">:</span>
+                    <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_check_pos_label</span><span class="grouping">(</span>
+                        <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">[</span><span class="string-literal">"pos_label"</span><span class="grouping">]</span><span class="punctuation">,</span> <span class="identifier">clf</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span>
+                    <span class="grouping">)</span>
+                    <span class="keyword">if</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">[</span><span class="string-literal">"pos_label"</span><span class="grouping">]</span> <span class="relational-operator">==</span> <span class="identifier">clf</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">[</span><span class="int-literal">0</span><span class="grouping">]</span><span class="punctuation">:</span>
+                        <span class="comment"># The implicit positive class of the binary classifier</span>
+                        <span class="comment"># does not match `pos_label`: we need to invert the</span>
+                        <span class="comment"># predictions</span>
+                        <span class="identifier">y_pred</span> <span class="arithmetic-assignment">*=</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+
+            <span class="keyword">except</span> <span class="grouping">(</span><span class="identifier">NotImplementedError</span><span class="punctuation">,</span> <span class="identifier">AttributeError</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">method_caller</span><span class="grouping">(</span><span class="identifier">clf</span><span class="punctuation">,</span> <span class="string-literal">"predict_proba"</span><span class="punctuation">,</span> <span class="identifier">X</span><span class="grouping">)</span>
+
+                <span class="keyword">if</span> <span class="identifier">y_type</span> <span class="relational-operator">==</span> <span class="string-literal">"binary"</span><span class="punctuation">:</span>
+                    <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_select_proba_binary</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">clf</span><span class="punctuation">.</span><span class="invalid">c</span><span class="invalid">l</span><span class="invalid">a</span><span class="invalid">s</span><span class="invalid">s</span><span class="invalid">e</span><span class="invalid">s</span><span class="invalid">_</span><span class="grouping">)</span>
+                <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="identifier">list</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="identifier">y_pred</span> <span class="arithmetic-assignment">=</span> <span class="identifier">np</span><span class="punctuation">.</span><span class="identifier">vstack</span><span class="grouping">(</span><span class="grouping">[</span><span class="identifier">p</span><span class="grouping">[</span><span class="punctuation">:</span><span class="punctuation">,</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span><span class="grouping">]</span> <span class="keyword">for</span> <span class="identifier">p</span> <span class="relational-operator">in</span> <span class="identifier">y_pred</span><span class="grouping">]</span><span class="grouping">)</span><span class="punctuation">.</span><span class="identifier">T</span>
+
+        <span class="keyword">if</span> <span class="identifier">sample_weight</span> <span class="relational-operator">is</span> <span class="logical-operator">not</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sign</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span>
+                                                 <span class="identifier">sample_weight</span><span class="arithmetic-assignment">=</span><span class="identifier">sample_weight</span><span class="punctuation">,</span>
+                                                 <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_sign</span> <span class="arithmetic-operator">*</span> <span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_score_func</span><span class="grouping">(</span><span class="identifier">y</span><span class="punctuation">,</span> <span class="identifier">y_pred</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">self</span><span class="punctuation">.</span><span class="identifier">_kwargs</span><span class="grouping">)</span>
+
+    <span class="keyword">def</span> <span class="identifier">_factory_args</span><span class="grouping">(</span><span class="identifier">self</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="string-literal">", needs_threshold=True"</span>
+
+
+<span class="keyword">def</span> <span class="identifier">get_scorer</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Get a scorer from string.
+
+    Read more in the :ref:`User Guide &lt;scoring_parameter&gt;`.
+
+    Parameters
+    ----------
+    scoring : str or callable
+        Scoring method as string. If callable it is returned as is.
+
+    Returns
+    -------
+    scorer : callable
+        The scorer.
+    """</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">SCORERS</span><span class="grouping">[</span><span class="identifier">scoring</span><span class="grouping">]</span>
+        <span class="keyword">except</span> <span class="identifier">KeyError</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'%r is not a valid scoring value. '</span>
+                             <span class="string-literal">'Use sorted(sklearn.metrics.SCORERS.keys()) '</span>
+                             <span class="string-literal">'to get valid options.'</span> <span class="arithmetic-operator">%</span> <span class="identifier">scoring</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">scoring</span>
+    <span class="keyword">return</span> <span class="identifier">scorer</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_passthrough_scorer</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Function that wraps estimator.score"""</span>
+    <span class="keyword">return</span> <span class="identifier">estimator</span><span class="punctuation">.</span><span class="identifier">score</span><span class="grouping">(</span><span class="arithmetic-operator">*</span><span class="identifier">args</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">check_scoring</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">allow_none</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Determine scorer from user options.
+
+    A TypeError will be thrown if the estimator cannot be scored.
+
+    Parameters
+    ----------
+    estimator : estimator object implementing 'fit'
+        The object to use to fit the data.
+
+    scoring : str or callable, default=None
+        A string (see model evaluation documentation) or
+        a scorer callable object / function with signature
+        ``scorer(estimator, X, y)``.
+
+    allow_none : bool, default=False
+        If no scoring is specified and the estimator has no score function, we
+        can either return None or raise an exception.
+
+    Returns
+    -------
+    scoring : callable
+        A scorer callable object / function with signature
+        ``scorer(estimator, X, y)``.
+    """</span>
+    <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">'fit'</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span><span class="string-literal">"estimator should be an estimator implementing "</span>
+                        <span class="string-literal">"'fit' method, %r was passed"</span> <span class="arithmetic-operator">%</span> <span class="identifier">estimator</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">return</span> <span class="identifier">get_scorer</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="comment"># Heuristic to ensure user has not passed a metric</span>
+        <span class="identifier">module</span> <span class="arithmetic-assignment">=</span> <span class="identifier">getattr</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="punctuation">,</span> <span class="string-literal">'__module__'</span><span class="punctuation">,</span> <span class="none-literal">None</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">module</span><span class="punctuation">,</span> <span class="string-literal">'startswith'</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="invalid">\</span>
+           <span class="identifier">module</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">'sklearn.metrics.'</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="invalid">\</span>
+           <span class="logical-operator">not</span> <span class="identifier">module</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">'sklearn.metrics._scorer'</span><span class="grouping">)</span> <span class="logical-operator">and</span> <span class="invalid">\</span>
+           <span class="logical-operator">not</span> <span class="identifier">module</span><span class="punctuation">.</span><span class="identifier">startswith</span><span class="grouping">(</span><span class="string-literal">'sklearn.metrics.tests.'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">'scoring value %r looks like it is a metric '</span>
+                             <span class="string-literal">'function rather than a scorer. A scorer should '</span>
+                             <span class="string-literal">'require an estimator as its first parameter. '</span>
+                             <span class="string-literal">'Please use `make_scorer` to convert a metric '</span>
+                             <span class="string-literal">'to a scorer.'</span> <span class="arithmetic-operator">%</span> <span class="identifier">scoring</span><span class="grouping">)</span>
+        <span class="keyword">return</span> <span class="identifier">get_scorer</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">scoring</span> <span class="relational-operator">is</span> <span class="none-literal">None</span><span class="punctuation">:</span>
+        <span class="keyword">if</span> <span class="identifier">hasattr</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="string-literal">'score'</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="identifier">_passthrough_scorer</span>
+        <span class="keyword">elif</span> <span class="identifier">allow_none</span><span class="punctuation">:</span>
+            <span class="keyword">return</span> <span class="none-literal">None</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">TypeError</span><span class="grouping">(</span>
+                <span class="string-literal">"If no scoring is specified, the estimator passed should "</span>
+                <span class="string-literal">"have a 'score' method. The estimator %r does not."</span>
+                <span class="arithmetic-operator">%</span> <span class="identifier">estimator</span><span class="grouping">)</span>
+    <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="punctuation">,</span> <span class="identifier">Iterable</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"For evaluating multiple scores, use "</span>
+                         <span class="string-literal">"sklearn.model_selection.cross_validate instead. "</span>
+                         <span class="string-literal">"{0} was passed."</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span><span class="grouping">)</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"scoring value should either be a callable, string or"</span>
+                         <span class="string-literal">" None. %r was passed"</span> <span class="arithmetic-operator">%</span> <span class="identifier">scoring</span><span class="grouping">)</span>
+
+
+<span class="keyword">def</span> <span class="identifier">_check_multimetric_scoring</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Check the scoring parameter in cases when multiple metrics are allowed.
+
+    Parameters
+    ----------
+    estimator : sklearn estimator instance
+        The estimator for which the scoring will be applied.
+
+    scoring : list, tuple or dict
+        Strategy to evaluate the performance of the cross-validated model on
+        the test set.
+
+        The possibilities are:
+
+        - a list or tuple of unique strings;
+        - a callable returning a dictionary where they keys are the metric
+          names and the values are the metric scores;
+        - a dictionary with metric names as keys and callables a values.
+
+        See :ref:`multimetric_grid_search` for an example.
+
+    Returns
+    -------
+    scorers_dict : dict
+        A dict mapping each scorer name to its validated scorer.
+    """</span>
+    <span class="identifier">err_msg_generic</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span>
+        <span class="identifier">f</span><span class="string-literal">"scoring is invalid (got {scoring!r}). Refer to the "</span>
+        <span class="string-literal">"scoring glossary for details: "</span>
+        <span class="string-literal">"https://scikit-learn.org/stable/glossary.html#term-scoring"</span><span class="grouping">)</span>
+
+    <span class="keyword">if</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="punctuation">,</span> <span class="grouping">(</span><span class="identifier">list</span><span class="punctuation">,</span> <span class="identifier">tuple</span><span class="punctuation">,</span> <span class="identifier">set</span><span class="grouping">)</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">err_msg</span> <span class="arithmetic-assignment">=</span> <span class="grouping">(</span><span class="string-literal">"The list/tuple elements must be unique "</span>
+                   <span class="string-literal">"strings of predefined scorers. "</span><span class="grouping">)</span>
+        <span class="identifier">invalid</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">False</span>
+        <span class="keyword">try</span><span class="punctuation">:</span>
+            <span class="identifier">keys</span> <span class="arithmetic-assignment">=</span> <span class="identifier">set</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span>
+        <span class="keyword">except</span> <span class="identifier">TypeError</span><span class="punctuation">:</span>
+            <span class="identifier">invalid</span> <span class="arithmetic-assignment">=</span> <span class="bool-literal">True</span>
+        <span class="keyword">if</span> <span class="identifier">invalid</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">err_msg</span><span class="grouping">)</span>
+
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">keys</span><span class="grouping">)</span> <span class="relational-operator">!=</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"{err_msg} Duplicate elements were found in"</span>
+                             <span class="identifier">f</span><span class="string-literal">" the given list. {scoring!r}"</span><span class="grouping">)</span>
+        <span class="keyword">elif</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">keys</span><span class="grouping">)</span> <span class="relational-operator">&gt;</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">all</span><span class="grouping">(</span><span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">keys</span><span class="grouping">)</span><span class="punctuation">:</span>
+                <span class="keyword">if</span> <span class="identifier">any</span><span class="grouping">(</span><span class="identifier">callable</span><span class="grouping">(</span><span class="identifier">k</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">keys</span><span class="grouping">)</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"{err_msg} One or more of the elements "</span>
+                                     <span class="string-literal">"were callables. Use a dict of score "</span>
+                                     <span class="string-literal">"name mapped to the scorer callable. "</span>
+                                     <span class="identifier">f</span><span class="string-literal">"Got {scoring!r}"</span><span class="grouping">)</span>
+                <span class="keyword">else</span><span class="punctuation">:</span>
+                    <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"{err_msg} Non-string types were found "</span>
+                                     <span class="identifier">f</span><span class="string-literal">"in the given list. Got {scoring!r}"</span><span class="grouping">)</span>
+            <span class="identifier">scorers</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">scorer</span><span class="punctuation">:</span> <span class="identifier">check_scoring</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="arithmetic-assignment">=</span><span class="identifier">scorer</span><span class="grouping">)</span>
+                       <span class="keyword">for</span> <span class="identifier">scorer</span> <span class="relational-operator">in</span> <span class="identifier">scoring</span><span class="grouping">}</span>
+        <span class="keyword">else</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"{err_msg} Empty list was given. {scoring!r}"</span><span class="grouping">)</span>
+
+    <span class="keyword">elif</span> <span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="punctuation">,</span> <span class="identifier">dict</span><span class="grouping">)</span><span class="punctuation">:</span>
+        <span class="identifier">keys</span> <span class="arithmetic-assignment">=</span> <span class="identifier">set</span><span class="grouping">(</span><span class="identifier">scoring</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="logical-operator">not</span> <span class="identifier">all</span><span class="grouping">(</span><span class="identifier">isinstance</span><span class="grouping">(</span><span class="identifier">k</span><span class="punctuation">,</span> <span class="identifier">str</span><span class="grouping">)</span> <span class="keyword">for</span> <span class="identifier">k</span> <span class="relational-operator">in</span> <span class="identifier">keys</span><span class="grouping">)</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Non-string types were found in the keys of "</span>
+                             <span class="identifier">f</span><span class="string-literal">"the given dict. scoring={scoring!r}"</span><span class="grouping">)</span>
+        <span class="keyword">if</span> <span class="identifier">len</span><span class="grouping">(</span><span class="identifier">keys</span><span class="grouping">)</span> <span class="relational-operator">==</span> <span class="int-literal">0</span><span class="punctuation">:</span>
+            <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">f</span><span class="string-literal">"An empty dict was passed. {scoring!r}"</span><span class="grouping">)</span>
+        <span class="identifier">scorers</span> <span class="arithmetic-assignment">=</span> <span class="grouping">{</span><span class="identifier">key</span><span class="punctuation">:</span> <span class="identifier">check_scoring</span><span class="grouping">(</span><span class="identifier">estimator</span><span class="punctuation">,</span> <span class="identifier">scoring</span><span class="arithmetic-assignment">=</span><span class="identifier">scorer</span><span class="grouping">)</span>
+                   <span class="keyword">for</span> <span class="identifier">key</span><span class="punctuation">,</span> <span class="identifier">scorer</span> <span class="relational-operator">in</span> <span class="identifier">scoring</span><span class="punctuation">.</span><span class="identifier">items</span><span class="grouping">(</span><span class="grouping">)</span><span class="grouping">}</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="identifier">err_msg_generic</span><span class="grouping">)</span>
+    <span class="keyword">return</span> <span class="identifier">scorers</span>
+
+
+<span class="keyword">def</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">score_func</span><span class="punctuation">,</span> <span class="arithmetic-operator">*</span><span class="punctuation">,</span> <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span> <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                <span class="identifier">needs_threshold</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span> <span class="arithmetic-operator">**</span><span class="identifier">kwargs</span><span class="grouping">)</span><span class="punctuation">:</span>
+    <span class="comment">"""Make a scorer from a performance metric or loss function.
+
+    This factory function wraps scoring functions for use in
+    :class:`~sklearn.model_selection.GridSearchCV` and
+    :func:`~sklearn.model_selection.cross_val_score`.
+    It takes a score function, such as :func:`~sklearn.metrics.accuracy_score`,
+    :func:`~sklearn.metrics.mean_squared_error`,
+    :func:`~sklearn.metrics.adjusted_rand_index` or
+    :func:`~sklearn.metrics.average_precision`
+    and returns a callable that scores an estimator's output.
+    The signature of the call is `(estimator, X, y)` where `estimator`
+    is the model to be evaluated, `X` is the data and `y` is the
+    ground truth labeling (or `None` in the case of unsupervised models).
+
+    Read more in the :ref:`User Guide &lt;scoring&gt;`.
+
+    Parameters
+    ----------
+    score_func : callable
+        Score function (or loss function) with signature
+        ``score_func(y, y_pred, **kwargs)``.
+
+    greater_is_better : bool, default=True
+        Whether score_func is a score function (default), meaning high is good,
+        or a loss function, meaning low is good. In the latter case, the
+        scorer object will sign-flip the outcome of the score_func.
+
+    needs_proba : bool, default=False
+        Whether score_func requires predict_proba to get probability estimates
+        out of a classifier.
+
+        If True, for binary `y_true`, the score function is supposed to accept
+        a 1D `y_pred` (i.e., probability of the positive class, shape
+        `(n_samples,)`).
+
+    needs_threshold : bool, default=False
+        Whether score_func takes a continuous decision certainty.
+        This only works for binary classification using estimators that
+        have either a decision_function or predict_proba method.
+
+        If True, for binary `y_true`, the score function is supposed to accept
+        a 1D `y_pred` (i.e., probability of the positive class or the decision
+        function, shape `(n_samples,)`).
+
+        For example ``average_precision`` or the area under the roc curve
+        can not be computed using discrete predictions alone.
+
+    **kwargs : additional arguments
+        Additional parameters to be passed to score_func.
+
+    Returns
+    -------
+    scorer : callable
+        Callable object that returns a scalar score; greater is better.
+
+    Examples
+    --------
+    &gt;&gt;&gt; from sklearn.metrics import fbeta_score, make_scorer
+    &gt;&gt;&gt; ftwo_scorer = make_scorer(fbeta_score, beta=2)
+    &gt;&gt;&gt; ftwo_scorer
+    make_scorer(fbeta_score, beta=2)
+    &gt;&gt;&gt; from sklearn.model_selection import GridSearchCV
+    &gt;&gt;&gt; from sklearn.svm import LinearSVC
+    &gt;&gt;&gt; grid = GridSearchCV(LinearSVC(), param_grid={'C': [1, 10]},
+    ...                     scoring=ftwo_scorer)
+
+    Notes
+    -----
+    If `needs_proba=False` and `needs_threshold=False`, the score
+    function is supposed to accept the output of :term:`predict`. If
+    `needs_proba=True`, the score function is supposed to accept the
+    output of :term:`predict_proba` (For binary `y_true`, the score function is
+    supposed to accept probability of the positive class). If
+    `needs_threshold=True`, the score function is supposed to accept the
+    output of :term:`decision_function` or :term:`predict_proba` when
+    :term:`decision_function` is not present.
+    """</span>
+    <span class="identifier">sign</span> <span class="arithmetic-assignment">=</span> <span class="int-literal">1</span> <span class="keyword">if</span> <span class="identifier">greater_is_better</span> <span class="keyword">else</span> <span class="arithmetic-operator">-</span><span class="int-literal">1</span>
+    <span class="keyword">if</span> <span class="identifier">needs_proba</span> <span class="logical-operator">and</span> <span class="identifier">needs_threshold</span><span class="punctuation">:</span>
+        <span class="keyword">raise</span> <span class="identifier">ValueError</span><span class="grouping">(</span><span class="string-literal">"Set either needs_proba or needs_threshold to True,"</span>
+                         <span class="string-literal">" but not both."</span><span class="grouping">)</span>
+    <span class="keyword">if</span> <span class="identifier">needs_proba</span><span class="punctuation">:</span>
+        <span class="identifier">cls</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ProbaScorer</span>
+    <span class="keyword">elif</span> <span class="identifier">needs_threshold</span><span class="punctuation">:</span>
+        <span class="identifier">cls</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_ThresholdScorer</span>
+    <span class="keyword">else</span><span class="punctuation">:</span>
+        <span class="identifier">cls</span> <span class="arithmetic-assignment">=</span> <span class="identifier">_PredictScorer</span>
+    <span class="keyword">return</span> <span class="identifier">cls</span><span class="grouping">(</span><span class="identifier">score_func</span><span class="punctuation">,</span> <span class="identifier">sign</span><span class="punctuation">,</span> <span class="identifier">kwargs</span><span class="grouping">)</span>
+
+
+<span class="comment"># Standard regression scores</span>
+<span class="identifier">explained_variance_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">explained_variance_score</span><span class="grouping">)</span>
+<span class="identifier">r2_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">r2_score</span><span class="grouping">)</span>
+<span class="identifier">max_error_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">max_error</span><span class="punctuation">,</span>
+                               <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+<span class="identifier">neg_mean_squared_error_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">mean_squared_error</span><span class="punctuation">,</span>
+                                            <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+<span class="identifier">neg_mean_squared_log_error_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">mean_squared_log_error</span><span class="punctuation">,</span>
+                                                <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+<span class="identifier">neg_mean_absolute_error_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">mean_absolute_error</span><span class="punctuation">,</span>
+                                             <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+<span class="identifier">neg_mean_absolute_percentage_error_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span>
+    <span class="identifier">mean_absolute_percentage_error</span><span class="punctuation">,</span> <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span>
+<span class="grouping">)</span>
+<span class="identifier">neg_median_absolute_error_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">median_absolute_error</span><span class="punctuation">,</span>
+                                               <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+<span class="identifier">neg_root_mean_squared_error_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">mean_squared_error</span><span class="punctuation">,</span>
+                                                 <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                                 <span class="identifier">squared</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="grouping">)</span>
+<span class="identifier">neg_mean_poisson_deviance_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span>
+    <span class="identifier">mean_poisson_deviance</span><span class="punctuation">,</span> <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span>
+<span class="grouping">)</span>
+
+<span class="identifier">neg_mean_gamma_deviance_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span>
+    <span class="identifier">mean_gamma_deviance</span><span class="punctuation">,</span> <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span>
+<span class="grouping">)</span>
+
+<span class="comment"># Standard Classification Scores</span>
+<span class="identifier">accuracy_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">accuracy_score</span><span class="grouping">)</span>
+<span class="identifier">balanced_accuracy_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">balanced_accuracy_score</span><span class="grouping">)</span>
+
+<span class="comment"># Score functions that need decision values</span>
+<span class="identifier">top_k_accuracy_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">top_k_accuracy_score</span><span class="punctuation">,</span>
+                                    <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                    <span class="identifier">needs_threshold</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">roc_auc_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">roc_auc_score</span><span class="punctuation">,</span> <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                             <span class="identifier">needs_threshold</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">average_precision_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">average_precision_score</span><span class="punctuation">,</span>
+                                       <span class="identifier">needs_threshold</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">roc_auc_ovo_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">roc_auc_score</span><span class="punctuation">,</span> <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                 <span class="identifier">multi_class</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ovo'</span><span class="grouping">)</span>
+<span class="identifier">roc_auc_ovo_weighted_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">roc_auc_score</span><span class="punctuation">,</span> <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                          <span class="identifier">multi_class</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ovo'</span><span class="punctuation">,</span>
+                                          <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="string-literal">'weighted'</span><span class="grouping">)</span>
+<span class="identifier">roc_auc_ovr_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">roc_auc_score</span><span class="punctuation">,</span> <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                 <span class="identifier">multi_class</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ovr'</span><span class="grouping">)</span>
+<span class="identifier">roc_auc_ovr_weighted_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">roc_auc_score</span><span class="punctuation">,</span> <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="punctuation">,</span>
+                                          <span class="identifier">multi_class</span><span class="arithmetic-assignment">=</span><span class="string-literal">'ovr'</span><span class="punctuation">,</span>
+                                          <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="string-literal">'weighted'</span><span class="grouping">)</span>
+
+<span class="comment"># Score function for probabilistic classification</span>
+<span class="identifier">neg_log_loss_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">log_loss</span><span class="punctuation">,</span> <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                  <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">neg_brier_score_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">brier_score_loss</span><span class="punctuation">,</span>
+                                     <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                     <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+<span class="identifier">brier_score_loss_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">brier_score_loss</span><span class="punctuation">,</span>
+                                      <span class="identifier">greater_is_better</span><span class="arithmetic-assignment">=</span><span class="bool-literal">False</span><span class="punctuation">,</span>
+                                      <span class="identifier">needs_proba</span><span class="arithmetic-assignment">=</span><span class="bool-literal">True</span><span class="grouping">)</span>
+
+
+<span class="comment"># Clustering scores</span>
+<span class="identifier">adjusted_rand_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">adjusted_rand_score</span><span class="grouping">)</span>
+<span class="identifier">rand_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">rand_score</span><span class="grouping">)</span>
+<span class="identifier">homogeneity_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">homogeneity_score</span><span class="grouping">)</span>
+<span class="identifier">completeness_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">completeness_score</span><span class="grouping">)</span>
+<span class="identifier">v_measure_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">v_measure_score</span><span class="grouping">)</span>
+<span class="identifier">mutual_info_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">mutual_info_score</span><span class="grouping">)</span>
+<span class="identifier">adjusted_mutual_info_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">adjusted_mutual_info_score</span><span class="grouping">)</span>
+<span class="identifier">normalized_mutual_info_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">normalized_mutual_info_score</span><span class="grouping">)</span>
+<span class="identifier">fowlkes_mallows_scorer</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">fowlkes_mallows_score</span><span class="grouping">)</span>
+
+
+<span class="identifier">SCORERS</span> <span class="arithmetic-assignment">=</span> <span class="identifier">dict</span><span class="grouping">(</span><span class="identifier">explained_variance</span><span class="arithmetic-assignment">=</span><span class="identifier">explained_variance_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">r2</span><span class="arithmetic-assignment">=</span><span class="identifier">r2_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">max_error</span><span class="arithmetic-assignment">=</span><span class="identifier">max_error_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_median_absolute_error</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_median_absolute_error_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_mean_absolute_error</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_mean_absolute_error_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_mean_absolute_percentage_error</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_mean_absolute_percentage_error_scorer</span><span class="punctuation">,</span>  <span class="comment"># noqa</span>
+               <span class="identifier">neg_mean_squared_error</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_mean_squared_error_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_mean_squared_log_error</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_mean_squared_log_error_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_root_mean_squared_error</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_root_mean_squared_error_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_mean_poisson_deviance</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_mean_poisson_deviance_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_mean_gamma_deviance</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_mean_gamma_deviance_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">accuracy</span><span class="arithmetic-assignment">=</span><span class="identifier">accuracy_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">top_k_accuracy</span><span class="arithmetic-assignment">=</span><span class="identifier">top_k_accuracy_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">roc_auc</span><span class="arithmetic-assignment">=</span><span class="identifier">roc_auc_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">roc_auc_ovr</span><span class="arithmetic-assignment">=</span><span class="identifier">roc_auc_ovr_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">roc_auc_ovo</span><span class="arithmetic-assignment">=</span><span class="identifier">roc_auc_ovo_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">roc_auc_ovr_weighted</span><span class="arithmetic-assignment">=</span><span class="identifier">roc_auc_ovr_weighted_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">roc_auc_ovo_weighted</span><span class="arithmetic-assignment">=</span><span class="identifier">roc_auc_ovo_weighted_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">balanced_accuracy</span><span class="arithmetic-assignment">=</span><span class="identifier">balanced_accuracy_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">average_precision</span><span class="arithmetic-assignment">=</span><span class="identifier">average_precision_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_log_loss</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_log_loss_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">neg_brier_score</span><span class="arithmetic-assignment">=</span><span class="identifier">neg_brier_score_scorer</span><span class="punctuation">,</span>
+               <span class="comment"># Cluster metrics that use supervised evaluation</span>
+               <span class="identifier">adjusted_rand_score</span><span class="arithmetic-assignment">=</span><span class="identifier">adjusted_rand_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">rand_score</span><span class="arithmetic-assignment">=</span><span class="identifier">rand_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">homogeneity_score</span><span class="arithmetic-assignment">=</span><span class="identifier">homogeneity_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">completeness_score</span><span class="arithmetic-assignment">=</span><span class="identifier">completeness_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">v_measure_score</span><span class="arithmetic-assignment">=</span><span class="identifier">v_measure_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">mutual_info_score</span><span class="arithmetic-assignment">=</span><span class="identifier">mutual_info_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">adjusted_mutual_info_score</span><span class="arithmetic-assignment">=</span><span class="identifier">adjusted_mutual_info_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">normalized_mutual_info_score</span><span class="arithmetic-assignment">=</span><span class="identifier">normalized_mutual_info_scorer</span><span class="punctuation">,</span>
+               <span class="identifier">fowlkes_mallows_score</span><span class="arithmetic-assignment">=</span><span class="identifier">fowlkes_mallows_scorer</span><span class="grouping">)</span>
+
+
+<span class="keyword">for</span> <span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">metric</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="grouping">(</span><span class="string-literal">'precision'</span><span class="punctuation">,</span> <span class="identifier">precision_score</span><span class="grouping">)</span><span class="punctuation">,</span>
+                     <span class="grouping">(</span><span class="string-literal">'recall', recall_score), ('f1'</span><span class="punctuation">,</span> <span class="identifier">f1_score</span><span class="grouping">)</span><span class="punctuation">,</span>
+                     <span class="grouping">(</span><span class="string-literal">'jaccard'</span><span class="punctuation">,</span> <span class="identifier">jaccard_score</span><span class="grouping">)</span><span class="grouping">]</span><span class="punctuation">:</span>
+    <span class="identifier">SCORERS</span><span class="grouping">[</span><span class="identifier">name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="string-literal">'binary'</span><span class="grouping">)</span>
+    <span class="keyword">for</span> <span class="identifier">average</span> <span class="relational-operator">in</span> <span class="grouping">[</span><span class="string-literal">'macro', 'micro', 'samples', 'weighted'</span><span class="grouping">]</span><span class="punctuation">:</span>
+        <span class="identifier">qualified_name</span> <span class="arithmetic-assignment">=</span> <span class="string-literal">'{0}_{1}'</span><span class="punctuation">.</span><span class="invalid">f</span><span class="invalid">o</span><span class="invalid">r</span><span class="invalid">m</span><span class="invalid">a</span><span class="invalid">t</span><span class="grouping">(</span><span class="identifier">name</span><span class="punctuation">,</span> <span class="identifier">average</span><span class="grouping">)</span>
+        <span class="identifier">SCORERS</span><span class="grouping">[</span><span class="identifier">qualified_name</span><span class="grouping">]</span> <span class="arithmetic-assignment">=</span> <span class="identifier">make_scorer</span><span class="grouping">(</span><span class="identifier">metric</span><span class="punctuation">,</span> <span class="identifier">pos_label</span><span class="arithmetic-assignment">=</span><span class="none-literal">None</span><span class="punctuation">,</span>
+                                              <span class="identifier">average</span><span class="arithmetic-assignment">=</span><span class="identifier">average</span><span class="grouping">)</span>
+
+    </pre>
+  </body>
+</html>
